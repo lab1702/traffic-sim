@@ -67,7 +67,7 @@ const (
 	// signalLightOffset is how far back from the stop line each per-approach
 	// signal indicator is drawn, in meters. Far enough to read distinct
 	// colors at zoom, close enough to read as "this is that intersection's".
-	signalLightOffset = 5.0
+	signalLightOffset = 4.0
 )
 
 func NewWorld(net *network.Network, spawner Spawner, overrides map[network.IntersectionID]SignalConfig) *World {

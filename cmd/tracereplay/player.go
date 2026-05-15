@@ -16,7 +16,7 @@ import (
 // signalLightOffset mirrors the constant in internal/sim/world.go: each
 // per-approach signal indicator is drawn this many meters back from the
 // stop line so individual approach colors are legible.
-const signalLightOffset = 5.0
+const signalLightOffset = 4.0
 
 // player advances trace events at real wall-clock speed (1x), reconstructing
 // vehicle positions by simple kinematic extrapolation between events.
