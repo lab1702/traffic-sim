@@ -413,11 +413,11 @@ func (v *Viewport) Draw(screen *ebiten.Image) {
 
 	viewWidthM := float64(v.Width) / v.zoom
 	viewHeightM := float64(v.Height) / v.zoom
-	DrawHUD(screen, snap.SimTime, len(snap.Vehicles), viewWidthM, viewHeightM)
+	stats := computeSpeedStats(snap.Vehicles)
+	DrawHUD(screen, snap.SimTime, len(snap.Vehicles), viewWidthM, viewHeightM, stats)
 	if v.hasSelection {
-		// HUD draws three lines starting at y=8; selection panel starts
-		// just below with a small gap.
-		DrawSelectionPanel(screen, v.Net, snap, v.selectedID, 8+3*hudLineHeight+8)
+		// HUD lines start at y=8; selection panel starts just below them.
+		DrawSelectionPanel(screen, v.Net, snap, v.selectedID, 8+hudLineCount*hudLineHeight+8)
 	}
 }
 

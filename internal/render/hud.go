@@ -2,6 +2,7 @@ package render
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
@@ -14,16 +15,59 @@ import (
 // ebitenutil.DebugPrintAt (its built-in font is roughly 16 px tall).
 const hudLineHeight = 16
 
+// hudLineCount is the number of lines DrawHUD renders, used by callers to
+// offset content drawn below the HUD.
+const hudLineCount = 4
+
+// speedStats is a min/max/mean/median summary of vehicle speeds.
+type speedStats struct {
+	min, max, mean, median float64
+	n                      int
+}
+
+// computeSpeedStats summarizes the speed distribution of `vehicles`. For
+// an empty input every field is zero. Sort cost is O(N log N) per frame;
+// fine for typical N <= a few thousand.
+func computeSpeedStats(vehicles []snapshot.VehicleView) speedStats {
+	if len(vehicles) == 0 {
+		return speedStats{}
+	}
+	speeds := make([]float64, len(vehicles))
+	var sum float64
+	for i, v := range vehicles {
+		speeds[i] = v.Speed
+		sum += v.Speed
+	}
+	sort.Float64s(speeds)
+	s := speedStats{
+		min:  speeds[0],
+		max:  speeds[len(speeds)-1],
+		mean: sum / float64(len(speeds)),
+		n:    len(speeds),
+	}
+	mid := len(speeds) / 2
+	if len(speeds)%2 == 1 {
+		s.median = speeds[mid]
+	} else {
+		s.median = (speeds[mid-1] + speeds[mid]) / 2
+	}
+	return s
+}
+
 // DrawHUD renders text overlay (sim time, vehicle count, FPS, view size
-// in world meters). viewWidthM/viewHeightM are window dimensions divided
-// by the current zoom and indicate how many meters of world are visible.
-func DrawHUD(screen *ebiten.Image, simTime float64, vehicleCount int, viewWidthM, viewHeightM float64) {
+// in world meters, vehicle speed stats). viewWidthM/viewHeightM are
+// window dimensions divided by the current zoom and indicate how many
+// meters of world are visible.
+func DrawHUD(screen *ebiten.Image, simTime float64, vehicleCount int, viewWidthM, viewHeightM float64, stats speedStats) {
 	line1 := fmt.Sprintf("sim t=%.1fs  vehicles=%d", simTime, vehicleCount)
 	line2 := fmt.Sprintf("FPS=%.1f  TPS=%.1f", ebiten.ActualFPS(), ebiten.ActualTPS())
 	line3 := fmt.Sprintf("view: %.0f m wide x %.0f m tall", viewWidthM, viewHeightM)
+	line4 := fmt.Sprintf("speed (m/s): min=%.1f  max=%.1f  mean=%.1f  median=%.1f",
+		stats.min, stats.max, stats.mean, stats.median)
 	ebitenutil.DebugPrintAt(screen, line1, 8, 8)
 	ebitenutil.DebugPrintAt(screen, line2, 8, 8+hudLineHeight)
 	ebitenutil.DebugPrintAt(screen, line3, 8, 8+2*hudLineHeight)
+	ebitenutil.DebugPrintAt(screen, line4, 8, 8+3*hudLineHeight)
 }
 
 // DrawSelectionPanel renders an info block for the currently selected
