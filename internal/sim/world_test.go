@@ -934,3 +934,84 @@ func TestWorld_YieldSign_NoMandatoryStop(t *testing.T) {
 		t.Errorf("yield vehicle should have advanced to outbound edge, still on edge %d", v.Edge)
 	}
 }
+
+// TestWorld_StopSign_GapAcceptance: Stop-controlled vehicle + priority
+// cross-traffic with short ETA. Must stop, dwell, then continue to wait
+// for the gap to clear.
+func TestWorld_StopSign_GapAcceptance(t *testing.T) {
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: -100, Y: 0}},  // W priority origin
+		{ID: 1, Pos: network.Point{X: 0, Y: -100}},  // S stop origin
+		{ID: 2, Pos: network.Point{X: 0, Y: 0}},     // center
+		{ID: 3, Pos: network.Point{X: 100, Y: 0}},   // E priority destination
+		{ID: 4, Pos: network.Point{X: 0, Y: 100}},   // N stop destination
+	}
+	mkEdge := func(id, from, to int) network.Edge {
+		return network.Edge{
+			ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: 100, SpeedLimit: 10,
+			Lanes:    []network.Lane{{Index: 0}},
+			Geometry: []network.Point{nodes[from].Pos, nodes[to].Pos},
+		}
+	}
+	edges := []network.Edge{
+		mkEdge(0, 0, 2), // priority approach W->C
+		mkEdge(1, 1, 2), // stop approach S->C
+		mkEdge(2, 2, 3), // priority outbound C->E
+		mkEdge(3, 2, 4), // stop outbound C->N
+	}
+	xs := []network.Intersection{
+		{
+			ID: 0, NodeID: 2,
+			Incoming: []network.EdgeID{0, 1},
+			IncomingControl: ctrls(
+				network.ControlNone, // priority
+				network.ControlStop, // stop
+			),
+			Outgoing:  []network.EdgeID{2, 3},
+			HasSignal: false,
+		},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	// Priority vehicle pinned close to the line at low speed (ETA inside
+	// gapThresholdSec). Stop vehicle approaching its line (starts at S=85
+	// so it only has 15m to decelerate, ensuring it hits the stop by tick 20).
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0, 2}, Edge: 0, S: 99, V: 0.5},
+		{ID: 2, Route: []network.EdgeID{1, 3}, Edge: 1, S: 85, V: 8},
+	}
+	w.nextID = 3
+
+	for i := 0; i < 200; i++ {
+		// Re-pin the priority vehicle so the stop-controlled vehicle
+		// keeps seeing it as imminent cross-traffic.
+		for j := range w.Vehicles {
+			if w.Vehicles[j].ID == 1 && !w.Vehicles[j].Despawned {
+				w.Vehicles[j].S = 99
+				w.Vehicles[j].V = 0.5
+			}
+		}
+		w.Step()
+	}
+
+	var stop *Vehicle
+	for j := range w.Vehicles {
+		if w.Vehicles[j].ID == 2 {
+			stop = &w.Vehicles[j]
+		}
+	}
+	if stop == nil || stop.Despawned {
+		t.Fatal("stop-controlled vehicle should not be despawned during a legitimate stop+yield")
+	}
+	if stop.Edge != 1 {
+		t.Errorf("stop vehicle should still be on approach edge 1, got edge %d", stop.Edge)
+	}
+	if stop.StoppedSinceSec == 0 {
+		t.Error("stop vehicle should have registered a mandatory stop")
+	}
+	if stop.StuckTime != 0 {
+		t.Errorf("stop vehicle is legitimately waiting; StuckTime must be 0, got %.3f", stop.StuckTime)
+	}
+}
