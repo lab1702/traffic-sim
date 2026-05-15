@@ -31,10 +31,6 @@ func (r *Router) Route(src, dst network.NodeID) ([]network.EdgeID, error) {
 	if src == dst {
 		return nil, nil
 	}
-	type item struct {
-		node network.NodeID
-		f    float64 // estimated total cost
-	}
 	gScore := make(map[network.NodeID]float64)
 	cameFromEdge := make(map[network.NodeID]network.EdgeID)
 	cameFromNode := make(map[network.NodeID]network.NodeID)

@@ -43,16 +43,28 @@ func TestWorld_VehiclesSpawnMoveDespawn(t *testing.T) {
 	spawner := NewRandomOD(net, 7, 5.0) // 5 vehicles/sec
 	w := NewWorld(net, spawner)
 
-	w.Run(10.0) // 10 simulated seconds
+	w.Run(11.0) // 11 simulated seconds (100m edges at 10 m/s = 10s/edge; 11s lets the first spawned vehicles finish)
 
 	if w.Tick == 0 {
 		t.Fatalf("no ticks ran")
 	}
 	// Some vehicles should have completed and despawned by now. With a
-	// 100m block at 10 m/s, a 2-edge trip is 20s — most won't be done yet.
-	// What we *can* assert: spawn was attempted multiple times.
+	// 100m block at 10 m/s, a single-edge trip is 10s — vehicles spawned in
+	// the first second should have finished by 11s.
 	if w.nextID == 0 {
-		t.Errorf("expected some spawns over 10s @ 5/s, got 0")
+		t.Errorf("expected some spawns over 11s @ 5/s, got 0")
+	}
+
+	// Some vehicles should have despawned (compact() actually fires).
+	// nextID is total spawned ever; len(Vehicles) is alive count. Their
+	// difference is the number that completed and were compacted out.
+	spawned := uint32(w.nextID)
+	alive := uint32(len(w.Vehicles))
+	if spawned == 0 {
+		t.Fatalf("no vehicles spawned")
+	}
+	if spawned <= alive {
+		t.Errorf("expected some despawns over 11s, spawned=%d alive=%d", spawned, alive)
 	}
 }
 

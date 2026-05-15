@@ -3,8 +3,6 @@ package sim
 import (
 	"reflect"
 	"testing"
-
-	"github.com/lab1702/traffic-sim/internal/network"
 )
 
 func TestRandomOD_DeterministicForSeed(t *testing.T) {
@@ -22,6 +20,4 @@ func TestRandomOD_DeterministicForSeed(t *testing.T) {
 	if len(r1) == 0 {
 		t.Errorf("expected at least one spawn request over 1s @ 5/s")
 	}
-	// Suppress unused warning if buildLineGraph happens to grow imports.
-	_ = network.NodeID(0)
 }

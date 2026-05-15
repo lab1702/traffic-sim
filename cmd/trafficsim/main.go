@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"time"
 
 	"github.com/lab1702/traffic-sim/internal/netbuild"
 	"github.com/lab1702/traffic-sim/internal/network"
@@ -82,6 +81,15 @@ func runRun(args []string) {
 	}
 	path := fs.Arg(0)
 
+	if !*headless {
+		fmt.Fprintln(os.Stderr, "warning: rendering not implemented yet; pass --headless")
+		os.Exit(2)
+	}
+	if *duration == 0 {
+		fmt.Fprintln(os.Stderr, "error: --headless requires --duration > 0")
+		os.Exit(2)
+	}
+
 	feat, err := osmload.Load(path)
 	if err != nil {
 		slog.Error("load failed", "err", err)
@@ -96,18 +104,9 @@ func runRun(args []string) {
 	spawner := sim.NewRandomOD(net, *seed, *spawnRate)
 	w := sim.NewWorld(net, spawner)
 
-	if !*headless {
-		fmt.Fprintln(os.Stderr, "warning: rendering not implemented yet; pass --headless")
-		os.Exit(2)
-	}
-	if *duration == 0 {
-		fmt.Fprintln(os.Stderr, "error: --headless requires --duration > 0")
-		os.Exit(2)
-	}
 	w.Run(duration.Seconds())
 	fmt.Printf("done. final_vehicles=%d ticks=%d sim_time=%.2fs\n",
 		len(w.Vehicles), w.Tick, w.SimTime)
-	_ = time.Now() // keep time import live if unused
 }
 
 func countSignals(xs []network.Intersection) int {
