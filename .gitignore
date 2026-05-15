@@ -1,0 +1,23 @@
+# Go build artifacts
+*.exe
+*.test
+*.out
+/bin/
+/dist/
+
+# Go test/coverage
+coverage.out
+*.prof
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local sim outputs
+*.trace
+/traces/
