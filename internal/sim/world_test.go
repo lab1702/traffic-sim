@@ -736,6 +736,10 @@ func TestWorld_StuckAtYieldNotDespawned(t *testing.T) {
 			ID:        0,
 			NodeID:    2,
 			Incoming:  []network.EdgeID{0, 1}, // 0 = priority, 1 = yield
+			IncomingControl: ctrls(
+				network.ControlNone,  // priority approach
+				network.ControlYield, // yield approach
+			),
 			Outgoing:  []network.EdgeID{2},
 			HasSignal: false,
 		},
@@ -781,5 +785,124 @@ func TestWorld_StuckAtYieldNotDespawned(t *testing.T) {
 	}
 	if yielder.StuckTime != 0 {
 		t.Errorf("StuckTime should be 0 for a vehicle legitimately yielding, got %.3f", yielder.StuckTime)
+	}
+}
+
+// TestWorld_StopSign_MandatoryDwell: a Stop-controlled vehicle with no
+// cross-traffic must come to v ~ 0 at the stop line and dwell for at
+// least stopDwellSec before being allowed to depart.
+func TestWorld_StopSign_MandatoryDwell(t *testing.T) {
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: -100, Y: 0}},
+		{ID: 1, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 2, Pos: network.Point{X: 100, Y: 0}},
+	}
+	mkEdge := func(id, from, to int) network.Edge {
+		return network.Edge{
+			ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: 100, SpeedLimit: 10,
+			Lanes:    []network.Lane{{Index: 0}},
+			Geometry: []network.Point{nodes[from].Pos, nodes[to].Pos},
+		}
+	}
+	edges := []network.Edge{
+		mkEdge(0, 0, 1), // approach
+		mkEdge(1, 1, 2), // outbound
+	}
+	xs := []network.Intersection{
+		{
+			ID: 0, NodeID: 1,
+			Incoming:        []network.EdgeID{0},
+			IncomingControl: ctrls(network.ControlStop),
+			Outgoing:        []network.EdgeID{1},
+			HasSignal:       false,
+		},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0, 1}, Edge: 0, S: 80, V: 8},
+	}
+	w.nextID = 2
+
+	// Run enough ticks for the vehicle to approach, stop, dwell, and
+	// proceed. dt=0.05 (20 Hz), so 200 ticks = 10s of sim time.
+	stoppedAt := -1.0
+	for i := 0; i < 200; i++ {
+		w.Step()
+		v := &w.Vehicles[0]
+		if v.Despawned {
+			break
+		}
+		if stoppedAt < 0 && v.StoppedSinceSec > 0 {
+			stoppedAt = w.SimTime
+		}
+	}
+
+	if stoppedAt < 0 {
+		t.Fatal("vehicle never registered a mandatory stop at the stop line")
+	}
+	// After stopping, the vehicle must dwell at least stopDwellSec before
+	// it gets to depart. Cleared StoppedSinceSec means it crossed the
+	// intersection.
+	v := &w.Vehicles[0]
+	if v.Edge != 1 {
+		t.Errorf("vehicle should have advanced to outbound edge after dwell, still on edge %d", v.Edge)
+	}
+}
+
+// TestWorld_YieldSign_NoMandatoryStop: a Yield-controlled vehicle with no
+// cross-traffic must NOT come to a complete stop — it slow-rolls through.
+func TestWorld_YieldSign_NoMandatoryStop(t *testing.T) {
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: -100, Y: 0}},
+		{ID: 1, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 2, Pos: network.Point{X: 100, Y: 0}},
+	}
+	mkEdge := func(id, from, to int) network.Edge {
+		return network.Edge{
+			ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: 100, SpeedLimit: 10,
+			Lanes:    []network.Lane{{Index: 0}},
+			Geometry: []network.Point{nodes[from].Pos, nodes[to].Pos},
+		}
+	}
+	edges := []network.Edge{
+		mkEdge(0, 0, 1),
+		mkEdge(1, 1, 2),
+	}
+	xs := []network.Intersection{
+		{
+			ID: 0, NodeID: 1,
+			Incoming:        []network.EdgeID{0},
+			IncomingControl: ctrls(network.ControlYield),
+			Outgoing:        []network.EdgeID{1},
+			HasSignal:       false,
+		},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0, 1}, Edge: 0, S: 50, V: 8},
+	}
+	w.nextID = 2
+
+	// 150 ticks = 7.5s: ample time for the vehicle (S=50, V=8, SpeedLimit=10)
+	// to free-cruise ~50m to the edge end and transition to edge 1.
+	for i := 0; i < 150; i++ {
+		w.Step()
+		if w.Vehicles[0].Despawned {
+			break
+		}
+	}
+
+	v := &w.Vehicles[0]
+	if v.StoppedSinceSec != 0 {
+		t.Errorf("yield vehicle with no cross-traffic should not record a mandatory stop, got StoppedSinceSec=%.3f", v.StoppedSinceSec)
+	}
+	if v.Edge != 1 {
+		t.Errorf("yield vehicle should have advanced to outbound edge, still on edge %d", v.Edge)
 	}
 }

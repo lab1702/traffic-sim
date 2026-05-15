@@ -212,9 +212,14 @@ const gapThresholdSec = 3.0
 
 const (
 	// stuckSpeedThresh is the speed (m/s) below which a vehicle is
-	// considered "not moving" for the purposes of the stuck-despawn guard
-	// and the mandatory-stop dwell at Stop/AllWayStop approaches.
+	// considered "not moving" for the purposes of the stuck-despawn guard.
 	stuckSpeedThresh = 0.1
+	// stopLineSpeedThresh is the speed (m/s) below which a vehicle near
+	// the stop line of a Stop/AllWayStop approach is considered to have
+	// arrived and begun its mandatory dwell. IDM's asymptotic approach
+	// means the vehicle may creep at ~0.5 m/s indefinitely; 1.0 m/s
+	// captures the "effectively stopped at the line" state in practice.
+	stopLineSpeedThresh = 1.0
 	// stuckTimeoutSec is the accumulated sim-seconds of below-threshold
 	// motion (with no legitimate red/yield reason) that triggers despawn.
 	stuckTimeoutSec = 60.0
@@ -224,23 +229,29 @@ const (
 	stopDwellSec = 0.5
 	// stopLineTolMeters is the maximum distance from the stop line at
 	// which a slow-moving vehicle (V < stuckSpeedThresh) is considered
-	// to have arrived at the line. Beyond this, the vehicle is "slow
-	// upstream" but not yet stopped.
-	stopLineTolMeters = 2.0
+	// to have arrived at the line. IDM's equilibrium gap at v≈0 is
+	// S0 (2m) plus the vehicle length (5m), so the front bumper rests
+	// about 7m from the end of the edge; 8m gives a 1m margin.
+	stopLineTolMeters = 8.0
 )
 
 // stopDistanceForYield returns (distance to stop line, true) when the
-// vehicle's current edge ends at an intersection where it must yield via
-// gap-acceptance. Covers three cases:
+// vehicle's current edge ends at an intersection where it must wait
+// before crossing. Dispatches on the effective Control for this approach:
 //
-//  1. Unsignalized intersection — yield to lower-indexed approaches
-//     (Incoming[0] is the priority road).
-//  2. Signal in flash mode (A or B) — blinking-red approaches must
-//     yield to blinking-yellow approaches (which have priority).
-//  3. Signal in off mode — every approach must yield to lower-indexed
-//     approaches (approximates a 4-way stop; position 0 has priority).
+//   - ControlNone:        no obligation; returns (0, false).
+//   - ControlYield:       gap-acceptance against ControlNone approaches.
+//   - ControlStop:        mandatory dwell, then gap-acceptance.
+//   - ControlAllWayStop:  mandatory dwell, then FIFO arbitration.
 //
-// Returns (0, false) when no yield is required.
+// For signaled intersections, effective control is derived from the
+// signal mode: ModeNormal returns immediately (stopDistanceForRed owns
+// the hard-stop case); ModeOff/Flash treat each approach as
+// AllWayStop/Stop/None as appropriate.
+//
+// As a side effect, sets v.StoppedSinceSec when v first reaches v ~ 0
+// near the stop line of a Stop/AllWayStop approach. v.StoppedSinceSec
+// is cleared elsewhere (in stepIDM, on edge transition).
 func (w *World) stopDistanceForYield(v *Vehicle, byEdge map[network.EdgeID][]int) (float64, bool) {
 	edge := &w.Net.Edges[v.Edge]
 	x, ok := w.xByNodeID[edge.To]
@@ -252,55 +263,108 @@ func (w *World) stopDistanceForYield(v *Vehicle, byEdge map[network.EdgeID][]int
 		return 0, false
 	}
 
-	// Determine which incoming positions have priority over `myPos`.
-	var priority []int
+	effective := effectiveControl(w, x, myPos)
+	myDist := edge.Length - v.S
+	if myDist < 0 {
+		myDist = 0
+	}
+
+	switch effective {
+	case network.ControlNone:
+		return 0, false
+
+	case network.ControlYield:
+		return w.yieldGapCheck(v, x, myPos, myDist, byEdge)
+
+	case network.ControlStop:
+		if !w.hasDwelled(v) {
+			w.maybeMarkStopped(v, myDist)
+			return myDist, true
+		}
+		return w.yieldGapCheck(v, x, myPos, myDist, byEdge)
+
+	case network.ControlAllWayStop:
+		// FIFO arbitration arrives in Task 8. For now, hold at the line
+		// after dwell so that AllWayStop approaches are at least safe.
+		if !w.hasDwelled(v) {
+			w.maybeMarkStopped(v, myDist)
+			return myDist, true
+		}
+		return w.allWayStopFIFO(v, x, myPos, myDist, byEdge)
+	}
+	return 0, false
+}
+
+// effectiveControl resolves the right-of-way rule for one approach at
+// one decision tick. Signal mode overrides the stored IncomingControl.
+func effectiveControl(w *World, x *network.Intersection, myPos int) network.Control {
 	if x.HasSignal {
 		st := w.SignalStates[x.ID]
 		if st == nil {
-			return 0, false
+			return network.ControlNone
 		}
 		switch st.Mode {
 		case ModeNormal:
-			// Hard-stop handled by stopDistanceForRed; no yield path here.
-			return 0, false
-		case ModeFlashA, ModeFlashB:
-			if !st.MustYield(myPos) {
-				return 0, false // we're blinking yellow; we have priority
-			}
-			for j := range x.Incoming {
-				if st.GreenFor(j) { // blinking-yellow approach has priority
-					priority = append(priority, j)
-				}
-			}
+			return network.ControlNone // stopDistanceForRed owns this case
 		case ModeOff:
-			// 4-way-stop approximation: lower-indexed approach has priority.
-			for j := 0; j < myPos; j++ {
-				priority = append(priority, j)
+			return network.ControlAllWayStop
+		case ModeFlashA, ModeFlashB:
+			if st.GreenFor(myPos) {
+				return network.ControlNone // blinking yellow has priority
 			}
+			return network.ControlStop // blinking red is a stop sign
 		}
-	} else {
-		// Unsignalized: lower-indexed approach has priority.
-		if myPos == 0 {
-			return 0, false
-		}
-		for j := 0; j < myPos; j++ {
-			priority = append(priority, j)
-		}
+		return network.ControlNone
 	}
-
-	if len(priority) == 0 {
-		return 0, false
+	if myPos < len(x.IncomingControl) {
+		return x.IncomingControl[myPos]
 	}
+	return network.ControlNone
+}
 
-	myDist := edge.Length - v.S
-	for _, otherPos := range priority {
-		otherEdgeID := x.Incoming[otherPos]
-		others := byEdge[otherEdgeID]
+// hasDwelled returns true once the vehicle has completed its mandatory-stop
+// dwell at the stop line. False both before reaching the line and during
+// the dwell window.
+func (w *World) hasDwelled(v *Vehicle) bool {
+	if v.StoppedSinceSec == 0 {
+		return false
+	}
+	return w.SimTime-v.StoppedSinceSec >= stopDwellSec
+}
+
+// maybeMarkStopped sets v.StoppedSinceSec the first tick the vehicle is
+// effectively at the stop line (slow AND within tolerance). Idempotent
+// once set. Uses stopLineSpeedThresh (not stuckSpeedThresh) because IDM
+// asymptotically approaches the stop line and may never drop below 0.1
+// m/s in a finite number of ticks; 1.0 m/s captures the arrival state.
+func (w *World) maybeMarkStopped(v *Vehicle, myDist float64) {
+	if v.StoppedSinceSec != 0 {
+		return
+	}
+	if v.V < stopLineSpeedThresh && myDist < stopLineTolMeters {
+		v.StoppedSinceSec = w.SimTime
+	}
+}
+
+// yieldGapCheck does ETA-based gap-acceptance against every approach at x
+// whose effective control is ControlNone (i.e., the priority approaches).
+// Returns (myDist, true) when we must yield; (0, false) when the gap is
+// clear.
+func (w *World) yieldGapCheck(v *Vehicle, x *network.Intersection, myPos int,
+	myDist float64, byEdge map[network.EdgeID][]int,
+) (float64, bool) {
+	for j := range x.Incoming {
+		if j == myPos {
+			continue
+		}
+		if effectiveControl(w, x, j) != network.ControlNone {
+			continue
+		}
+		others := byEdge[x.Incoming[j]]
 		if len(others) == 0 {
 			continue
 		}
-		otherEdge := &w.Net.Edges[otherEdgeID]
-		bestETA := 1e9
+		otherEdge := &w.Net.Edges[x.Incoming[j]]
 		for _, oi := range others {
 			ov := &w.Vehicles[oi]
 			d := otherEdge.Length - ov.S
@@ -308,16 +372,20 @@ func (w *World) stopDistanceForYield(v *Vehicle, byEdge map[network.EdgeID][]int
 			if ovV < 0.5 {
 				ovV = 0.5
 			}
-			eta := d / ovV
-			if eta < bestETA {
-				bestETA = eta
+			if d/ovV < gapThresholdSec {
+				return myDist, true
 			}
 		}
-		if bestETA < gapThresholdSec {
-			return myDist, true
-		}
 	}
-	return myDist, false
+	return 0, false
+}
+
+// allWayStopFIFO is filled in by Task 8. For now, return (myDist, true)
+// so that AllWayStop approaches always wait — safe but pessimistic.
+func (w *World) allWayStopFIFO(v *Vehicle, x *network.Intersection, myPos int,
+	myDist float64, byEdge map[network.EdgeID][]int,
+) (float64, bool) {
+	return myDist, true
 }
 
 // Step advances the sim by one tick (DefaultDt seconds).
