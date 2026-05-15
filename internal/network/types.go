@@ -46,6 +46,19 @@ type TurnRestriction struct {
 	To   EdgeID // outgoing edge starting at the intersection node
 }
 
+// Control names the right-of-way rule that governs a specific incoming
+// approach at an intersection. The values are intentionally ordered so
+// that a higher numeric value is a stricter control: a stop is stricter
+// than a yield, an all-way stop is stricter still.
+type Control uint8
+
+const (
+	ControlNone        Control = iota // through-movement, no sign
+	ControlYield                      // yield sign — slow, no mandatory stop
+	ControlStop                       // stop sign — mandatory dwell, then gap-accept
+	ControlAllWayStop                 // all-way stop — Stop + FIFO arbitration
+)
+
 // Intersection is a node where edges meet. ID indexes into Network.Intersections
 // and is unrelated to NodeID — ID lives in IntersectionID-space, NodeID gives
 // the spatial position. Incoming and Outgoing list the edges that arrive at and
@@ -54,8 +67,12 @@ type Intersection struct {
 	ID        IntersectionID
 	NodeID    NodeID
 	Incoming  []EdgeID
-	Outgoing  []EdgeID
-	HasSignal bool
+	// IncomingControl is parallel to Incoming: IncomingControl[i] is the
+	// right-of-way rule for approach Incoming[i]. The two slices have
+	// equal length. Populated by netbuild after sortIncomingByPriority.
+	IncomingControl []Control
+	Outgoing        []EdgeID
+	HasSignal       bool
 	// BannedTurns lists (from, to) edge transitions that are forbidden
 	// at this intersection. Populated at load time from config (or, in
 	// future, from OSM `restriction` relations) and read-only thereafter.
