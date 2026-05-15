@@ -68,6 +68,52 @@ func TestWorld_VehiclesSpawnMoveDespawn(t *testing.T) {
 	}
 }
 
+func TestWorld_IDMFollowingMaintainsGap(t *testing.T) {
+	net := buildLineGraph() // 3 edges, 100m each, 10 m/s
+	// No spawner — we'll inject vehicles directly.
+	w := NewWorld(net, NewRandomOD(net, 0, 0))
+
+	// Two vehicles on edge 0, leader 50m ahead, both starting at speed.
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0, 1, 2}, Edge: 0, S: 10, V: 5},  // follower
+		{ID: 2, Route: []network.EdgeID{0, 1, 2}, Edge: 0, S: 60, V: 5},  // leader
+	}
+	w.nextID = 3
+
+	// Run 200 ticks (10 sim-seconds).
+	for i := 0; i < 200; i++ {
+		w.Step()
+	}
+
+	// Both should be alive (course is 300m, won't complete in 10s at ~10 m/s).
+	if len(w.Vehicles) != 2 {
+		t.Fatalf("want 2 vehicles alive, got %d", len(w.Vehicles))
+	}
+
+	// Find them by ID (compact may have reordered).
+	var f, l *Vehicle
+	for i := range w.Vehicles {
+		switch w.Vehicles[i].ID {
+		case 1:
+			f = &w.Vehicles[i]
+		case 2:
+			l = &w.Vehicles[i]
+		}
+	}
+	if f == nil || l == nil {
+		t.Fatal("lost a vehicle")
+	}
+
+	// Compute the linear position of each (S + edge_offset).
+	pos := func(v *Vehicle) float64 {
+		return float64(v.RouteIdx)*100 + v.S
+	}
+	gap := pos(l) - pos(f) - VehicleLength
+	if gap < VehicleLength {
+		t.Errorf("follower closed gap to %.2f m (collision-ish)", gap)
+	}
+}
+
 func TestWorld_DeterminismSameSeed(t *testing.T) {
 	run := func() (uint32, int) {
 		net := build2x2Grid()

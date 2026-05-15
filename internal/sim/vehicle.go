@@ -1,34 +1,57 @@
 package sim
 
-import "github.com/lab1702/traffic-sim/internal/network"
+import (
+	"math"
+
+	"github.com/lab1702/traffic-sim/internal/network"
+)
 
 type VehicleID uint32
 
-// Vehicle is the simulated agent. In Phase 3 it moves at constant speed
-// equal to the current edge's speed limit; IDM comes in Phase 4.
+// VehicleLength is the bumper-to-bumper length used for gap calculation.
+const VehicleLength = 5.0 // meters
+
 type Vehicle struct {
 	ID       VehicleID
 	Route    []network.EdgeID
-	RouteIdx int            // index into Route of the current edge
+	RouteIdx int
 	Edge     network.EdgeID
 	Lane     uint8
-	S        float64 // meters along edge
+	S        float64 // meters along edge, measured at front bumper
 	V        float64 // m/s
-	A        float64 // m/s^2 (unused in Phase 3)
+	A        float64 // m/s^2 (last computed accel; useful for tracing)
 
 	Despawned bool
 }
 
-// stepConstantVelocity advances a vehicle by dt seconds along its route at
-// the current edge's speed limit. When it reaches the end of the route it
-// is marked despawned; intermediate edge transitions roll S over.
-func stepConstantVelocity(v *Vehicle, net *network.Network, dt float64) {
+// stepIDM advances vehicle i by one tick using IDM with the supplied leader.
+// leader may be nil; if non-nil, both vehicles are assumed to be on the same
+// edge (cross-edge leaders are handled by world.go via lookahead).
+func stepIDM(v *Vehicle, leaderS float64, leaderV float64, hasLeader bool,
+	net *network.Network, params IDMParams, dt float64,
+) {
 	if v.Despawned {
 		return
 	}
 	edge := &net.Edges[v.Edge]
-	v.V = edge.SpeedLimit
+	v0 := edge.SpeedLimit
+
+	gap := math.Inf(1)
+	deltaV := 0.0
+	if hasLeader {
+		gap = leaderS - v.S - VehicleLength
+		if gap < 0 {
+			gap = 0
+		}
+		deltaV = v.V - leaderV
+	}
+	v.A = IDMAcceleration(params, v.V, v0, gap, deltaV)
+	v.V += v.A * dt
+	if v.V < 0 {
+		v.V = 0
+	}
 	v.S += v.V * dt
+
 	for v.S >= edge.Length {
 		v.S -= edge.Length
 		v.RouteIdx++
