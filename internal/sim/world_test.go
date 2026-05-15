@@ -2,6 +2,8 @@ package sim
 
 import (
 	"bytes"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/lab1702/traffic-sim/internal/network"
@@ -484,5 +486,54 @@ func TestWorld_TraceDeterminism(t *testing.T) {
 	a, b := run(), run()
 	if !bytes.Equal(a, b) {
 		t.Fatalf("trace bytes differ across runs with same seed (len %d vs %d)", len(a), len(b))
+	}
+}
+
+// TestWorld_StuckVehicleDespawned: a vehicle below the stuck speed threshold
+// for >60 sim-seconds on an edge with no red light and no yield must be
+// logged at WARN level and despawned.
+func TestWorld_StuckVehicleDespawned(t *testing.T) {
+	// Single 200m edge, no intersection at the end. With no intersection,
+	// stopDistanceForRed and stopDistanceForYield both return false, so the
+	// stuck condition can trigger.
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 1, Pos: network.Point{X: 200, Y: 0}},
+	}
+	edges := []network.Edge{
+		{ID: 0, From: 0, To: 1, Length: 200, SpeedLimit: 10,
+			Lanes: []network.Lane{{Index: 0}}},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	w.Vehicles = []Vehicle{{ID: 1, Route: []network.EdgeID{0}, Edge: 0, S: 10, V: 0}}
+	w.nextID = 2
+
+	// Capture WARN logs via slog handler swap.
+	var logBuf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(prev)
+
+	// Pin V=0 before each tick. After stepIDM the vehicle's V will be
+	// ~0.05 (one tick of free-acceleration from 0), still below the 0.1
+	// threshold, so StuckTime accumulates dt per tick. >1200 ticks = >60
+	// sim-seconds → despawn.
+	for i := 0; i < 1500; i++ {
+		if len(w.Vehicles) > 0 && !w.Vehicles[0].Despawned {
+			w.Vehicles[0].V = 0
+		}
+		w.Step()
+		if len(w.Vehicles) == 0 {
+			break
+		}
+	}
+
+	if len(w.Vehicles) != 0 {
+		t.Fatalf("stuck vehicle should have been despawned, %d still alive", len(w.Vehicles))
+	}
+	if !strings.Contains(logBuf.String(), "stuck vehicle despawned") {
+		t.Errorf("expected WARN log containing 'stuck vehicle despawned', got: %q", logBuf.String())
 	}
 }
