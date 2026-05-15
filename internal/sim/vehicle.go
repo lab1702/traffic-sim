@@ -25,6 +25,12 @@ type Vehicle struct {
 	// again until this reaches 0. Prevents oscillation.
 	LaneChangeCooldown float64
 
+	// StuckTime accumulates sim-seconds where V < stuckSpeedThresh and the
+	// vehicle is not legitimately waiting at a red light or yield. Resets
+	// to 0 whenever any of those conditions fails. When it exceeds
+	// stuckTimeoutSec the vehicle is logged at WARN and despawned.
+	StuckTime float64
+
 	Despawned bool
 }
 

@@ -135,6 +135,15 @@ func (w *World) stopDistanceForRed(v *Vehicle) (float64, bool) {
 
 const gapThresholdSec = 3.0
 
+const (
+	// stuckSpeedThresh is the speed (m/s) below which a vehicle is
+	// considered "not moving" for the purposes of the stuck-despawn guard.
+	stuckSpeedThresh = 0.1
+	// stuckTimeoutSec is the accumulated sim-seconds of below-threshold
+	// motion (with no legitimate red/yield reason) that triggers despawn.
+	stuckTimeoutSec = 60.0
+)
+
 // stopDistanceForYield returns (distance to stop line, true) when the
 // vehicle's current edge ends at an intersection where it must yield via
 // gap-acceptance. Covers three cases:
@@ -369,6 +378,38 @@ func (w *World) Step() {
 
 		v0 := w.computeDesiredSpeed(v)
 		stepIDM(v, v0, lS, lV, has, w.Net, DefaultIDM(), w.dt)
+
+		// Stuck-vehicle guard. Defensive against sim bugs that would
+		// otherwise leave a vehicle wedged forever. Runs only when the
+		// vehicle is below the speed threshold; the two stopDistance
+		// helpers are cheap but skipped for the common moving case.
+		if !v.Despawned && v.V < stuckSpeedThresh {
+			_, isRed := w.stopDistanceForRed(v)
+			_, mustYield := w.stopDistanceForYield(v, byEdge)
+			if !isRed && !mustYield {
+				v.StuckTime += w.dt
+				if v.StuckTime > stuckTimeoutSec {
+					slog.Warn("stuck vehicle despawned",
+						"vehicle_id", v.ID,
+						"edge", v.Edge,
+						"lane", v.Lane,
+						"s", v.S,
+						"v", v.V,
+						"route_idx", v.RouteIdx,
+						"route_len", len(v.Route),
+						"tick", w.Tick,
+						"sim_time", w.SimTime,
+						"stuck_duration", v.StuckTime,
+					)
+					v.Despawned = true
+				}
+			} else {
+				v.StuckTime = 0
+			}
+		} else {
+			v.StuckTime = 0
+		}
+
 		if v.Despawned {
 			w.EmitTrace(w.Tick, w.SimTime, &trace.VehicleDespawn{VehicleID: uint32(v.ID)})
 		}
