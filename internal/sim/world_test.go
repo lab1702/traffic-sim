@@ -580,3 +580,81 @@ func TestWorld_StuckAtRedNotDespawned(t *testing.T) {
 		t.Errorf("StuckTime should be 0 for a vehicle legitimately stopped at red, got %.3f", v.StuckTime)
 	}
 }
+
+// TestWorld_StuckAtYieldNotDespawned: a vehicle correctly yielding at an
+// unsignalized intersection must NOT be despawned, because
+// stopDistanceForYield returning true is the "legitimately stopped" branch.
+func TestWorld_StuckAtYieldNotDespawned(t *testing.T) {
+	// Two incoming edges into an unsignalized intersection. Incoming[0]
+	// (priority road) and Incoming[1] (yield road).
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: -100, Y: 0}},  // W (priority origin)
+		{ID: 1, Pos: network.Point{X: 0, Y: -100}},  // S (yield origin)
+		{ID: 2, Pos: network.Point{X: 0, Y: 0}},     // center
+		{ID: 3, Pos: network.Point{X: 100, Y: 0}},   // E (downstream of priority)
+	}
+	mkEdge := func(id, from, to int) network.Edge {
+		return network.Edge{
+			ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: 100, SpeedLimit: 10,
+			Lanes:    []network.Lane{{Index: 0}},
+			Geometry: []network.Point{nodes[from].Pos, nodes[to].Pos},
+		}
+	}
+	edges := []network.Edge{
+		mkEdge(0, 0, 2), // priority approach: W -> C
+		mkEdge(1, 1, 2), // yield approach:   S -> C
+		mkEdge(2, 2, 3), // outbound:        C -> E (route exit for both)
+	}
+	xs := []network.Intersection{
+		{
+			ID:        0,
+			NodeID:    2,
+			Incoming:  []network.EdgeID{0, 1}, // 0 = priority, 1 = yield
+			Outgoing:  []network.EdgeID{2},
+			HasSignal: false,
+		},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	// Priority vehicle parked close to the stop line, moving slowly enough
+	// that its ETA to the intersection is well inside gapThresholdSec (3s).
+	// Yield vehicle approaching its own stop line.
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0, 2}, Edge: 0, S: 99, V: 0.5}, // priority, ~1m out @ 0.5 m/s = 2s ETA
+		{ID: 2, Route: []network.EdgeID{1, 2}, Edge: 1, S: 50, V: 10},  // yield, approaching
+	}
+	w.nextID = 3
+
+	// Pin the priority vehicle's S and V each tick to keep the yield
+	// continuously active. Without pinning, the priority vehicle would
+	// clear the intersection within a tick or two.
+	for i := 0; i < 1500; i++ {
+		// Find the priority vehicle by ID and re-pin its state.
+		for j := range w.Vehicles {
+			if w.Vehicles[j].ID == 1 && !w.Vehicles[j].Despawned {
+				w.Vehicles[j].S = 99
+				w.Vehicles[j].V = 0.5
+			}
+		}
+		w.Step()
+	}
+
+	// Find the yield vehicle by ID.
+	var yielder *Vehicle
+	for i := range w.Vehicles {
+		if w.Vehicles[i].ID == 2 {
+			yielder = &w.Vehicles[i]
+		}
+	}
+	if yielder == nil {
+		t.Fatal("yield vehicle (ID=2) was unexpectedly despawned")
+	}
+	if yielder.Edge != 1 {
+		t.Errorf("yield vehicle should still be on approach edge 1, got edge %d", yielder.Edge)
+	}
+	if yielder.StuckTime != 0 {
+		t.Errorf("StuckTime should be 0 for a vehicle legitimately yielding, got %.3f", yielder.StuckTime)
+	}
+}
