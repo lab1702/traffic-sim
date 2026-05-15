@@ -42,12 +42,11 @@ const (
 	stillSpeedThresh = 0.1  // m/s
 )
 
-// Turn-signal rendering. The dot sits in world units to the side of the
-// front bumper and renders at a fixed pixel radius so it stays visible
-// at any zoom.
+// Turn-signal rendering. Offset and radius are both in world meters so
+// the dot scales with zoom the same way the vehicle line does.
 const (
-	turnSignalOffset = 1.5 // m perpendicular to heading
-	turnSignalDotPx  = 2.5
+	turnSignalOffset  = 1.5 // m perpendicular to heading
+	turnSignalRadiusM = 0.5 // m
 )
 
 var turnSignalColor = color.RGBA{255, 200, 0, 255}
@@ -400,14 +399,16 @@ func (v *Viewport) Draw(screen *ebiten.Image) {
 
 		// Turn signal: yellow dot at the front bumper, offset perpendicular
 		// to heading on the indicated side. Blinks at 1 Hz using the same
-		// blink phase as traffic-signal flashers.
+		// blink phase as traffic-signal flashers. Radius is in world units
+		// so the dot scales with zoom alongside the vehicle line.
 		if vh.TurnSignal != 0 && blinkOn {
 			// Perpendicular-left of heading H is (-sin H, cos H); right is
 			// (sin H, -cos H). TurnSignal: +1 = left, -1 = right.
 			sigOffX := -sinH * float64(vh.TurnSignal) * turnSignalOffset
 			sigOffY := cosH * float64(vh.TurnSignal) * turnSignalOffset
 			sx, sy := v.toScreen(frontX+sigOffX, frontY+sigOffY)
-			vector.DrawFilledCircle(screen, sx, sy, turnSignalDotPx, turnSignalColor, true)
+			pxRadius := float32(turnSignalRadiusM * v.zoom)
+			vector.DrawFilledCircle(screen, sx, sy, pxRadius, turnSignalColor, true)
 		}
 	}
 
