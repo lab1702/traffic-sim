@@ -5,11 +5,15 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"time"
+
+	"github.com/hajimehoshi/ebiten/v2"
 
 	"github.com/lab1702/traffic-sim/internal/config"
 	"github.com/lab1702/traffic-sim/internal/netbuild"
 	"github.com/lab1702/traffic-sim/internal/network"
 	"github.com/lab1702/traffic-sim/internal/osmload"
+	"github.com/lab1702/traffic-sim/internal/render"
 	"github.com/lab1702/traffic-sim/internal/sim"
 )
 
@@ -83,15 +87,6 @@ func runRun(args []string) {
 	}
 	path := fs.Arg(0)
 
-	if !*headless {
-		fmt.Fprintln(os.Stderr, "warning: rendering not implemented yet; pass --headless")
-		os.Exit(2)
-	}
-	if *duration == 0 {
-		fmt.Fprintln(os.Stderr, "error: --headless requires --duration > 0")
-		os.Exit(2)
-	}
-
 	feat, err := osmload.Load(path)
 	if err != nil {
 		slog.Error("load failed", "err", err)
@@ -133,9 +128,42 @@ func runRun(args []string) {
 	spawner := sim.NewRandomOD(net, *seed, *spawnRate)
 	w := sim.NewWorld(net, spawner, overrides)
 
-	w.Run(duration.Seconds())
-	fmt.Printf("done. final_vehicles=%d ticks=%d sim_time=%.2fs\n",
-		len(w.Vehicles), w.Tick, w.SimTime)
+	if *headless {
+		if *duration == 0 {
+			fmt.Fprintln(os.Stderr, "error: --headless requires --duration > 0")
+			os.Exit(2)
+		}
+		w.Run(duration.Seconds())
+		fmt.Printf("done. final_vehicles=%d ticks=%d sim_time=%.2fs\n",
+			len(w.Vehicles), w.Tick, w.SimTime)
+		return
+	}
+
+	// Live mode: sim runs on its own goroutine at 20 Hz wall-clock,
+	// renderer runs at Ebitengine's default frame rate (~60 FPS).
+	stop := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(time.Duration(sim.DefaultDt * float64(time.Second)))
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				w.Step()
+			}
+		}
+	}()
+
+	vp := render.NewViewport(net, w.SnapshotBuf, 1280, 800)
+	ebiten.SetWindowSize(1280, 800)
+	ebiten.SetWindowTitle("traffic-sim")
+	if err := ebiten.RunGame(&gameAdapter{vp: vp}); err != nil {
+		close(stop)
+		slog.Error("ebiten exited", "err", err)
+		os.Exit(1)
+	}
+	close(stop)
 }
 
 func countSignals(xs []network.Intersection) int {
@@ -147,3 +175,12 @@ func countSignals(xs []network.Intersection) int {
 	}
 	return n
 }
+
+// gameAdapter wraps a Viewport into Ebitengine's Game interface.
+type gameAdapter struct {
+	vp *render.Viewport
+}
+
+func (g *gameAdapter) Update() error             { return g.vp.Update() }
+func (g *gameAdapter) Draw(screen *ebiten.Image) { g.vp.Draw(screen) }
+func (g *gameAdapter) Layout(w, h int) (int, int) { return g.vp.Layout(w, h) }
