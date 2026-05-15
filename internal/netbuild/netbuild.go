@@ -108,6 +108,9 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 
 	// 4. Split each way at intersection nodes and produce edges.
 	var edges []network.Edge
+	// segChains records the full ordered netID chain for each segment so
+	// keepLargestComponent can union interior shaping nodes with their edge.
+	var segChains [][]network.NodeID
 	report := Report{}
 	for _, w := range feat.Ways {
 		segs := splitAtIntersections(w, isIntersection)
@@ -123,6 +126,7 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 				continue
 			}
 			geom := make([]network.Point, 0, len(seg))
+			chain := make([]network.NodeID, 0, len(seg))
 			var fromID, toID network.NodeID
 			ok := true
 			for i, ref := range seg {
@@ -132,6 +136,7 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 					break
 				}
 				geom = append(geom, nodes[netID].Pos)
+				chain = append(chain, netID)
 				if i == 0 {
 					fromID = netID
 				}
@@ -148,6 +153,7 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 				report.WaysSkipped++
 				continue
 			}
+			segChains = append(segChains, chain)
 			lanes := makeLanes(lanesPerDir)
 			edges = append(edges, network.Edge{
 				ID: network.EdgeID(len(edges)), From: fromID, To: toID,
@@ -168,7 +174,7 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 	intersections := buildIntersections(nodes, edges, feat, osmToNet)
 
 	// 6. Prune to largest connected component.
-	nodes, edges, intersections, droppedComponents := keepLargestComponent(nodes, edges, intersections)
+	nodes, edges, intersections, droppedComponents := keepLargestComponent(nodes, edges, intersections, segChains)
 	report.ComponentsDropped = droppedComponents
 
 	// 7. Build spatial grid.
@@ -389,7 +395,7 @@ func buildIntersections(nodes []network.Node, edges []network.Edge,
 	var xs []network.Intersection
 	for _, n := range nodes {
 		incE, outE := inc[n.ID], out[n.ID]
-		if len(incE)+len(outE) < 2 && !signalNodes[n.ID] {
+		if len(incE) < 2 && len(outE) < 2 && !signalNodes[n.ID] {
 			continue
 		}
 		xs = append(xs, network.Intersection{
@@ -405,9 +411,12 @@ func buildIntersections(nodes []network.Node, edges []network.Edge,
 
 // keepLargestComponent runs an undirected BFS/Union-Find over edges and
 // retains only nodes/edges/intersections in the largest connected set.
+// segChains provides the full ordered node ID sequences for each segment so
+// interior shaping nodes (not From/To endpoints) are correctly grouped with
+// their segment's component.
 // Returns the new slices and the number of dropped components.
 func keepLargestComponent(nodes []network.Node, edges []network.Edge,
-	xs []network.Intersection,
+	xs []network.Intersection, segChains [][]network.NodeID,
 ) ([]network.Node, []network.Edge, []network.Intersection, int) {
 	parent := make([]network.NodeID, len(nodes))
 	for i := range parent {
@@ -424,6 +433,13 @@ func keepLargestComponent(nodes []network.Node, edges []network.Edge,
 		ra, rb := find(a), find(b)
 		if ra != rb {
 			parent[ra] = rb
+		}
+	}
+	// Union all consecutive nodes in each segment chain so that interior
+	// shaping nodes are connected to their segment's component.
+	for _, chain := range segChains {
+		for i := 1; i < len(chain); i++ {
+			union(chain[i-1], chain[i])
 		}
 	}
 	for _, e := range edges {
