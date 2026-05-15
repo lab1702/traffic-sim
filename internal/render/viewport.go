@@ -34,6 +34,14 @@ const vehicleLength = 5.0
 // of the road centerline, matching the prior single-offset behavior.
 const laneWidth = 3.6
 
+// Thresholds for coloring vehicles by motion state. accelDeadband
+// classifies |A| below this as "steady speed" (not accel/decel).
+// stillSpeedThresh classifies speed below this as "standing still".
+const (
+	accelDeadband    = 0.05 // m/s^2
+	stillSpeedThresh = 0.1  // m/s
+)
+
 // laneOffset returns the perpendicular-right distance, in world meters,
 // from the road centerline at which a vehicle in lane `lane` of an edge
 // with `numLanes` lanes should be drawn. Convention: lane 0 = rightmost
@@ -345,7 +353,11 @@ func (v *Viewport) Draw(screen *ebiten.Image) {
 	// to the heading by laneOffset() so the occupied lane is visible.
 	// Pure world units: at low zoom the line shrinks below a pixel and
 	// effectively disappears.
-	vehColor := color.RGBA{0, 255, 255, 255}
+	//
+	// Color reflects motion state: green when accelerating or moving at
+	// steady speed, red when standing still or decelerating.
+	vehColorGreen := color.RGBA{0, 230, 0, 255}
+	vehColorRed := color.RGBA{230, 50, 50, 255}
 	for _, vh := range snap.Vehicles {
 		cosH := math.Cos(vh.Heading)
 		sinH := math.Sin(vh.Heading)
@@ -368,7 +380,13 @@ func (v *Viewport) Draw(screen *ebiten.Image) {
 		backY := frontY - vehicleLength*sinH
 		fx, fy := v.toScreen(frontX, frontY)
 		rx, ry := v.toScreen(backX, backY)
-		vector.StrokeLine(screen, fx, fy, rx, ry, 1.5, vehColor, true)
+		// Color: red if standing still or decelerating, else green.
+		// Thresholds reject IDM numerical noise around zero.
+		c := vehColorGreen
+		if vh.Accel < -accelDeadband || (math.Abs(vh.Accel) <= accelDeadband && vh.Speed < stillSpeedThresh) {
+			c = vehColorRed
+		}
+		vector.StrokeLine(screen, fx, fy, rx, ry, 1.5, c, true)
 	}
 
 	viewWidthM := float64(v.Width) / v.zoom

@@ -24,6 +24,7 @@ type VehicleView struct {
 	X, Y    float64
 	Heading float64 // radians (atan2(dy, dx))
 	Speed   float64
+	Accel   float64 // m/s^2; used by renderer to color by motion state
 }
 
 type SignalView struct {

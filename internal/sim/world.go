@@ -551,7 +551,7 @@ func (w *World) publishSnapshot() {
 		x, y, hd := network.PositionOnEdge(w.Net, v.Edge, v.S)
 		views = append(views, snapshot.VehicleView{
 			ID: uint32(v.ID), EdgeID: uint32(v.Edge), Lane: v.Lane,
-			X: x, Y: y, Heading: hd, Speed: v.V,
+			X: x, Y: y, Heading: hd, Speed: v.V, Accel: v.A,
 		})
 	}
 	// One SignalView per incoming approach, positioned a few meters back
