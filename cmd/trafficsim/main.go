@@ -15,6 +15,7 @@ import (
 	"github.com/lab1702/traffic-sim/internal/osmload"
 	"github.com/lab1702/traffic-sim/internal/render"
 	"github.com/lab1702/traffic-sim/internal/sim"
+	"github.com/lab1702/traffic-sim/internal/trace"
 )
 
 func main() {
@@ -77,6 +78,7 @@ func runRun(args []string) {
 		seed        = fs.Uint64("seed", 1, "RNG seed for deterministic runs")
 		spawnRate   = fs.Float64("spawn-rate", 5.0, "vehicles spawned per simulated second")
 		signalsPath = fs.String("signals", "", "path to signal overrides YAML")
+		tracePath   = fs.String("trace", "", "write binary trace events to this file")
 	)
 	if err := fs.Parse(args); err != nil {
 		os.Exit(2)
@@ -127,6 +129,51 @@ func runRun(args []string) {
 
 	spawner := sim.NewRandomOD(net, *seed, *spawnRate)
 	w := sim.NewWorld(net, spawner, overrides)
+
+	if *tracePath != "" {
+		f, err := os.Create(*tracePath)
+		if err != nil {
+			slog.Error("trace create failed", "err", err)
+			os.Exit(1)
+		}
+		tw := trace.NewWriter(f)
+		type evMsg struct {
+			tick    uint64
+			simTime float64
+			e       trace.Event
+		}
+		ch := make(chan evMsg, 4096)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for m := range ch {
+				if err := tw.Write(m.tick, m.simTime, m.e); err != nil {
+					slog.Error("trace write failed", "err", err)
+					return
+				}
+			}
+			_ = tw.Close()
+			_ = f.Close()
+		}()
+		dropped := uint64(0)
+		w.EmitTrace = func(tick uint64, simTime float64, e trace.Event) {
+			select {
+			case ch <- evMsg{tick, simTime, e}:
+			default:
+				dropped++
+				if dropped%1000 == 1 {
+					slog.Warn("trace dropped", "dropped_total", dropped)
+				}
+			}
+		}
+		// Emit start event with the seed.
+		w.EmitTrace(0, 0, &trace.SimStart{SeedLo: *seed, NetHash: 0})
+		defer func() {
+			w.EmitTrace(w.Tick, w.SimTime, &trace.SimEnd{Reason: "exit"})
+			close(ch)
+			<-done // wait for goroutine to flush and close the file
+		}()
+	}
 
 	if *headless {
 		if *duration == 0 {
