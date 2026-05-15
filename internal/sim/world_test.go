@@ -2,6 +2,8 @@ package sim
 
 import (
 	"bytes"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/lab1702/traffic-sim/internal/network"
@@ -484,5 +486,175 @@ func TestWorld_TraceDeterminism(t *testing.T) {
 	a, b := run(), run()
 	if !bytes.Equal(a, b) {
 		t.Fatalf("trace bytes differ across runs with same seed (len %d vs %d)", len(a), len(b))
+	}
+}
+
+// TestWorld_StuckVehicleDespawned: a vehicle below the stuck speed threshold
+// for >60 sim-seconds on an edge with no red light and no yield must be
+// logged at WARN level and despawned.
+func TestWorld_StuckVehicleDespawned(t *testing.T) {
+	// Single 200m edge, no intersection at the end. With no intersection,
+	// stopDistanceForRed and stopDistanceForYield both return false, so the
+	// stuck condition can trigger.
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 1, Pos: network.Point{X: 200, Y: 0}},
+	}
+	edges := []network.Edge{
+		{ID: 0, From: 0, To: 1, Length: 200, SpeedLimit: 10,
+			Lanes: []network.Lane{{Index: 0}}},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	w.Vehicles = []Vehicle{{ID: 1, Route: []network.EdgeID{0}, Edge: 0, S: 10, V: 0}}
+	w.nextID = 2
+
+	// Capture WARN logs via slog handler swap.
+	var logBuf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(prev)
+
+	// Pin V=0 before each tick. After stepIDM the vehicle's V will be
+	// ~0.05 (one tick of free-acceleration from 0), still below the 0.1
+	// threshold, so StuckTime accumulates dt per tick. >1200 ticks = >60
+	// sim-seconds → despawn.
+	for i := 0; i < 1500; i++ {
+		if len(w.Vehicles) > 0 && !w.Vehicles[0].Despawned {
+			w.Vehicles[0].V = 0
+		}
+		w.Step()
+		if len(w.Vehicles) == 0 {
+			break
+		}
+	}
+
+	if len(w.Vehicles) != 0 {
+		t.Fatalf("stuck vehicle should have been despawned, %d still alive", len(w.Vehicles))
+	}
+	if !strings.Contains(logBuf.String(), "stuck vehicle despawned") {
+		t.Errorf("expected WARN log containing 'stuck vehicle despawned', got: %q", logBuf.String())
+	}
+}
+
+// TestWorld_StuckAtRedNotDespawned: a vehicle stopped at a red light for
+// longer than the stuck timeout must NOT be despawned, because
+// stopDistanceForRed returning true is the "legitimately stopped" branch.
+func TestWorld_StuckAtRedNotDespawned(t *testing.T) {
+	// Same setup as TestWorld_StopsAtRedLight: single edge ending in a
+	// signalized intersection forced all-red.
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 1, Pos: network.Point{X: 200, Y: 0}},
+	}
+	edges := []network.Edge{
+		{ID: 0, From: 0, To: 1, Length: 200, SpeedLimit: 10,
+			Lanes: []network.Lane{{Index: 0}}},
+	}
+	xs := []network.Intersection{
+		{ID: 0, NodeID: 1, Incoming: []network.EdgeID{0}, HasSignal: true},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	// Force the signal all-red by giving it an empty-green phase that
+	// outlasts the run.
+	w.SignalStates[0] = NewSignalState(SignalConfig{
+		Phases: []SignalPhase{{GreenEdges: nil, GreenDur: 1000, YellowDur: 0}},
+	})
+
+	w.Vehicles = []Vehicle{{ID: 1, Route: []network.EdgeID{0}, Edge: 0, S: 50, V: 10}}
+	w.nextID = 2
+
+	// 1500 ticks = 75 sim-seconds, well past the 60-second stuck timeout.
+	for i := 0; i < 1500; i++ {
+		w.Step()
+	}
+
+	if len(w.Vehicles) != 1 {
+		t.Fatalf("vehicle stopped at red should not be despawned, got %d alive", len(w.Vehicles))
+	}
+	v := &w.Vehicles[0]
+	if v.StuckTime != 0 {
+		t.Errorf("StuckTime should be 0 for a vehicle legitimately stopped at red, got %.3f", v.StuckTime)
+	}
+}
+
+// TestWorld_StuckAtYieldNotDespawned: a vehicle correctly yielding at an
+// unsignalized intersection must NOT be despawned, because
+// stopDistanceForYield returning true is the "legitimately stopped" branch.
+func TestWorld_StuckAtYieldNotDespawned(t *testing.T) {
+	// Two incoming edges into an unsignalized intersection. Incoming[0]
+	// (priority road) and Incoming[1] (yield road).
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: -100, Y: 0}},  // W (priority origin)
+		{ID: 1, Pos: network.Point{X: 0, Y: -100}},  // S (yield origin)
+		{ID: 2, Pos: network.Point{X: 0, Y: 0}},     // center
+		{ID: 3, Pos: network.Point{X: 100, Y: 0}},   // E (downstream of priority)
+	}
+	mkEdge := func(id, from, to int) network.Edge {
+		return network.Edge{
+			ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: 100, SpeedLimit: 10,
+			Lanes:    []network.Lane{{Index: 0}},
+			Geometry: []network.Point{nodes[from].Pos, nodes[to].Pos},
+		}
+	}
+	edges := []network.Edge{
+		mkEdge(0, 0, 2), // priority approach: W -> C
+		mkEdge(1, 1, 2), // yield approach:   S -> C
+		mkEdge(2, 2, 3), // outbound:        C -> E (route exit for both)
+	}
+	xs := []network.Intersection{
+		{
+			ID:        0,
+			NodeID:    2,
+			Incoming:  []network.EdgeID{0, 1}, // 0 = priority, 1 = yield
+			Outgoing:  []network.EdgeID{2},
+			HasSignal: false,
+		},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	// Priority vehicle parked close to the stop line, moving slowly enough
+	// that its ETA to the intersection is well inside gapThresholdSec (3s).
+	// Yield vehicle approaching its own stop line.
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0, 2}, Edge: 0, S: 99, V: 0.5}, // priority, ~1m out @ 0.5 m/s = 2s ETA
+		{ID: 2, Route: []network.EdgeID{1, 2}, Edge: 1, S: 50, V: 10},  // yield, approaching
+	}
+	w.nextID = 3
+
+	// Pin the priority vehicle's S and V each tick to keep the yield
+	// continuously active. Without pinning, the priority vehicle would
+	// clear the intersection within a tick or two.
+	for i := 0; i < 1500; i++ {
+		// Find the priority vehicle by ID and re-pin its state.
+		for j := range w.Vehicles {
+			if w.Vehicles[j].ID == 1 && !w.Vehicles[j].Despawned {
+				w.Vehicles[j].S = 99
+				w.Vehicles[j].V = 0.5
+			}
+		}
+		w.Step()
+	}
+
+	// Find the yield vehicle by ID.
+	var yielder *Vehicle
+	for i := range w.Vehicles {
+		if w.Vehicles[i].ID == 2 {
+			yielder = &w.Vehicles[i]
+		}
+	}
+	if yielder == nil {
+		t.Fatal("yield vehicle (ID=2) was unexpectedly despawned")
+	}
+	if yielder.Edge != 1 {
+		t.Errorf("yield vehicle should still be on approach edge 1, got edge %d", yielder.Edge)
+	}
+	if yielder.StuckTime != 0 {
+		t.Errorf("StuckTime should be 0 for a vehicle legitimately yielding, got %.3f", yielder.StuckTime)
 	}
 }
