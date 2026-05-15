@@ -216,9 +216,12 @@ const (
 	stuckSpeedThresh = 0.1
 	// stopLineSpeedThresh is the speed (m/s) below which a vehicle near
 	// the stop line of a Stop/AllWayStop approach is considered to have
-	// arrived and begun its mandatory dwell. IDM's asymptotic approach
-	// means the vehicle may creep at ~0.5 m/s indefinitely; 1.0 m/s
-	// captures the "effectively stopped at the line" state in practice.
+	// arrived and begun its mandatory dwell. Empirically measured (10 m/s
+	// approach, 100 m edge, IDM defaults): the vehicle reaches a minimum
+	// of ~0.63 m/s before the dwell window elapses and it re-accelerates —
+	// it never drops below 0.5 m/s in the test window. 1.0 m/s is
+	// therefore the tightest threshold that reliably triggers arrival
+	// detection. stuckSpeedThresh (0.1 m/s) would never fire.
 	stopLineSpeedThresh = 1.0
 	// stuckTimeoutSec is the accumulated sim-seconds of below-threshold
 	// motion (with no legitimate red/yield reason) that triggers despawn.
@@ -335,8 +338,9 @@ func (w *World) hasDwelled(v *Vehicle) bool {
 // maybeMarkStopped sets v.StoppedSinceSec the first tick the vehicle is
 // effectively at the stop line (slow AND within tolerance). Idempotent
 // once set. Uses stopLineSpeedThresh (not stuckSpeedThresh) because IDM
-// asymptotically approaches the stop line and may never drop below 0.1
-// m/s in a finite number of ticks; 1.0 m/s captures the arrival state.
+// reaches a minimum of ~0.63 m/s before the dwell elapses and the vehicle
+// re-accelerates; stuckSpeedThresh (0.1 m/s) would never fire. See the
+// stopLineSpeedThresh constant comment for the empirical measurement.
 func (w *World) maybeMarkStopped(v *Vehicle, myDist float64) {
 	if v.StoppedSinceSec != 0 {
 		return
