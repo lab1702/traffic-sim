@@ -205,6 +205,13 @@ func DefaultSignalConfig(incoming []network.EdgeID, net *network.Network) Signal
 	// directions on the same road) share an axis and thus a bucket.
 	// 8 buckets = 22.5° resolution: tolerant of slight road misalignment,
 	// strict enough to keep perpendicular approaches in different phases.
+	//
+	// The axis space is circular (0 and π are the same axis), so we
+	// snap to the nearest bucket center and wrap with `% numBuckets`.
+	// Otherwise a road with a slight bend at the intersection — e.g. a
+	// T where the through halves arrive at headings 0.01 and π - 0.01 —
+	// straddles the 0/π boundary, lands in buckets 0 and 7, and the
+	// through-road approaches wrongly get separate phases.
 	const numBuckets = 8
 	groups := make(map[int][]int)
 	for j, eid := range incoming {
@@ -213,10 +220,7 @@ func DefaultSignalConfig(incoming []network.EdgeID, net *network.Network) Signal
 		if h < 0 {
 			h += math.Pi
 		}
-		b := int(h * float64(numBuckets) / math.Pi)
-		if b >= numBuckets {
-			b = numBuckets - 1
-		}
+		b := int(math.Round(h*float64(numBuckets)/math.Pi)) % numBuckets
 		groups[b] = append(groups[b], j)
 	}
 
