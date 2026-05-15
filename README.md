@@ -8,7 +8,25 @@ auto-generated fixed-time traffic signals (overridable via YAML).
 Output: a live Ebitengine viewer (pan/zoom, vehicles, signals, HUD)
 and an optional binary trace file for replay or offline analysis.
 
-## Build
+## Install
+
+Recommended — install the binaries directly from GitHub with `go install`:
+
+```
+go install github.com/lab1702/traffic-sim/cmd/trafficsim@latest
+go install github.com/lab1702/traffic-sim/cmd/tracereplay@latest
+```
+
+This drops `trafficsim` and `tracereplay` into `$(go env GOBIN)` (or
+`$(go env GOPATH)/bin` if `GOBIN` is unset). Add that directory to your
+`PATH` to invoke them by name.
+
+Pin a specific version by replacing `@latest` with a tag (e.g. `@v0.1.0`)
+or commit SHA.
+
+## Build from source
+
+If you've cloned the repo and want to build locally:
 
 ```
 go build ./cmd/trafficsim/
