@@ -212,11 +212,21 @@ const gapThresholdSec = 3.0
 
 const (
 	// stuckSpeedThresh is the speed (m/s) below which a vehicle is
-	// considered "not moving" for the purposes of the stuck-despawn guard.
+	// considered "not moving" for the purposes of the stuck-despawn guard
+	// and the mandatory-stop dwell at Stop/AllWayStop approaches.
 	stuckSpeedThresh = 0.1
 	// stuckTimeoutSec is the accumulated sim-seconds of below-threshold
 	// motion (with no legitimate red/yield reason) that triggers despawn.
 	stuckTimeoutSec = 60.0
+	// stopDwellSec is the minimum sim-seconds a vehicle must remain
+	// effectively stationary at a Stop or AllWayStop line before being
+	// allowed to begin gap-acceptance.
+	stopDwellSec = 0.5
+	// stopLineTolMeters is the maximum distance from the stop line at
+	// which a slow-moving vehicle (V < stuckSpeedThresh) is considered
+	// to have arrived at the line. Beyond this, the vehicle is "slow
+	// upstream" but not yet stopped.
+	stopLineTolMeters = 2.0
 )
 
 // stopDistanceForYield returns (distance to stop line, true) when the
