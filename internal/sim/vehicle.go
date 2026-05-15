@@ -38,6 +38,13 @@ type Vehicle struct {
 	// keep hand-constructed test vehicles working without modification.
 	SpeedFactor float64
 
+	// LastLCDir records the direction of the most recent lane change in
+	// human terms: +1 = moved left (higher lane index, toward centerline),
+	// -1 = moved right (lower lane index, toward curb), 0 = no recent
+	// change. Valid while LaneChangeCooldown > 0; rendered as a blinking
+	// turn-signal dot during that window.
+	LastLCDir int8
+
 	Despawned bool
 }
 

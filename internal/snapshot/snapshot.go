@@ -25,6 +25,11 @@ type VehicleView struct {
 	Heading float64 // radians (atan2(dy, dx))
 	Speed   float64
 	Accel   float64 // m/s^2; used by renderer to color by motion state
+
+	// TurnSignal: +1 = signaling left, -1 = signaling right, 0 = off.
+	// Triggered by an upcoming left/right turn within signal range or
+	// a recent lane change while the LC cooldown is still active.
+	TurnSignal int8
 }
 
 type SignalView struct {

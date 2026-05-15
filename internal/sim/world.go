@@ -82,7 +82,37 @@ const (
 	speedFactorStdDev = 0.015
 	speedFactorMin    = 0.95
 	speedFactorMax    = 1.05
+
+	// turnSignalRange is how far before an intersection a vehicle starts
+	// signaling its upcoming left/right turn. Real-world driver behavior
+	// is roughly 30-50 m before the maneuver.
+	turnSignalRange = 50.0
 )
+
+// turnSignalFor returns +1 for left, -1 for right, 0 for off. Two
+// triggers: a recent lane change (while cooldown active) and an upcoming
+// turn within turnSignalRange. The LC signal takes precedence over the
+// turn signal when both fire — typically the LC is the more recent
+// intent.
+func turnSignalFor(net *network.Network, v *Vehicle) int8 {
+	if v.LaneChangeCooldown > 0 && v.LastLCDir != 0 {
+		return v.LastLCDir
+	}
+	if v.RouteIdx+1 >= len(v.Route) {
+		return 0
+	}
+	edge := &net.Edges[v.Edge]
+	if edge.Length-v.S > turnSignalRange {
+		return 0
+	}
+	switch network.ClassifyTurn(net, v.Edge, v.Route[v.RouteIdx+1]) {
+	case network.TurnLeft:
+		return 1
+	case network.TurnRight:
+		return -1
+	}
+	return 0
+}
 
 func NewWorld(net *network.Network, spawner Spawner, overrides map[network.IntersectionID]SignalConfig) *World {
 	sigs := make([]*SignalState, len(net.Intersections))
@@ -549,9 +579,11 @@ func (w *World) publishSnapshot() {
 			continue
 		}
 		x, y, hd := network.PositionOnEdge(w.Net, v.Edge, v.S)
+		signal := turnSignalFor(w.Net, v)
 		views = append(views, snapshot.VehicleView{
 			ID: uint32(v.ID), EdgeID: uint32(v.Edge), Lane: v.Lane,
 			X: x, Y: y, Heading: hd, Speed: v.V, Accel: v.A,
+			TurnSignal: signal,
 		})
 	}
 	// One SignalView per incoming approach, positioned a few meters back

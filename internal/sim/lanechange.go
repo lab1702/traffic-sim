@@ -67,6 +67,7 @@ func tryLaneChange(v *Vehicle, vi int, laneVehicles map[uint8][]int, vs []Vehicl
 		}
 		v.Lane = uint8(nl)
 		v.LaneChangeCooldown = laneChangeCooldown
+		v.LastLCDir = dl
 		return
 	}
 
@@ -113,6 +114,7 @@ func tryLaneChange(v *Vehicle, vi int, laneVehicles map[uint8][]int, vs []Vehicl
 		}
 		v.Lane = uint8(nl)
 		v.LaneChangeCooldown = laneChangeCooldown
+		v.LastLCDir = dl
 		return
 	}
 }
