@@ -537,3 +537,46 @@ func TestWorld_StuckVehicleDespawned(t *testing.T) {
 		t.Errorf("expected WARN log containing 'stuck vehicle despawned', got: %q", logBuf.String())
 	}
 }
+
+// TestWorld_StuckAtRedNotDespawned: a vehicle stopped at a red light for
+// longer than the stuck timeout must NOT be despawned, because
+// stopDistanceForRed returning true is the "legitimately stopped" branch.
+func TestWorld_StuckAtRedNotDespawned(t *testing.T) {
+	// Same setup as TestWorld_StopsAtRedLight: single edge ending in a
+	// signalized intersection forced all-red.
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 1, Pos: network.Point{X: 200, Y: 0}},
+	}
+	edges := []network.Edge{
+		{ID: 0, From: 0, To: 1, Length: 200, SpeedLimit: 10,
+			Lanes: []network.Lane{{Index: 0}}},
+	}
+	xs := []network.Intersection{
+		{ID: 0, NodeID: 1, Incoming: []network.EdgeID{0}, HasSignal: true},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	// Force the signal all-red by giving it an empty-green phase that
+	// outlasts the run.
+	w.SignalStates[0] = NewSignalState(SignalConfig{
+		Phases: []SignalPhase{{GreenEdges: nil, GreenDur: 1000, YellowDur: 0}},
+	})
+
+	w.Vehicles = []Vehicle{{ID: 1, Route: []network.EdgeID{0}, Edge: 0, S: 50, V: 10}}
+	w.nextID = 2
+
+	// 1500 ticks = 75 sim-seconds, well past the 60-second stuck timeout.
+	for i := 0; i < 1500; i++ {
+		w.Step()
+	}
+
+	if len(w.Vehicles) != 1 {
+		t.Fatalf("vehicle stopped at red should not be despawned, got %d alive", len(w.Vehicles))
+	}
+	v := &w.Vehicles[0]
+	if v.StuckTime != 0 {
+		t.Errorf("StuckTime should be 0 for a vehicle legitimately stopped at red, got %.3f", v.StuckTime)
+	}
+}
