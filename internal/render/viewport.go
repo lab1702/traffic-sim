@@ -134,6 +134,14 @@ func (v *Viewport) Draw(screen *ebiten.Image) {
 	DrawHUD(screen, snap.SimTime, len(snap.Vehicles))
 }
 
-func (v *Viewport) Layout(_, _ int) (int, int) {
-	return v.Width, v.Height
+// Layout is called by Ebitengine on every frame with the current outside
+// window size. We return the same size so the logical and physical
+// resolutions match (1:1 pixel scaling) and update Width/Height so the
+// world-to-screen math reflects the resized window. The camera position
+// and zoom stay put — a resize reveals more or less surrounding area, it
+// doesn't re-fit the network to the new size.
+func (v *Viewport) Layout(outW, outH int) (int, int) {
+	v.Width = outW
+	v.Height = outH
+	return outW, outH
 }

@@ -213,6 +213,7 @@ func runRun(args []string) {
 	vp := render.NewViewport(net, w.SnapshotBuf, 1280, 800)
 	ebiten.SetWindowSize(1280, 800)
 	ebiten.SetWindowTitle("traffic-sim")
+	ebiten.SetWindowResizingMode(ebiten.WindowResizingModeEnabled)
 	if err := ebiten.RunGame(&gameAdapter{vp: vp}); err != nil {
 		close(stop)
 		slog.Error("ebiten exited", "err", err)

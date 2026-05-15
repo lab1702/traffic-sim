@@ -59,6 +59,7 @@ func main() {
 	vp := render.NewViewport(net, buf, 1280, 800)
 	ebiten.SetWindowSize(1280, 800)
 	ebiten.SetWindowTitle("tracereplay")
+	ebiten.SetWindowResizingMode(ebiten.WindowResizingModeEnabled)
 	if err := ebiten.RunGame(&gameAdapter{vp: vp}); err != nil {
 		slog.Error("ebiten", "err", err)
 	}
