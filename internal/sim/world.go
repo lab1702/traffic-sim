@@ -6,7 +6,14 @@ import (
 
 	"github.com/lab1702/traffic-sim/internal/network"
 	"github.com/lab1702/traffic-sim/internal/snapshot"
+	"github.com/lab1702/traffic-sim/internal/trace"
 )
+
+// signalLast records the last-known signal state for deterministic change detection.
+type signalLast struct {
+	idx    int
+	yellow bool
+}
 
 // World owns mutable simulation state. Only the sim goroutine touches it.
 type World struct {
@@ -29,6 +36,14 @@ type World struct {
 
 	// SnapshotBuf is read by the renderer; published once per tick.
 	SnapshotBuf *snapshot.Buffer
+
+	// EmitTrace is called for every trace event. Default is a no-op.
+	// The sim never blocks on this function; callers must ensure it returns promptly.
+	EmitTrace func(tick uint64, simTime float64, e trace.Event)
+
+	// lastPhase tracks the last-known (PhaseIdx, IsYellow) per SignalState index
+	// to detect changes and emit SignalPhase events.
+	lastPhase []signalLast
 }
 
 const DefaultDt = 0.05 // 50 ms == 20 Hz
@@ -56,6 +71,7 @@ func NewWorld(net *network.Network, spawner Spawner, overrides map[network.Inter
 		SignalStates: sigs,
 		xByNodeID:    xByNode,
 		SnapshotBuf:  snapshot.New(),
+		EmitTrace:    func(uint64, float64, trace.Event) {},
 	}
 }
 
@@ -143,6 +159,25 @@ func (w *World) Step() {
 	for _, s := range w.SignalStates {
 		if s != nil {
 			s.Advance(w.dt)
+		}
+	}
+	// Emit SignalPhase events for any state whose (PhaseIdx, IsYellow) changed.
+	// Iterate by index (deterministic slice order).
+	if w.lastPhase == nil {
+		w.lastPhase = make([]signalLast, len(w.SignalStates))
+	}
+	for i, s := range w.SignalStates {
+		if s == nil {
+			continue
+		}
+		cur := signalLast{idx: s.PhaseIdx, yellow: s.IsYellow}
+		if w.lastPhase[i] != cur {
+			w.lastPhase[i] = cur
+			w.EmitTrace(w.Tick, w.SimTime, &trace.SignalPhase{
+				IntersectionID: uint32(i),
+				PhaseIdx:       uint8(s.PhaseIdx),
+				IsYellow:       s.IsYellow,
+			})
 		}
 	}
 
@@ -239,6 +274,9 @@ func (w *World) Step() {
 		}
 
 		stepIDM(v, lS, lV, has, w.Net, DefaultIDM(), w.dt)
+		if v.Despawned {
+			w.EmitTrace(w.Tick, w.SimTime, &trace.VehicleDespawn{VehicleID: uint32(v.ID)})
+		}
 
 		// Decrement lane-change cooldown.
 		if v.LaneChangeCooldown > 0 {
@@ -290,6 +328,18 @@ func (w *World) trySpawn(r SpawnRequest) {
 	}
 	w.nextID++
 	w.Vehicles = append(w.Vehicles, v)
+
+	// Emit spawn event.
+	route32 := make([]uint32, len(route))
+	for i, eid := range route {
+		route32[i] = uint32(eid)
+	}
+	w.EmitTrace(w.Tick, w.SimTime, &trace.VehicleSpawn{
+		VehicleID:  uint32(v.ID),
+		OriginNode: uint32(r.OriginNode),
+		DestNode:   uint32(r.DestNode),
+		Route:      route32,
+	})
 }
 
 func (w *World) compact() {
