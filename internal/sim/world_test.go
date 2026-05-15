@@ -1,9 +1,11 @@
 package sim
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/lab1702/traffic-sim/internal/network"
+	"github.com/lab1702/traffic-sim/internal/trace"
 )
 
 // build2x2Grid returns a 2x2 grid: 4 nodes arranged in a square,
@@ -165,5 +167,24 @@ func TestWorld_DeterminismSameSeed(t *testing.T) {
 	a2, _ := run()
 	if a1 != a2 {
 		t.Errorf("determinism: same seed produced different nextID: %d vs %d", a1, a2)
+	}
+}
+
+func TestWorld_TraceDeterminism(t *testing.T) {
+	run := func() []byte {
+		net := build2x2Grid()
+		w := NewWorld(net, NewRandomOD(net, 9001, 5.0), nil)
+		var buf bytes.Buffer
+		tw := trace.NewWriter(&buf)
+		w.EmitTrace = func(tick uint64, simTime float64, e trace.Event) {
+			_ = tw.Write(tick, simTime, e)
+		}
+		w.Run(3.0)
+		_ = tw.Close()
+		return buf.Bytes()
+	}
+	a, b := run(), run()
+	if !bytes.Equal(a, b) {
+		t.Fatalf("trace bytes differ across runs with same seed (len %d vs %d)", len(a), len(b))
 	}
 }
