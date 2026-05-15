@@ -17,12 +17,13 @@ package trace
 type Kind uint8
 
 const (
-	KindSimStart       Kind = 1
-	KindVehicleSpawn   Kind = 2
-	KindVehicleDespawn Kind = 3
-	KindSignalPhase    Kind = 4
-	KindMetricsTick    Kind = 5
-	KindSimEnd         Kind = 6
+	KindSimStart        Kind = 1
+	KindVehicleSpawn    Kind = 2
+	KindVehicleDespawn  Kind = 3
+	KindSignalPhase     Kind = 4
+	KindMetricsTick     Kind = 5
+	KindSimEnd          Kind = 6
+	KindSignalModeChange Kind = 7
 )
 
 // Event is implemented by every concrete event type.
@@ -85,3 +86,17 @@ type SimEnd struct {
 }
 
 func (*SimEnd) Kind() Kind { return KindSimEnd }
+
+// SignalModeChange records a change in a signal's operating mode
+// (normal/flash_a/flash_b/off). Initial non-normal modes (set via YAML
+// config) are emitted as a SignalModeChange at tick 0 so replay sees
+// the same starting state.
+//
+// The Mode field uses the same numeric values as sim.SignalMode:
+// 0=normal, 1=flash_a, 2=flash_b, 3=off.
+type SignalModeChange struct {
+	IntersectionID uint32
+	Mode           uint8
+}
+
+func (*SignalModeChange) Kind() Kind { return KindSignalModeChange }

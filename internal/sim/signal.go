@@ -7,6 +7,58 @@ import (
 	"github.com/lab1702/traffic-sim/internal/network"
 )
 
+// SignalMode is the operating mode of a signal. Most signals run in
+// ModeNormal, cycling through their fixed-time phases. Off-hours or
+// fault conditions can put a signal into a flash mode (one axis blinks
+// yellow with priority; the other blinks red and must yield) or fully
+// dark Off mode (treated as a 4-way stop).
+type SignalMode uint8
+
+const (
+	// ModeNormal runs the configured fixed-time cycle.
+	ModeNormal SignalMode = iota
+	// ModeFlashA: approaches in phase 0 blink yellow (priority);
+	// approaches in other phases blink red (must yield).
+	ModeFlashA
+	// ModeFlashB: approaches in phase 1 blink yellow (priority);
+	// approaches in other phases blink red (must yield). Intended for
+	// flipping which axis has priority.
+	ModeFlashB
+	// ModeOff: all approaches dark. Drivers treat the intersection as a
+	// 4-way stop; no approach has priority.
+	ModeOff
+)
+
+func (m SignalMode) String() string {
+	switch m {
+	case ModeNormal:
+		return "normal"
+	case ModeFlashA:
+		return "flash_a"
+	case ModeFlashB:
+		return "flash_b"
+	case ModeOff:
+		return "off"
+	default:
+		return "unknown"
+	}
+}
+
+// ParseSignalMode is the inverse of String; returns false for unknown values.
+func ParseSignalMode(s string) (SignalMode, bool) {
+	switch s {
+	case "", "normal":
+		return ModeNormal, true
+	case "flash_a":
+		return ModeFlashA, true
+	case "flash_b":
+		return ModeFlashB, true
+	case "off":
+		return ModeOff, true
+	}
+	return ModeNormal, false
+}
+
 // SignalConfig is the per-intersection plan: ordered phases that repeat.
 type SignalConfig struct {
 	// IntersectionID is set when this config is applied to a specific
@@ -14,6 +66,9 @@ type SignalConfig struct {
 	IntersectionID network.IntersectionID
 
 	Phases []SignalPhase
+
+	// InitialMode is the mode the signal starts in. Defaults to ModeNormal.
+	InitialMode SignalMode
 }
 
 // SignalPhase describes which approaches get green for how long, plus the
@@ -34,14 +89,20 @@ type SignalState struct {
 	PhaseIdx int
 	Elapsed  float64 // seconds within current phase
 	IsYellow bool
+	Mode     SignalMode // Normal/FlashA/FlashB/Off
 }
 
 func NewSignalState(c SignalConfig) *SignalState {
-	return &SignalState{Config: c}
+	return &SignalState{Config: c, Mode: c.InitialMode}
 }
 
-// Advance moves the state machine forward by dt seconds.
+// Advance moves the state machine forward by dt seconds. No-op for
+// non-normal modes (flash and off are time-independent visually; the
+// renderer pulses on its own wall-clock, and behavior is mode-derived).
 func (s *SignalState) Advance(dt float64) {
+	if s.Mode != ModeNormal {
+		return
+	}
 	if len(s.Config.Phases) == 0 {
 		return
 	}
@@ -65,16 +126,58 @@ func (s *SignalState) Advance(dt float64) {
 	}
 }
 
-// GreenFor returns true if the given incoming-edge position is green or
-// yellow during the current phase. Vehicles treat yellow as "go" (real
-// drivers do too); they only stop on red.
+// GreenFor returns true if the given incoming-edge position is permitted
+// to proceed without first stopping/yielding.
+//
+//   - ModeNormal: yes iff this approach is in the current phase's GreenEdges
+//     (yellow counts as green; drivers only stop on red).
+//   - ModeFlashA: yes iff this approach is in phase 0 (flash yellow with priority).
+//   - ModeFlashB: yes iff this approach is in phase 1 (flash yellow with priority).
+//   - ModeOff:    no approach has implicit right-of-way; all approaches yield.
+//     GreenFor returns false; the caller is responsible for gap-acceptance.
 func (s *SignalState) GreenFor(incomingPos int) bool {
-	if len(s.Config.Phases) == 0 {
-		return true // no plan == permanent green
+	switch s.Mode {
+	case ModeNormal:
+		if len(s.Config.Phases) == 0 {
+			return true // no plan == permanent green
+		}
+		p := s.Config.Phases[s.PhaseIdx]
+		for _, e := range p.GreenEdges {
+			if e == incomingPos {
+				return true
+			}
+		}
+		return false
+	case ModeFlashA:
+		return phaseContains(s.Config, 0, incomingPos)
+	case ModeFlashB:
+		return phaseContains(s.Config, 1, incomingPos)
+	case ModeOff:
+		return false
 	}
-	p := s.Config.Phases[s.PhaseIdx]
-	for _, e := range p.GreenEdges {
-		if e == incomingPos {
+	return false
+}
+
+// MustYield reports whether vehicles arriving on this approach must use
+// gap-acceptance (treat it like a stop sign or unsignalized side road).
+// True for blinking-red approaches under FlashA/FlashB, all approaches
+// under Off, and never under Normal (normal red is a hard stop, not a yield).
+func (s *SignalState) MustYield(incomingPos int) bool {
+	switch s.Mode {
+	case ModeFlashA, ModeFlashB:
+		return !s.GreenFor(incomingPos)
+	case ModeOff:
+		return true
+	}
+	return false
+}
+
+func phaseContains(c SignalConfig, phaseIdx, pos int) bool {
+	if phaseIdx < 0 || phaseIdx >= len(c.Phases) {
+		return false
+	}
+	for _, e := range c.Phases[phaseIdx].GreenEdges {
+		if e == pos {
 			return true
 		}
 	}

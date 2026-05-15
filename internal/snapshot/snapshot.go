@@ -29,6 +29,11 @@ type SignalView struct {
 	X, Y           float64
 	IsRed          bool
 	IsYellow       bool
+	// Mode is the operating mode of the signal (0=normal, 1=flash_a,
+	// 2=flash_b, 3=off). The renderer uses this to decide whether to
+	// blink (flash modes) or render dark (off mode). Numeric to avoid
+	// snapshot depending on the sim package.
+	Mode uint8
 }
 
 type Buffer struct {

@@ -14,6 +14,10 @@ import (
 type SignalOverride struct {
 	IntersectionID uint32        `yaml:"intersection_id"`
 	Phases         []PhaseConfig `yaml:"phases"`
+	// Mode is the initial operating mode: "normal" (default), "flash_a",
+	// "flash_b", or "off". Empty == "normal". Phases are still honored
+	// for the geometry of flash modes (phase 0 vs phase 1 grouping).
+	Mode string `yaml:"mode"`
 }
 
 type PhaseConfig struct {

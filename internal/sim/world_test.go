@@ -307,6 +307,167 @@ func TestDefaultSignalConfig_PairsOpposingApproaches(t *testing.T) {
 	}
 }
 
+// TestWorld_FlashRedYields: a vehicle approaching a flash-red signal
+// with no crossing traffic should NOT hard-stop (it proceeds). A vehicle
+// approaching the same intersection while another vehicle is bearing
+// down the flash-yellow axis MUST stop near the line.
+func TestWorld_FlashRedYields(t *testing.T) {
+	// 4-way intersection identical to TestWorld_SnapshotEmitsSignalPerApproach.
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 100}},
+		{ID: 1, Pos: network.Point{X: 100, Y: 0}},
+		{ID: 2, Pos: network.Point{X: 0, Y: -100}},
+		{ID: 3, Pos: network.Point{X: -100, Y: 0}},
+		{ID: 4, Pos: network.Point{X: 0, Y: 0}},
+	}
+	mkEdge := func(id, from, to int) network.Edge {
+		return network.Edge{
+			ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: 100, SpeedLimit: 10,
+			Lanes:    []network.Lane{{Index: 0}},
+			Geometry: []network.Point{nodes[from].Pos, nodes[to].Pos},
+		}
+	}
+	edges := []network.Edge{
+		mkEdge(0, 0, 4), // N -> C
+		mkEdge(1, 1, 4), // E -> C
+		mkEdge(2, 2, 4), // S -> C
+		mkEdge(3, 3, 4), // W -> C
+		mkEdge(4, 4, 0), mkEdge(5, 4, 1), mkEdge(6, 4, 2), mkEdge(7, 4, 3), // outbound (unused but needed for compaction)
+	}
+	xs := []network.Intersection{
+		{
+			ID: 0, NodeID: 4,
+			Incoming:  []network.EdgeID{0, 1, 2, 3},
+			Outgoing:  []network.EdgeID{4, 5, 6, 7},
+			HasSignal: true,
+		},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	// ModeFlashA: phase 0 = positions {0, 2} (N, S) = yellow priority;
+	// positions {1, 3} (E, W) = red yield.
+	cfg := DefaultSignalConfig(xs[0].Incoming, net)
+
+	// --- Sub-test 1: vehicle on red approach proceeds when no crossing traffic.
+	{
+		w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+		w.SignalStates[0] = NewSignalState(cfg)
+		// FlashB so phase-1 (NS by heading bucketing) is the yellow
+		// priority axis and E/W must yield.
+		w.SignalStates[0].Mode = ModeFlashB
+		// One vehicle on E approach (flash-red), moving at speed limit.
+		w.Vehicles = []Vehicle{
+			{ID: 1, Route: []network.EdgeID{1, 5}, Edge: 1, S: 80, V: 10},
+		}
+		w.nextID = 2
+		for i := 0; i < 100; i++ {
+			w.Step()
+		}
+		// Should have advanced past the stop line (S would have rolled
+		// over to the next edge in the route) or despawned.
+		alive := 0
+		for _, v := range w.Vehicles {
+			if !v.Despawned {
+				alive++
+			}
+		}
+		// Vehicle either despawned or moved to outbound edge.
+		if alive == 1 && w.Vehicles[0].Edge == 1 && w.Vehicles[0].V < 1.0 {
+			t.Errorf("flash-red with no crossing traffic should proceed, but vehicle is stuck at S=%.1f V=%.1f", w.Vehicles[0].S, w.Vehicles[0].V)
+		}
+	}
+
+	// --- Sub-test 2: vehicle on red approach waits when crossing traffic approaches.
+	{
+		w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+		w.SignalStates[0] = NewSignalState(cfg)
+		// FlashB so phase-1 (NS by heading bucketing) is the yellow
+		// priority axis and E/W must yield.
+		w.SignalStates[0].Mode = ModeFlashB
+		// E approach vehicle close to stop line + N approach vehicle
+		// approaching with ETA ≈ 2s (well inside the 3s gap threshold).
+		w.Vehicles = []Vehicle{
+			{ID: 1, Route: []network.EdgeID{1, 5}, Edge: 1, S: 70, V: 10}, // E (red)
+			{ID: 2, Route: []network.EdgeID{0, 6}, Edge: 0, S: 80, V: 10}, // N (yellow priority, ETA=2s)
+		}
+		w.nextID = 3
+		// Tick twice — long enough for yield logic to kick in, short
+		// enough that the priority vehicle hasn't cleared yet.
+		for i := 0; i < 5; i++ {
+			w.Step()
+		}
+		// Find the red-approach vehicle by ID.
+		var red *Vehicle
+		for i := range w.Vehicles {
+			if w.Vehicles[i].ID == 1 {
+				red = &w.Vehicles[i]
+			}
+		}
+		if red == nil {
+			t.Fatal("lost the flash-red vehicle")
+		}
+		if red.Edge != 1 {
+			t.Errorf("red vehicle should still be on approach edge 1, got edge %d", red.Edge)
+		}
+		// Should be decelerating because of crossing traffic.
+		if red.A >= 0 {
+			t.Errorf("flash-red vehicle with priority traffic ETA<gap should be braking, A=%.2f", red.A)
+		}
+	}
+}
+
+// TestWorld_ControlChannelTogglesMode: a ControlEvent pushed through the
+// control channel must change the signal's Mode by the next Step().
+func TestWorld_ControlChannelTogglesMode(t *testing.T) {
+	// Build a single-edge graph ending at a signalized intersection.
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 1, Pos: network.Point{X: 100, Y: 0}},
+	}
+	edges := []network.Edge{
+		{
+			ID: 0, From: 0, To: 1, Length: 100, SpeedLimit: 10,
+			Lanes:    []network.Lane{{Index: 0}},
+			Geometry: []network.Point{{X: 0, Y: 0}, {X: 100, Y: 0}},
+		},
+	}
+	xs := []network.Intersection{
+		{ID: 0, NodeID: 1, Incoming: []network.EdgeID{0}, HasSignal: true},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	ch := make(chan ControlEvent, 4)
+	w.Control = ch
+
+	// Initial mode: Normal.
+	if w.SignalStates[0].Mode != ModeNormal {
+		t.Fatalf("initial mode should be Normal, got %v", w.SignalStates[0].Mode)
+	}
+
+	// Push a Flash A event; one Step should apply it.
+	ch <- ControlEvent{IntersectionID: 0, Mode: ModeFlashA}
+	w.Step()
+	if w.SignalStates[0].Mode != ModeFlashA {
+		t.Errorf("after control event, mode should be FlashA, got %v", w.SignalStates[0].Mode)
+	}
+
+	// Push Off, then Normal — both should apply within Step's drain loop.
+	ch <- ControlEvent{IntersectionID: 0, Mode: ModeOff}
+	ch <- ControlEvent{IntersectionID: 0, Mode: ModeNormal}
+	w.Step()
+	if w.SignalStates[0].Mode != ModeNormal {
+		t.Errorf("after two control events, final mode should be Normal, got %v", w.SignalStates[0].Mode)
+	}
+	// Returning to Normal must reset phase progression (Elapsed gets
+	// one tick added by the subsequent Advance call, so check phase only).
+	if w.SignalStates[0].PhaseIdx != 0 || w.SignalStates[0].IsYellow {
+		t.Errorf("Normal reset incomplete: phase=%d yellow=%v",
+			w.SignalStates[0].PhaseIdx, w.SignalStates[0].IsYellow)
+	}
+}
+
 func TestWorld_TraceDeterminism(t *testing.T) {
 	run := func() []byte {
 		net := build2x2Grid()

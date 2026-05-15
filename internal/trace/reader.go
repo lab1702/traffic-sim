@@ -148,6 +148,15 @@ func decodePayload(k Kind, p []byte) (Event, error) {
 		}
 		e.Reason = string(buf)
 		return e, nil
+	case KindSignalModeChange:
+		e := &SignalModeChange{}
+		if err := binary.Read(rd, le, &e.IntersectionID); err != nil {
+			return nil, err
+		}
+		if err := binary.Read(rd, le, &e.Mode); err != nil {
+			return nil, err
+		}
+		return e, nil
 	}
 	return nil, fmt.Errorf("unknown event kind: %d", k)
 }

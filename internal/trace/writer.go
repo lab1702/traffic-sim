@@ -128,6 +128,11 @@ func encodePayload(b *bytes.Buffer, e Event) error {
 		}
 		_, err := b.WriteString(ev.Reason)
 		return err
+	case *SignalModeChange:
+		if err := binary.Write(b, le, ev.IntersectionID); err != nil {
+			return err
+		}
+		return binary.Write(b, le, ev.Mode)
 	default:
 		return fmt.Errorf("unknown event kind: %T", e)
 	}

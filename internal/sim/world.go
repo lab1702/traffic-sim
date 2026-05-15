@@ -14,6 +14,13 @@ type signalLast struct {
 	yellow bool
 }
 
+// ControlEvent is a runtime command from the UI to the sim. Today only
+// signal-mode changes; extend with new fields/variants as needed.
+type ControlEvent struct {
+	IntersectionID network.IntersectionID
+	Mode           SignalMode
+}
+
 // World owns mutable simulation state. Only the sim goroutine touches it.
 type World struct {
 	Net     *network.Network
@@ -43,6 +50,15 @@ type World struct {
 	// lastPhase tracks the last-known (PhaseIdx, IsYellow) per SignalState index
 	// to detect changes and emit SignalPhase events.
 	lastPhase []signalLast
+
+	// lastMode tracks the last-known Mode per SignalState index for emitting
+	// SignalModeChange events. A nil slice means uninitialized; on the first
+	// tick any non-zero (non-Normal) mode will be emitted.
+	lastMode []SignalMode
+
+	// Control delivers runtime UI commands (e.g. mode toggles from clicks).
+	// Step drains it non-blocking at the top of each tick. Nil disables.
+	Control <-chan ControlEvent
 }
 
 const (
@@ -97,6 +113,11 @@ func (w *World) stopDistanceForRed(v *Vehicle) (float64, bool) {
 	if st == nil {
 		return 0, false
 	}
+	// In flash/off modes "red" means "must yield" (gap-acceptance), not
+	// "hard stop". stopDistanceForYield handles those cases instead.
+	if st.Mode != ModeNormal {
+		return 0, false
+	}
 	pos := IncomingPos(x, v.Edge)
 	if pos < 0 {
 		return 0, false
@@ -114,30 +135,76 @@ func (w *World) stopDistanceForRed(v *Vehicle) (float64, bool) {
 
 const gapThresholdSec = 3.0
 
-// stopDistanceForYield returns (distance to stop line, true) if the
-// vehicle's current edge ends at an UNSIGNALIZED intersection AND a
-// higher-priority incoming edge has a vehicle approaching within
-// gapThresholdSec seconds. "Higher priority" is defined here as a lower
-// Incoming index (i.e., x.Incoming[0] is the priority road).
+// stopDistanceForYield returns (distance to stop line, true) when the
+// vehicle's current edge ends at an intersection where it must yield via
+// gap-acceptance. Covers three cases:
+//
+//  1. Unsignalized intersection — yield to lower-indexed approaches
+//     (Incoming[0] is the priority road).
+//  2. Signal in flash mode (A or B) — blinking-red approaches must
+//     yield to blinking-yellow approaches (which have priority).
+//  3. Signal in off mode — every approach must yield to lower-indexed
+//     approaches (approximates a 4-way stop; position 0 has priority).
+//
+// Returns (0, false) when no yield is required.
 func (w *World) stopDistanceForYield(v *Vehicle, byEdge map[network.EdgeID][]int) (float64, bool) {
 	edge := &w.Net.Edges[v.Edge]
 	x, ok := w.xByNodeID[edge.To]
-	if !ok || x.HasSignal {
+	if !ok {
 		return 0, false
 	}
 	myPos := IncomingPos(x, v.Edge)
-	if myPos <= 0 {
-		// No higher-priority edge; we're the priority road (or unknown).
+	if myPos < 0 {
 		return 0, false
 	}
+
+	// Determine which incoming positions have priority over `myPos`.
+	var priority []int
+	if x.HasSignal {
+		st := w.SignalStates[x.ID]
+		if st == nil {
+			return 0, false
+		}
+		switch st.Mode {
+		case ModeNormal:
+			// Hard-stop handled by stopDistanceForRed; no yield path here.
+			return 0, false
+		case ModeFlashA, ModeFlashB:
+			if !st.MustYield(myPos) {
+				return 0, false // we're blinking yellow; we have priority
+			}
+			for j := range x.Incoming {
+				if st.GreenFor(j) { // blinking-yellow approach has priority
+					priority = append(priority, j)
+				}
+			}
+		case ModeOff:
+			// 4-way-stop approximation: lower-indexed approach has priority.
+			for j := 0; j < myPos; j++ {
+				priority = append(priority, j)
+			}
+		}
+	} else {
+		// Unsignalized: lower-indexed approach has priority.
+		if myPos == 0 {
+			return 0, false
+		}
+		for j := 0; j < myPos; j++ {
+			priority = append(priority, j)
+		}
+	}
+
+	if len(priority) == 0 {
+		return 0, false
+	}
+
 	myDist := edge.Length - v.S
-	for i := 0; i < myPos; i++ {
-		otherEdgeID := x.Incoming[i]
+	for _, otherPos := range priority {
+		otherEdgeID := x.Incoming[otherPos]
 		others := byEdge[otherEdgeID]
 		if len(others) == 0 {
 			continue
 		}
-		// Find the closest-to-stop-line vehicle on the other approach.
 		otherEdge := &w.Net.Edges[otherEdgeID]
 		bestETA := 1e9
 		for _, oi := range others {
@@ -161,28 +228,52 @@ func (w *World) stopDistanceForYield(v *Vehicle, byEdge map[network.EdgeID][]int
 
 // Step advances the sim by one tick (DefaultDt seconds).
 func (w *World) Step() {
-	// 0. Advance all signal phases.
+	// 0a. Drain any pending UI control events. Non-blocking; if the
+	// channel is empty we move on immediately. Bounded loop guards
+	// against an attacker flooding the channel.
+	if w.Control != nil {
+		for i := 0; i < 64; i++ {
+			select {
+			case ev := <-w.Control:
+				w.applyControl(ev)
+			default:
+				i = 64
+			}
+		}
+	}
+
+	// 0b. Advance all signal phases.
 	for _, s := range w.SignalStates {
 		if s != nil {
 			s.Advance(w.dt)
 		}
 	}
-	// Emit SignalPhase events for any state whose (PhaseIdx, IsYellow) changed.
-	// Iterate by index (deterministic slice order).
+	// Emit SignalPhase and SignalModeChange events for any state whose
+	// values changed. Iterate by index (deterministic slice order).
 	if w.lastPhase == nil {
 		w.lastPhase = make([]signalLast, len(w.SignalStates))
+	}
+	if w.lastMode == nil {
+		w.lastMode = make([]SignalMode, len(w.SignalStates))
 	}
 	for i, s := range w.SignalStates {
 		if s == nil {
 			continue
 		}
-		cur := signalLast{idx: s.PhaseIdx, yellow: s.IsYellow}
-		if w.lastPhase[i] != cur {
-			w.lastPhase[i] = cur
+		curPhase := signalLast{idx: s.PhaseIdx, yellow: s.IsYellow}
+		if w.lastPhase[i] != curPhase {
+			w.lastPhase[i] = curPhase
 			w.EmitTrace(w.Tick, w.SimTime, &trace.SignalPhase{
 				IntersectionID: uint32(i),
 				PhaseIdx:       uint8(s.PhaseIdx),
 				IsYellow:       s.IsYellow,
+			})
+		}
+		if w.lastMode[i] != s.Mode {
+			w.lastMode[i] = s.Mode
+			w.EmitTrace(w.Tick, w.SimTime, &trace.SignalModeChange{
+				IntersectionID: uint32(i),
+				Mode:           uint8(s.Mode),
 			})
 		}
 	}
@@ -345,6 +436,26 @@ func (w *World) trySpawn(r SpawnRequest) {
 	})
 }
 
+// applyControl mutates sim state in response to a UI command.
+func (w *World) applyControl(ev ControlEvent) {
+	id := int(ev.IntersectionID)
+	if id < 0 || id >= len(w.SignalStates) {
+		return
+	}
+	st := w.SignalStates[id]
+	if st == nil {
+		return
+	}
+	st.Mode = ev.Mode
+	// Reset phase progression when switching back to normal so the cycle
+	// restarts cleanly. Flash/off modes ignore phase progression entirely.
+	if st.Mode == ModeNormal {
+		st.PhaseIdx = 0
+		st.Elapsed = 0
+		st.IsYellow = false
+	}
+}
+
 func (w *World) compact() {
 	dst := 0
 	for _, v := range w.Vehicles {
@@ -394,6 +505,7 @@ func (w *World) publishSnapshot() {
 				X:              px, Y: py,
 				IsRed:    !green,
 				IsYellow: green && st.IsYellow,
+				Mode:     uint8(st.Mode),
 			})
 		}
 	}

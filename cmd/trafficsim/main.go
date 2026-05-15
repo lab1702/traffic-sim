@@ -209,15 +209,35 @@ func runRun(args []string) {
 					"id", o.IntersectionID, "max", len(net.Intersections)-1)
 				continue
 			}
-			overrides[network.IntersectionID(o.IntersectionID)] = sim.SignalConfig{
+			mode, ok := sim.ParseSignalMode(o.Mode)
+			if !ok {
+				slog.Warn("signal override has unknown mode; using normal",
+					"id", o.IntersectionID, "mode", o.Mode)
+			}
+			cfg := sim.SignalConfig{
 				IntersectionID: network.IntersectionID(o.IntersectionID),
 				Phases:         phases,
+				InitialMode:    mode,
 			}
+			// If only `mode:` is set (no phases), inherit the auto-generated
+			// plan for that intersection so phase 0/1 groupings still work
+			// for flash-mode semantics.
+			if len(phases) == 0 {
+				x := &net.Intersections[o.IntersectionID]
+				cfg.Phases = sim.DefaultSignalConfig(x.Incoming, net).Phases
+			}
+			overrides[network.IntersectionID(o.IntersectionID)] = cfg
 		}
 	}
 
 	spawner := sim.NewRandomOD(net, *seed, *spawnRate)
 	w := sim.NewWorld(net, spawner, overrides)
+
+	// Control channel from the UI to the sim. Renderer pushes mode-toggle
+	// events here; sim drains at the top of each Step. Buffered so a
+	// pause in the sim goroutine doesn't block the UI.
+	controlCh := make(chan sim.ControlEvent, 32)
+	w.Control = controlCh
 
 	if *tracePath != "" {
 		f, err := os.Create(*tracePath)
@@ -300,6 +320,16 @@ func runRun(args []string) {
 	}()
 
 	vp := render.NewViewport(net, w.SnapshotBuf, 1280, 800)
+	vp.OnSetMode = func(intersectionID uint32, mode uint8) {
+		select {
+		case controlCh <- sim.ControlEvent{
+			IntersectionID: network.IntersectionID(intersectionID),
+			Mode:           sim.SignalMode(mode),
+		}:
+		default:
+			slog.Warn("control channel full; dropping signal mode change")
+		}
+	}
 	ebiten.SetWindowSize(1280, 800)
 	ebiten.SetWindowTitle("traffic-sim")
 	ebiten.SetWindowResizingMode(ebiten.WindowResizingModeEnabled)

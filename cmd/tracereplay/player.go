@@ -138,14 +138,30 @@ func (p *player) apply(hdr trace.Header, ev trace.Event) {
 		}
 		st.PhaseIdx = int(e.PhaseIdx)
 		st.IsYellow = e.IsYellow
-		for i := range p.signals {
-			if p.signals[i].intersectionID != e.IntersectionID {
-				continue
-			}
-			isGreen := st.GreenFor(p.signals[i].incomingPos)
-			p.signals[i].view.IsYellow = isGreen && e.IsYellow
-			p.signals[i].view.IsRed = !isGreen
+		p.refreshSignalColors(e.IntersectionID)
+	case *trace.SignalModeChange:
+		st := p.signalStates[e.IntersectionID]
+		if st == nil {
+			return
 		}
+		st.Mode = sim.SignalMode(e.Mode)
+		p.refreshSignalColors(e.IntersectionID)
+	}
+}
+
+func (p *player) refreshSignalColors(intersectionID uint32) {
+	st := p.signalStates[intersectionID]
+	if st == nil {
+		return
+	}
+	for i := range p.signals {
+		if p.signals[i].intersectionID != intersectionID {
+			continue
+		}
+		isGreen := st.GreenFor(p.signals[i].incomingPos)
+		p.signals[i].view.IsYellow = isGreen && st.IsYellow
+		p.signals[i].view.IsRed = !isGreen
+		p.signals[i].view.Mode = uint8(st.Mode)
 	}
 }
 
