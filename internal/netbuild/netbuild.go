@@ -173,6 +173,12 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 		keepLargestComponent(nodes, edges, intersections, segChains, osmWayOfEdge, edgeIsForward)
 	report.ComponentsDropped = droppedComponents
 
+	// 6a-bis. Sort Intersection.Incoming by source-OSM-way highway priority
+	// so the sim's "lower index = higher priority" yield rule maps to road
+	// class. Without this, a residential side street can outrank a main
+	// arterial purely because of edge-ordering accident.
+	sortIncomingByPriority(intersections, osmWayOfEdge, feat)
+
 	// 6b. Resolve OSM turn restriction relations to BannedTurns on the
 	// intersections (writes through pointers into the slice).
 	report.RestrictionsApplied, report.RestrictionsSkipped =
