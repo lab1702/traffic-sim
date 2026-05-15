@@ -976,15 +976,14 @@ func TestWorld_StopSign_GapAcceptance(t *testing.T) {
 
 	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
 	// Priority vehicle pinned close to the line at low speed (ETA inside
-	// gapThresholdSec). Stop vehicle approaching its line (starts at S=85
-	// so it only has 15m to decelerate, ensuring it hits the stop by tick 20).
+	// gapThresholdSec). Stop vehicle approaching its line (starts at S=50, V=8).
 	w.Vehicles = []Vehicle{
 		{ID: 1, Route: []network.EdgeID{0, 2}, Edge: 0, S: 99, V: 0.5},
-		{ID: 2, Route: []network.EdgeID{1, 3}, Edge: 1, S: 85, V: 8},
+		{ID: 2, Route: []network.EdgeID{1, 3}, Edge: 1, S: 50, V: 8},
 	}
 	w.nextID = 3
 
-	for i := 0; i < 200; i++ {
+	for i := 0; i < 500; i++ {
 		// Re-pin the priority vehicle so the stop-controlled vehicle
 		// keeps seeing it as imminent cross-traffic.
 		for j := range w.Vehicles {
