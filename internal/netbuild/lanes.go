@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/lab1702/traffic-sim/internal/network"
+	"github.com/lab1702/traffic-sim/internal/osmload"
+	"github.com/paulmach/osm"
 )
 
 // parseTurnLaneSpec parses one lane's spec from an OSM turn:lanes string.
@@ -177,6 +179,75 @@ func assignAllowedTurnsForEdge(
 		}
 	}
 	return result
+}
+
+// turnLanesTagForDirection returns the OSM turn:lanes string for an edge
+// in the given direction. forward=true uses turn:lanes:forward, falling
+// back to turn:lanes; forward=false uses turn:lanes:backward, falling
+// back to turn:lanes.
+func turnLanesTagForDirection(tags osm.Tags, forward bool) string {
+	directional := "turn:lanes:forward"
+	if !forward {
+		directional = "turn:lanes:backward"
+	}
+	var generic string
+	for _, t := range tags {
+		switch t.Key {
+		case directional:
+			return t.Value
+		case "turn:lanes":
+			generic = t.Value
+		}
+	}
+	return generic
+}
+
+// populateAllowedTurns runs the per-incoming-edge lane assignment for every
+// multi-edge intersection in `net`, writing into Lane.AllowedTurns in place.
+// `feat` and `osmWayOfEdge` are used to look up OSM turn:lanes tags.
+//
+// `edgeIsForward[i]` reports whether edge i was constructed as the forward
+// direction of its source OSM way. Two-way ways produce one forward and
+// one reverse edge.
+func populateAllowedTurns(
+	net *network.Network,
+	feat *osmload.Features,
+	osmWayOfEdge []osm.WayID,
+	edgeIsForward []bool,
+) {
+	wayByID := make(map[osm.WayID]*osm.Way, len(feat.Ways))
+	for _, w := range feat.Ways {
+		wayByID[w.ID] = w
+	}
+	for ix := range net.Intersections {
+		x := &net.Intersections[ix]
+		if len(x.Outgoing) < 2 {
+			continue
+		}
+		for _, inc := range x.Incoming {
+			incEdge := &net.Edges[inc]
+			if len(incEdge.Lanes) == 0 {
+				continue
+			}
+			var spec [][]network.TurnCategory
+			if int(inc) < len(osmWayOfEdge) && int(inc) < len(edgeIsForward) {
+				wayID := osmWayOfEdge[inc]
+				if w, ok := wayByID[wayID]; ok && w != nil {
+					forward := edgeIsForward[inc]
+					tag := turnLanesTagForDirection(w.Tags, forward)
+					if tag != "" {
+						spec = parseTurnLanesString(tag)
+					}
+				}
+			}
+			allowed := assignAllowedTurnsForEdge(net, inc, x, spec)
+			for li := range incEdge.Lanes {
+				if li < len(allowed) {
+					incEdge.Lanes[li].AllowedTurns = allowed[li]
+				}
+			}
+		}
+	}
 }
 
 // assignLanesGeometric returns a per-lane list of allowed turn categories

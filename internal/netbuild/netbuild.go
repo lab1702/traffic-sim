@@ -91,6 +91,7 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 	// restriction relations referencing OSM way IDs can later be resolved
 	// to internal EdgeIDs (post-prune).
 	var osmWayOfEdge []osm.WayID
+	var edgeIsForward []bool
 	report := Report{}
 	for _, w := range feat.Ways {
 		segs := splitAtIntersections(w, isIntersection)
@@ -142,6 +143,7 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 				Lanes: makeLanes(lanesPerDir), Length: length, SpeedLimit: speedFwd, Geometry: geom,
 			})
 			osmWayOfEdge = append(osmWayOfEdge, w.ID)
+			edgeIsForward = append(edgeIsForward, true)
 			if !oneway {
 				revGeom := reverseGeom(geom)
 				edges = append(edges, network.Edge{
@@ -149,6 +151,7 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 					Lanes: makeLanes(lanesPerDir), Length: length, SpeedLimit: speedBwd, Geometry: revGeom,
 				})
 				osmWayOfEdge = append(osmWayOfEdge, w.ID)
+				edgeIsForward = append(edgeIsForward, false)
 			}
 		}
 	}
@@ -166,13 +169,19 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 	intersections := buildIntersections(nodes, edges, feat, osmToNet, realIntersectionNetNodes)
 
 	// 6. Prune to largest connected component.
-	nodes, edges, intersections, osmWayOfEdge, droppedComponents := keepLargestComponent(nodes, edges, intersections, segChains, osmWayOfEdge)
+	nodes, edges, intersections, osmWayOfEdge, edgeIsForward, droppedComponents :=
+		keepLargestComponent(nodes, edges, intersections, segChains, osmWayOfEdge, edgeIsForward)
 	report.ComponentsDropped = droppedComponents
 
 	// 6b. Resolve OSM turn restriction relations to BannedTurns on the
 	// intersections (writes through pointers into the slice).
 	report.RestrictionsApplied, report.RestrictionsSkipped =
 		applyOSMRestrictions(intersections, edges, osmWayOfEdge, osmToNet, feat.Restrictions)
+
+	// 6c. Populate Lane.AllowedTurns per the turn-aware-lane-choice design.
+	// Done after restrictions so BannedTurns is authoritative.
+	tmpNet := &network.Network{Nodes: nodes, Edges: edges, Intersections: intersections}
+	populateAllowedTurns(tmpNet, feat, osmWayOfEdge, edgeIsForward)
 
 	// 7. Build spatial grid.
 	bounds := computeBounds(nodes)
@@ -402,8 +411,9 @@ func buildIntersections(nodes []network.Node, edges []network.Edge,
 // their segment's component.
 // Returns the new slices and the number of dropped components.
 func keepLargestComponent(nodes []network.Node, edges []network.Edge,
-	xs []network.Intersection, segChains [][]network.NodeID, osmWayOfEdge []osm.WayID,
-) ([]network.Node, []network.Edge, []network.Intersection, []osm.WayID, int) {
+	xs []network.Intersection, segChains [][]network.NodeID,
+	osmWayOfEdge []osm.WayID, edgeIsForward []bool,
+) ([]network.Node, []network.Edge, []network.Intersection, []osm.WayID, []bool, int) {
 	parent := make([]network.NodeID, len(nodes))
 	for i := range parent {
 		parent[i] = network.NodeID(i)
@@ -458,6 +468,7 @@ func keepLargestComponent(nodes []network.Node, edges []network.Edge,
 	}
 	var newEdges []network.Edge
 	var newOsmWayOf []osm.WayID
+	var newEdgeIsForward []bool
 	for i, e := range edges {
 		if !keep(e.From) || !keep(e.To) {
 			continue
@@ -468,6 +479,9 @@ func keepLargestComponent(nodes []network.Node, edges []network.Edge,
 		newEdges = append(newEdges, e)
 		if i < len(osmWayOfEdge) {
 			newOsmWayOf = append(newOsmWayOf, osmWayOfEdge[i])
+		}
+		if i < len(edgeIsForward) {
+			newEdgeIsForward = append(newEdgeIsForward, edgeIsForward[i])
 		}
 	}
 	// Intersections must be rebuilt because edge IDs changed.
@@ -493,5 +507,5 @@ func keepLargestComponent(nodes []network.Node, edges []network.Edge,
 	if dropped < 0 {
 		dropped = 0
 	}
-	return newNodes, newEdges, newXs, newOsmWayOf, dropped
+	return newNodes, newEdges, newXs, newOsmWayOf, newEdgeIsForward, dropped
 }
