@@ -24,13 +24,31 @@ import (
 
 func main() {
 	fs := flag.NewFlagSet("tracereplay", flag.ExitOnError)
-	osmPath := fs.String("osm", "", "path to OSM file used for the original run")
-	tracePath := fs.String("trace", "", "path to trace file")
+	osmPath := fs.String("osm", "", "path to the OSM file used for the original run (required)")
+	tracePath := fs.String("trace", "", "path to a trace file written by 'trafficsim run --trace' (required)")
+	fs.Usage = func() {
+		out := fs.Output()
+		fmt.Fprintln(out, "Usage: tracereplay -osm <path> -trace <path>")
+		fmt.Fprintln(out, "")
+		fmt.Fprintln(out, "Replay a trace file in the viewer at 1x wall-clock speed.")
+		fmt.Fprintln(out, "Both flags are required and must reference the same OSM file used")
+		fmt.Fprintln(out, "by the original `trafficsim run --trace` invocation.")
+		fmt.Fprintln(out, "")
+		fmt.Fprintln(out, "Flags:")
+		fs.PrintDefaults()
+		fmt.Fprintln(out, "")
+		fmt.Fprintln(out, "Example:")
+		fmt.Fprintln(out, "  tracereplay -osm city.osm.pbf -trace run.trace")
+		fmt.Fprintln(out, "")
+		fmt.Fprintln(out, "Window controls: left-mouse drag to pan, wheel to zoom,")
+		fmt.Fprintln(out, "drag edges/corners to resize.")
+	}
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		os.Exit(2)
 	}
 	if *osmPath == "" || *tracePath == "" {
-		fmt.Fprintln(os.Stderr, "usage: tracereplay -osm <file> -trace <file>")
+		fmt.Fprintln(os.Stderr, "tracereplay: -osm and -trace are required")
+		fs.Usage()
 		os.Exit(2)
 	}
 

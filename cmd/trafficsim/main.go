@@ -28,26 +28,86 @@ func main() {
 		runLoad(os.Args[2:])
 	case "run":
 		runRun(os.Args[2:])
+	case "-h", "--help", "help":
+		usage()
+		os.Exit(0)
 	default:
 		usage()
 		os.Exit(2)
 	}
 }
 
+// usage prints the top-level help, including every flag for every
+// subcommand. We rebuild each subcommand's FlagSet just to harvest its
+// PrintDefaults output, so this can never drift from the real flags.
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: trafficsim <subcommand> [flags]")
-	fmt.Fprintln(os.Stderr, "subcommands:")
-	fmt.Fprintln(os.Stderr, "  load <path-to-osm>           parse and print graph stats")
-	fmt.Fprintln(os.Stderr, "  run  <path-to-osm> [flags]   run the simulation")
+	out := os.Stderr
+	fmt.Fprintln(out, "Usage: trafficsim <subcommand> [flags] <path-to-osm>")
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "A Go-based traffic simulator that reads OpenStreetMap files and runs a")
+	fmt.Fprintln(out, "city-scale microsimulation with a live viewer and optional trace output.")
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Subcommands:")
+	fmt.Fprintln(out, "  load   Parse an OSM file and print graph stats (no simulation).")
+	fmt.Fprintln(out, "  run    Run the simulation, with or without the live viewer.")
+	fmt.Fprintln(out, "")
+
+	loadFS, _ := newLoadFlagSet()
+	if hasFlags(loadFS) {
+		fmt.Fprintln(out, "Flags for 'load':")
+		loadFS.SetOutput(out)
+		loadFS.PrintDefaults()
+		fmt.Fprintln(out, "")
+	}
+
+	fmt.Fprintln(out, "Flags for 'run':")
+	runFS, _ := newRunFlagSet()
+	runFS.SetOutput(out)
+	runFS.PrintDefaults()
+	fmt.Fprintln(out, "")
+
+	fmt.Fprintln(out, "Notes:")
+	fmt.Fprintln(out, "  - Flags must appear BEFORE the OSM path (Go flag-parser stops at the")
+	fmt.Fprintln(out, "    first non-flag argument).")
+	fmt.Fprintln(out, "  - `run --headless` requires `--duration > 0`.")
+	fmt.Fprintln(out, "  - Same `--seed` + same OSM + same `--spawn-rate` yields a byte-identical trace.")
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Examples:")
+	fmt.Fprintln(out, "  trafficsim load city.osm.pbf")
+	fmt.Fprintln(out, "  trafficsim run --spawn-rate 20 city.osm.pbf")
+	fmt.Fprintln(out, "  trafficsim run --headless --duration 5m --trace run.trace city.osm.pbf")
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Window controls (live mode): left-mouse drag to pan, wheel to zoom,")
+	fmt.Fprintln(out, "drag edges/corners to resize.")
+}
+
+// loadFlags is empty today but exists for symmetry with runFlags; flag
+// additions to the `load` subcommand happen here.
+type loadFlags struct{}
+
+func newLoadFlagSet() (*flag.FlagSet, *loadFlags) {
+	fs := flag.NewFlagSet("load", flag.ExitOnError)
+	f := &loadFlags{}
+	fs.Usage = func() {
+		fmt.Fprintln(fs.Output(), "Usage: trafficsim load <path-to-osm>")
+		fmt.Fprintln(fs.Output(), "")
+		fmt.Fprintln(fs.Output(), "Parse an OSM file (.osm or .osm.pbf) and print graph build stats.")
+		fmt.Fprintln(fs.Output(), "No simulation is run.")
+		fmt.Fprintln(fs.Output(), "")
+		fmt.Fprintln(fs.Output(), "Flags:")
+		fs.PrintDefaults()
+	}
+	return fs, f
 }
 
 func runLoad(args []string) {
-	fs := flag.NewFlagSet("load", flag.ExitOnError)
+	fs, _ := newLoadFlagSet()
 	if err := fs.Parse(args); err != nil {
 		os.Exit(2)
 	}
 	if fs.NArg() != 1 {
 		fmt.Fprintln(os.Stderr, "load: need exactly one OSM path")
+		fs.Usage()
 		os.Exit(2)
 	}
 	path := fs.Arg(0)
@@ -70,24 +130,53 @@ func runLoad(args []string) {
 		net.Bounds.MinX, net.Bounds.MinY, net.Bounds.MaxX, net.Bounds.MaxY)
 }
 
-func runRun(args []string) {
+type runFlags struct {
+	headless    bool
+	duration    time.Duration
+	seed        uint64
+	spawnRate   float64
+	signalsPath string
+	tracePath   string
+}
+
+func newRunFlagSet() (*flag.FlagSet, *runFlags) {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
-	var (
-		headless    = fs.Bool("headless", false, "skip rendering, run sim only")
-		duration    = fs.Duration("duration", 0, "stop after this much sim time (0 = unbounded)")
-		seed        = fs.Uint64("seed", 1, "RNG seed for deterministic runs")
-		spawnRate   = fs.Float64("spawn-rate", 5.0, "vehicles spawned per simulated second")
-		signalsPath = fs.String("signals", "", "path to signal overrides YAML")
-		tracePath   = fs.String("trace", "", "write binary trace events to this file")
-	)
+	f := &runFlags{}
+	fs.BoolVar(&f.headless, "headless", false, "skip rendering, run sim only (requires --duration > 0)")
+	fs.DurationVar(&f.duration, "duration", 0, "stop after this much sim time, e.g. 30s or 5m (0 = unbounded; required when --headless)")
+	fs.Uint64Var(&f.seed, "seed", 1, "RNG seed; same seed + same OSM + same --spawn-rate gives a byte-identical trace")
+	fs.Float64Var(&f.spawnRate, "spawn-rate", 5.0, "vehicles attempted per simulated second")
+	fs.StringVar(&f.signalsPath, "signals", "", "path to a YAML file of per-intersection signal overrides")
+	fs.StringVar(&f.tracePath, "trace", "", "write binary trace events to this file for replay/analysis")
+	fs.Usage = func() {
+		fmt.Fprintln(fs.Output(), "Usage: trafficsim run [flags] <path-to-osm>")
+		fmt.Fprintln(fs.Output(), "")
+		fmt.Fprintln(fs.Output(), "Run the simulation. Without --headless, opens a live viewer window.")
+		fmt.Fprintln(fs.Output(), "Flags must appear BEFORE the OSM path.")
+		fmt.Fprintln(fs.Output(), "")
+		fmt.Fprintln(fs.Output(), "Flags:")
+		fs.PrintDefaults()
+	}
+	return fs, f
+}
+
+func runRun(args []string) {
+	fs, f := newRunFlagSet()
 	if err := fs.Parse(args); err != nil {
 		os.Exit(2)
 	}
 	if fs.NArg() != 1 {
 		fmt.Fprintln(os.Stderr, "run: need exactly one OSM path")
+		fs.Usage()
 		os.Exit(2)
 	}
 	path := fs.Arg(0)
+	headless := &f.headless
+	duration := &f.duration
+	seed := &f.seed
+	spawnRate := &f.spawnRate
+	signalsPath := &f.signalsPath
+	tracePath := &f.tracePath
 
 	feat, err := osmload.Load(path)
 	if err != nil {
@@ -220,6 +309,12 @@ func runRun(args []string) {
 		os.Exit(1)
 	}
 	close(stop)
+}
+
+func hasFlags(fs *flag.FlagSet) bool {
+	any := false
+	fs.VisitAll(func(*flag.Flag) { any = true })
+	return any
 }
 
 func countSignals(xs []network.Intersection) int {
