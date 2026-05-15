@@ -488,8 +488,18 @@ func TestWorld_FlashRedYields(t *testing.T) {
 			{ID: 1, Route: []network.EdgeID{1, 7}, Edge: 1, S: 80, V: 10}, // E -> W straight-through; no corner cap
 		}
 		w.nextID = 2
-		for i := 0; i < 100; i++ {
+		// With stuckSpeedThresh (0.1 m/s), the vehicle decelerates to ~0.1 m/s
+		// at ~6s (tick ~120), dwells 0.5s, then gap-acceptance clears (no cross-
+		// traffic) and the vehicle re-accelerates. It crosses to edge 7 by ~10s.
+		// 250 ticks (12.5s) is ample.
+		for i := 0; i < 250; i++ {
 			w.Step()
+			if len(w.Vehicles) == 0 {
+				break
+			}
+			if w.Vehicles[0].Edge != 1 {
+				break // advanced past the stop line
+			}
 		}
 		// Should have advanced past the stop line (S would have rolled
 		// over to the next edge in the route) or despawned.
@@ -827,14 +837,21 @@ func TestWorld_StopSign_MandatoryDwell(t *testing.T) {
 	w.nextID = 2
 
 	// Run enough ticks for the vehicle to approach, stop, dwell, and
-	// proceed. dt=0.05 (20 Hz), so 200 ticks = 10s of sim time.
+	// proceed. dt=0.05 (20 Hz), so 300 ticks = 15s of sim time.
+	// With stuckSpeedThresh (0.1 m/s), V reaches ~0.1 at ~6s (tick ~120),
+	// dwell completes at ~6.5s, and the vehicle crosses to edge 1 by ~10.5s.
 	stoppedAt := -1.0
-	for i := 0; i < 200; i++ {
+	lastEdge := w.Vehicles[0].Edge
+	for i := 0; i < 300; i++ {
 		w.Step()
+		if len(w.Vehicles) == 0 {
+			break
+		}
 		v := &w.Vehicles[0]
 		if v.Despawned {
 			break
 		}
+		lastEdge = v.Edge
 		if stoppedAt < 0 && v.StoppedSinceSec > 0 {
 			stoppedAt = w.SimTime
 		}
@@ -844,11 +861,11 @@ func TestWorld_StopSign_MandatoryDwell(t *testing.T) {
 		t.Fatal("vehicle never registered a mandatory stop at the stop line")
 	}
 	// After stopping, the vehicle must dwell at least stopDwellSec before
-	// it gets to depart. Cleared StoppedSinceSec means it crossed the
-	// intersection.
-	v := &w.Vehicles[0]
-	if v.Edge != 1 {
-		t.Errorf("vehicle should have advanced to outbound edge after dwell, still on edge %d", v.Edge)
+	// it gets to depart. lastEdge tracks the outbound edge the vehicle
+	// advanced to (or the vehicle may have completed the route and been
+	// compacted, which also means it successfully traversed the intersection).
+	if lastEdge != 1 {
+		t.Errorf("vehicle should have advanced to outbound edge (1) after dwell, last seen on edge %d", lastEdge)
 	}
 }
 

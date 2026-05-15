@@ -212,17 +212,14 @@ const gapThresholdSec = 3.0
 
 const (
 	// stuckSpeedThresh is the speed (m/s) below which a vehicle is
-	// considered "not moving" for the purposes of the stuck-despawn guard.
+	// considered "not moving". Used for two purposes:
+	//   1. Stuck-despawn guard: a vehicle below this threshold with no
+	//      legitimate red/yield reason accumulates StuckTime and is
+	//      eventually despawned.
+	//   2. Mandatory-stop arrival: a vehicle near the stop line of a
+	//      Stop/AllWayStop approach is considered to have arrived (and
+	//      StoppedSinceSec is set) once V crosses this threshold.
 	stuckSpeedThresh = 0.1
-	// stopLineSpeedThresh is the speed (m/s) below which a vehicle near
-	// the stop line of a Stop/AllWayStop approach is considered to have
-	// arrived and begun its mandatory dwell. Empirically measured (10 m/s
-	// approach, 100 m edge, IDM defaults): the vehicle reaches a minimum
-	// of ~0.63 m/s before the dwell window elapses and it re-accelerates —
-	// it never drops below 0.5 m/s in the test window. 1.0 m/s is
-	// therefore the tightest threshold that reliably triggers arrival
-	// detection. stuckSpeedThresh (0.1 m/s) would never fire.
-	stopLineSpeedThresh = 1.0
 	// stuckTimeoutSec is the accumulated sim-seconds of below-threshold
 	// motion (with no legitimate red/yield reason) that triggers despawn.
 	stuckTimeoutSec = 60.0
@@ -337,15 +334,15 @@ func (w *World) hasDwelled(v *Vehicle) bool {
 
 // maybeMarkStopped sets v.StoppedSinceSec the first tick the vehicle is
 // effectively at the stop line (slow AND within tolerance). Idempotent
-// once set. Uses stopLineSpeedThresh (not stuckSpeedThresh) because IDM
-// reaches a minimum of ~0.63 m/s before the dwell elapses and the vehicle
-// re-accelerates; stuckSpeedThresh (0.1 m/s) would never fire. See the
-// stopLineSpeedThresh constant comment for the empirical measurement.
+// once set. Uses stuckSpeedThresh (0.1 m/s) so that the dwell timer only
+// starts once V genuinely approaches zero — this ensures real mandatory-stop
+// behavior rather than slow-roll-stop. The virtual stop leader from
+// stopDistanceForYield keeps IDM decelerating until V crosses this threshold.
 func (w *World) maybeMarkStopped(v *Vehicle, myDist float64) {
 	if v.StoppedSinceSec != 0 {
 		return
 	}
-	if v.V < stopLineSpeedThresh && myDist < stopLineTolMeters {
+	if v.V < stuckSpeedThresh && myDist < stopLineTolMeters {
 		v.StoppedSinceSec = w.SimTime
 	}
 }
