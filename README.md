@@ -54,9 +54,9 @@ Tick budget is 50 ms at 20 Hz. Current per-tick benchmarks on a 40x40 grid
 
 | Vehicles | ns/op     | ms/tick |
 |----------|-----------|---------|
-| 1,000    | 413,710   | 0.41    |
-| 5,000    | 2,021,595 | 2.02    |
-| 10,000   | 3,117,727 | 3.12    |
+| 1,000    | 460,402   | 0.46    |
+| 5,000    | 1,966,688 | 1.97    |
+| 10,000   | 3,023,438 | 3.02    |
 
 All three are well under the 50 ms budget, leaving headroom for real-world
 network complexity and additional features.

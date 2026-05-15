@@ -2,7 +2,6 @@ package sim
 
 import (
 	"log/slog"
-	"math"
 
 	"github.com/lab1702/traffic-sim/internal/network"
 	"github.com/lab1702/traffic-sim/internal/snapshot"
@@ -202,9 +201,6 @@ func (w *World) Step() {
 		}
 		byEdgeLane[eid][w.Vehicles[i].Lane] = append(byEdgeLane[eid][w.Vehicles[i].Lane], i)
 	}
-	for _, idxs := range byEdge {
-		sortVehicleIdxByS(w.Vehicles, idxs)
-	}
 	for _, lanes := range byEdgeLane {
 		for _, idxs := range lanes {
 			sortVehicleIdxByS(w.Vehicles, idxs)
@@ -364,7 +360,7 @@ func (w *World) publishSnapshot() {
 		if v.Despawned {
 			continue
 		}
-		x, y, hd := positionOnEdge(w.Net, v.Edge, v.S)
+		x, y, hd := network.PositionOnEdge(w.Net, v.Edge, v.S)
 		views = append(views, snapshot.VehicleView{
 			ID: uint32(v.ID), X: x, Y: y, Heading: hd, Speed: v.V,
 		})
@@ -394,37 +390,6 @@ func (w *World) publishSnapshot() {
 		Tick: w.Tick, SimTime: w.SimTime,
 		Vehicles: views, Signals: sigs, Bounds: w.Net.Bounds,
 	})
-}
-
-// positionOnEdge returns (x, y, heading) for the point S meters along
-// edge's polyline geometry. Linear interpolation between vertices.
-func positionOnEdge(net *network.Network, eid network.EdgeID, s float64) (float64, float64, float64) {
-	e := &net.Edges[eid]
-	g := e.Geometry
-	if len(g) < 2 {
-		return 0, 0, 0
-	}
-	remaining := s
-	for i := 1; i < len(g); i++ {
-		dx := g[i].X - g[i-1].X
-		dy := g[i].Y - g[i-1].Y
-		segLen := math.Sqrt(dx*dx + dy*dy)
-		if remaining <= segLen || i == len(g)-1 {
-			t := 0.0
-			if segLen > 0 {
-				t = remaining / segLen
-			}
-			if t > 1 {
-				t = 1
-			}
-			x := g[i-1].X + dx*t
-			y := g[i-1].Y + dy*t
-			heading := math.Atan2(dy, dx)
-			return x, y, heading
-		}
-		remaining -= segLen
-	}
-	return g[len(g)-1].X, g[len(g)-1].Y, 0
 }
 
 // Run advances the sim for the given number of simulated seconds (headless).

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -277,19 +278,25 @@ func splitAtIntersections(w *osm.Way, isX func(osm.NodeID) bool) [][]osm.WayNode
 }
 
 // refPoint picks a reference lat/lon for the local planar projection
-// (centroid of all loaded node positions).
+// (centroid of all loaded node positions). Iterates nodes in sorted ID
+// order so that floating-point summation is deterministic across runs.
 func refPoint(feat *osmload.Features) (lat, lon float64) {
-	var n int
-	var sumLat, sumLon float64
-	for _, node := range feat.Nodes {
-		sumLat += node.Lat
-		sumLon += node.Lon
-		n++
-	}
-	if n == 0 {
+	if len(feat.Nodes) == 0 {
 		return 0, 0
 	}
-	return sumLat / float64(n), sumLon / float64(n)
+	ids := make([]osm.NodeID, 0, len(feat.Nodes))
+	for id := range feat.Nodes {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	var sumLat, sumLon float64
+	for _, id := range ids {
+		n := feat.Nodes[id]
+		sumLat += n.Lat
+		sumLon += n.Lon
+	}
+	n := float64(len(ids))
+	return sumLat / n, sumLon / n
 }
 
 // project converts (lat, lon) to local planar (x, y) in meters using an
