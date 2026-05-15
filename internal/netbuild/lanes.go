@@ -64,3 +64,69 @@ var turnTokenMap = map[string]network.TurnCategory{
 	// "none" and "" handled by parseTurnLaneSpec directly.
 	// "reverse" intentionally absent — U-turns are dropped.
 }
+
+// assignLanesGeometric returns a per-lane list of allowed turn categories
+// for an intersection where the given set of categories is present.
+// Convention: lane 0 = rightmost; higher index = closer to road centerline.
+// The input `cats` is treated as a set (duplicates ignored, order ignored).
+func assignLanesGeometric(cats []network.TurnCategory, numLanes int) [][]network.TurnCategory {
+	if numLanes <= 0 {
+		return nil
+	}
+	hasL, hasS, hasR := false, false, false
+	for _, c := range cats {
+		switch c {
+		case network.TurnLeft:
+			hasL = true
+		case network.TurnStraight:
+			hasS = true
+		case network.TurnRight:
+			hasR = true
+		}
+	}
+	out := make([][]network.TurnCategory, numLanes)
+
+	// One-lane edge gets everything that's present.
+	if numLanes == 1 {
+		var all []network.TurnCategory
+		if hasR {
+			all = append(all, network.TurnRight)
+		}
+		if hasS {
+			all = append(all, network.TurnStraight)
+		}
+		if hasL {
+			all = append(all, network.TurnLeft)
+		}
+		out[0] = all
+		return out
+	}
+
+	last := numLanes - 1
+	for i := range out {
+		// Default: middle lanes get straight.
+		if hasS {
+			out[i] = []network.TurnCategory{network.TurnStraight}
+		}
+	}
+	// When both edge turns (L and R) are present and there are enough lanes
+	// (>= 3), dedicate edge lanes exclusively to their turn direction so that
+	// middle lanes serve straight traffic without overlap.
+	exclusiveEdges := hasL && hasR && numLanes >= 3
+
+	if hasR {
+		if hasS && !exclusiveEdges {
+			out[0] = []network.TurnCategory{network.TurnRight, network.TurnStraight}
+		} else {
+			out[0] = []network.TurnCategory{network.TurnRight}
+		}
+	}
+	if hasL {
+		if hasS && !exclusiveEdges {
+			out[last] = []network.TurnCategory{network.TurnLeft, network.TurnStraight}
+		} else {
+			out[last] = []network.TurnCategory{network.TurnLeft}
+		}
+	}
+	return out
+}
