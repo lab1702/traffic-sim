@@ -262,6 +262,24 @@ func (v *Viewport) Draw(screen *ebiten.Image) {
 		}
 	}
 
+	// Draw a small red "no" marker at intersections with banned turns.
+	// Circle outline plus a diagonal slash, drawn at the intersection
+	// center (the NodeID position), not at the per-approach offset.
+	const noRingRadius = 6.0
+	colorNoMark := color.RGBA{220, 60, 60, 255}
+	for i := range v.Net.Intersections {
+		x := &v.Net.Intersections[i]
+		if len(x.BannedTurns) == 0 {
+			continue
+		}
+		p := v.Net.Nodes[x.NodeID].Pos
+		cx, cy := v.toScreen(p.X, p.Y)
+		vector.StrokeCircle(screen, cx, cy, noRingRadius, 1.5, colorNoMark, true)
+		// Diagonal slash NW->SE through the ring.
+		d := float32(noRingRadius) * 0.707 // sin(45°)
+		vector.StrokeLine(screen, cx-d, cy-d, cx+d, cy+d, 1.5, colorNoMark, true)
+	}
+
 	// Draw vehicles.
 	vehColor := color.RGBA{230, 230, 240, 255}
 	for _, vh := range snap.Vehicles {

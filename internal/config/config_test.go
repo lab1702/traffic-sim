@@ -53,3 +53,29 @@ func TestLoadSignalOverrides_MissingFile_NotAnError(t *testing.T) {
 		t.Errorf("want empty, got %d entries", len(overrides))
 	}
 }
+
+func TestLoadConfig_TurnRestrictions(t *testing.T) {
+	path := filepath.Join("..", "..", "configs", "signals.example.yaml")
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if len(cfg.TurnRestrictions) != 2 {
+		t.Fatalf("want 2 turn-restriction entries, got %d", len(cfg.TurnRestrictions))
+	}
+	if cfg.TurnRestrictions[0].IntersectionID != 100 {
+		t.Errorf("entry[0].IntersectionID: want 100, got %d", cfg.TurnRestrictions[0].IntersectionID)
+	}
+	wantBans := []string{"left_turn", "u_turn"}
+	if len(cfg.TurnRestrictions[0].Ban) != len(wantBans) {
+		t.Fatalf("entry[0].Ban len: want %d, got %d", len(wantBans), len(cfg.TurnRestrictions[0].Ban))
+	}
+	for i, w := range wantBans {
+		if cfg.TurnRestrictions[0].Ban[i] != w {
+			t.Errorf("entry[0].Ban[%d]: want %q, got %q", i, w, cfg.TurnRestrictions[0].Ban[i])
+		}
+	}
+	if len(cfg.TurnRestrictions[1].Ban) != 1 || cfg.TurnRestrictions[1].Ban[0] != "u_turn" {
+		t.Errorf("entry[1].Ban: want [u_turn], got %v", cfg.TurnRestrictions[1].Ban)
+	}
+}

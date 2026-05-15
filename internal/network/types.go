@@ -38,16 +38,28 @@ type Edge struct {
 	Geometry   []Point // polyline including endpoints
 }
 
+// TurnRestriction names a banned transition at an intersection. A
+// vehicle that has just traversed `From` is not allowed to enter `To`.
+// The router skips such transitions during pathfinding.
+type TurnRestriction struct {
+	From EdgeID // incoming edge ending at the intersection node
+	To   EdgeID // outgoing edge starting at the intersection node
+}
+
 // Intersection is a node where edges meet. ID indexes into Network.Intersections
 // and is unrelated to NodeID — ID lives in IntersectionID-space, NodeID gives
 // the spatial position. Incoming and Outgoing list the edges that arrive at and
 // depart from NodeID.
 type Intersection struct {
-	ID           IntersectionID
-	NodeID       NodeID
-	Incoming     []EdgeID
-	Outgoing     []EdgeID
-	HasSignal    bool
+	ID        IntersectionID
+	NodeID    NodeID
+	Incoming  []EdgeID
+	Outgoing  []EdgeID
+	HasSignal bool
+	// BannedTurns lists (from, to) edge transitions that are forbidden
+	// at this intersection. Populated at load time from config (or, in
+	// future, from OSM `restriction` relations) and read-only thereafter.
+	BannedTurns []TurnRestriction
 }
 
 // Network is the routable graph built once from OSM data, immutable after construction.

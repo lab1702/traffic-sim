@@ -1,5 +1,5 @@
-// Package config loads YAML configuration files (signal overrides today,
-// more later). Missing files are not errors — defaults apply.
+// Package config loads YAML configuration files (signal overrides and
+// turn restrictions today). Missing files are not errors — defaults apply.
 package config
 
 import (
@@ -10,6 +10,13 @@ import (
 
 	"gopkg.in/yaml.v3"
 )
+
+// Config bundles all per-intersection configuration loaded from one YAML
+// file. Both lists are optional; empty slices are valid.
+type Config struct {
+	Signals          []SignalOverride
+	TurnRestrictions []TurnRestrictionOverride
+}
 
 type SignalOverride struct {
 	IntersectionID uint32        `yaml:"intersection_id"`
@@ -26,21 +33,50 @@ type PhaseConfig struct {
 	YellowDur  float64 `yaml:"yellow_dur"`
 }
 
-type signalFile struct {
-	Signals []SignalOverride `yaml:"signals"`
+// TurnRestrictionOverride declares forbidden turns at one intersection.
+// Each entry in Ban is a high-level category — the loader caller expands
+// these into concrete (from, to) edge pairs using arrival/departure
+// headings (see network.ClassifyTurn).
+//
+// Valid Ban categories: "left_turn", "right_turn", "u_turn", "straight_on".
+type TurnRestrictionOverride struct {
+	IntersectionID uint32   `yaml:"intersection_id"`
+	Ban            []string `yaml:"ban"`
 }
 
-func LoadSignalOverrides(path string) ([]SignalOverride, error) {
+// rawFile mirrors the on-disk YAML structure.
+type rawFile struct {
+	Signals          []SignalOverride          `yaml:"signals"`
+	TurnRestrictions []TurnRestrictionOverride `yaml:"turn_restrictions"`
+}
+
+// LoadConfig reads the YAML config file at path. Returns an empty Config
+// (not an error) if the file does not exist. Malformed YAML or read errors
+// are returned as errors.
+func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil
+			return &Config{}, nil
 		}
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
-	var sf signalFile
-	if err := yaml.Unmarshal(data, &sf); err != nil {
+	var raw rawFile
+	if err := yaml.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
-	return sf.Signals, nil
+	return &Config{
+		Signals:          raw.Signals,
+		TurnRestrictions: raw.TurnRestrictions,
+	}, nil
+}
+
+// LoadSignalOverrides is retained as a convenience wrapper over LoadConfig
+// for callers that only care about the signal section.
+func LoadSignalOverrides(path string) ([]SignalOverride, error) {
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		return nil, err
+	}
+	return cfg.Signals, nil
 }

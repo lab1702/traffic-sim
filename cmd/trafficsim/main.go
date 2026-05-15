@@ -191,12 +191,12 @@ func runRun(args []string) {
 
 	overrides := map[network.IntersectionID]sim.SignalConfig{}
 	if *signalsPath != "" {
-		list, err := config.LoadSignalOverrides(*signalsPath)
+		cfg, err := config.LoadConfig(*signalsPath)
 		if err != nil {
-			slog.Error("signals load failed", "err", err)
+			slog.Error("config load failed", "err", err)
 			os.Exit(1)
 		}
-		for _, o := range list {
+		for _, o := range cfg.Signals {
 			phases := make([]sim.SignalPhase, len(o.Phases))
 			for i, p := range o.Phases {
 				phases[i] = sim.SignalPhase{
@@ -214,7 +214,7 @@ func runRun(args []string) {
 				slog.Warn("signal override has unknown mode; using normal",
 					"id", o.IntersectionID, "mode", o.Mode)
 			}
-			cfg := sim.SignalConfig{
+			sc := sim.SignalConfig{
 				IntersectionID: network.IntersectionID(o.IntersectionID),
 				Phases:         phases,
 				InitialMode:    mode,
@@ -224,10 +224,14 @@ func runRun(args []string) {
 			// for flash-mode semantics.
 			if len(phases) == 0 {
 				x := &net.Intersections[o.IntersectionID]
-				cfg.Phases = sim.DefaultSignalConfig(x.Incoming, net).Phases
+				sc.Phases = sim.DefaultSignalConfig(x.Incoming, net).Phases
 			}
-			overrides[network.IntersectionID(o.IntersectionID)] = cfg
+			overrides[network.IntersectionID(o.IntersectionID)] = sc
 		}
+
+		// Apply turn restrictions to the network before constructing the
+		// Router (which caches the banned-turn map at construction time).
+		applyTurnRestrictions(net, cfg.TurnRestrictions)
 	}
 
 	spawner := sim.NewRandomOD(net, *seed, *spawnRate)
@@ -345,6 +349,55 @@ func hasFlags(fs *flag.FlagSet) bool {
 	any := false
 	fs.VisitAll(func(*flag.Flag) { any = true })
 	return any
+}
+
+// applyTurnRestrictions expands each high-level Ban category into concrete
+// (from, to) edge pairs at the named intersection, classifying each
+// incoming/outgoing pair by network.ClassifyTurn. The resulting
+// TurnRestrictions are appended to the intersection's BannedTurns.
+//
+// Unknown intersection IDs and unknown ban categories are logged and skipped.
+func applyTurnRestrictions(net *network.Network, restrictions []config.TurnRestrictionOverride) {
+	for _, r := range restrictions {
+		if int(r.IntersectionID) >= len(net.Intersections) {
+			slog.Warn("turn restriction references unknown intersection",
+				"id", r.IntersectionID, "max", len(net.Intersections)-1)
+			continue
+		}
+		x := &net.Intersections[r.IntersectionID]
+		for _, banName := range r.Ban {
+			cat, ok := parseTurnCategory(banName)
+			if !ok {
+				slog.Warn("unknown turn ban category; skipping",
+					"id", r.IntersectionID, "ban", banName)
+				continue
+			}
+			for _, fromEdge := range x.Incoming {
+				for _, toEdge := range x.Outgoing {
+					if network.ClassifyTurn(net, fromEdge, toEdge) == cat {
+						x.BannedTurns = append(x.BannedTurns,
+							network.TurnRestriction{From: fromEdge, To: toEdge})
+					}
+				}
+			}
+		}
+	}
+}
+
+// parseTurnCategory maps the YAML string names to network.TurnCategory.
+// Returns false for unknown names.
+func parseTurnCategory(s string) (network.TurnCategory, bool) {
+	switch s {
+	case "left_turn":
+		return network.TurnLeft, true
+	case "right_turn":
+		return network.TurnRight, true
+	case "u_turn":
+		return network.TurnUTurn, true
+	case "straight_on":
+		return network.TurnStraight, true
+	}
+	return 0, false
 }
 
 func countSignals(xs []network.Intersection) int {

@@ -33,3 +33,23 @@ signals:
 
   - intersection_id: 8
     mode: off
+
+# Turn restrictions. Each entry forbids a category of turn at one
+# intersection. The sim classifies turns by the angle between the
+# arrival and departure headings:
+#   straight_on : |angle| < 15°
+#   left_turn   : angle in (15°, 165°]
+#   right_turn  : angle in [-165°, -15°)
+#   u_turn      : |angle| > 165°
+#
+# Michigan-style "no left turn" intersections: ban left_turn (and
+# usually u_turn) at the cross-street intersection. The router will
+# automatically find a Michigan-left path through any nearby U-turn
+# pockets that exist in the OSM data.
+turn_restrictions:
+  - intersection_id: 100
+    ban: [left_turn, u_turn]
+
+  - intersection_id: 101
+    ban: [u_turn]
+

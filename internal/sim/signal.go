@@ -238,20 +238,11 @@ func DefaultSignalConfig(incoming []network.EdgeID, net *network.Network) Signal
 	return SignalConfig{Phases: phases}
 }
 
-// arrivalHeading returns the angle (radians, math convention) of vehicle
-// motion as it arrives at the downstream node of edge eid — the direction
-// of the final segment of the polyline.
+// arrivalHeading wraps network.ArrivalHeading for backwards compatibility
+// inside this package; identical behavior, kept as an unexported helper
+// so the call sites read tersely.
 func arrivalHeading(net *network.Network, eid network.EdgeID) float64 {
-	if int(eid) >= len(net.Edges) {
-		return 0
-	}
-	g := net.Edges[eid].Geometry
-	if len(g) < 2 {
-		return 0
-	}
-	dx := g[len(g)-1].X - g[len(g)-2].X
-	dy := g[len(g)-1].Y - g[len(g)-2].Y
-	return math.Atan2(dy, dx)
+	return network.ArrivalHeading(net, eid)
 }
 
 func phaseAllPositions(n int) []int {
