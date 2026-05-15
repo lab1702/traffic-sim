@@ -167,11 +167,19 @@ func runRun(args []string) {
 			}
 		}
 		// Emit start event with the seed.
-		w.EmitTrace(0, 0, &trace.SimStart{SeedLo: *seed, NetHash: 0})
+		// TODO: compute and emit a real NetHash so tracereplay can validate the OSM matches.
+		w.EmitTrace(0, 0, &trace.SimStart{
+			SeedLo:  *seed,
+			SeedHi:  *seed ^ 0x9E3779B97F4A7C15, // matches RandomOD's PCG seed pair
+			NetHash: 0,
+		})
 		defer func() {
 			w.EmitTrace(w.Tick, w.SimTime, &trace.SimEnd{Reason: "exit"})
 			close(ch)
 			<-done // wait for goroutine to flush and close the file
+			if dropped > 0 {
+				slog.Warn("trace: total events dropped", "count", dropped)
+			}
 		}()
 	}
 

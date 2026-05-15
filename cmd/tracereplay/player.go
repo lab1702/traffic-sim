@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"io"
+	"log/slog"
 	"math"
 	"time"
 
@@ -60,7 +61,7 @@ func (p *player) run() {
 		hdr, ev, err := p.r.Next()
 		if err != nil {
 			if !errors.Is(err, io.EOF) {
-				// Unexpected error: nothing to do but stop.
+				slog.Error("tracereplay: read error", "err", err)
 			}
 			return
 		}

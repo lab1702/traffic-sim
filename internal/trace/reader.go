@@ -1,6 +1,7 @@
 package trace
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -66,68 +67,87 @@ func (r *Reader) Next() (Header, Event, error) {
 }
 
 func decodePayload(k Kind, p []byte) (Event, error) {
-	rd := &byteReader{data: p}
+	rd := bytes.NewReader(p)
 	le := binary.LittleEndian
 	switch k {
 	case KindSimStart:
 		e := &SimStart{}
-		_ = binary.Read(rd, le, &e.SeedHi)
-		_ = binary.Read(rd, le, &e.SeedLo)
-		_ = binary.Read(rd, le, &e.NetHash)
+		if err := binary.Read(rd, le, &e.SeedHi); err != nil {
+			return nil, err
+		}
+		if err := binary.Read(rd, le, &e.SeedLo); err != nil {
+			return nil, err
+		}
+		if err := binary.Read(rd, le, &e.NetHash); err != nil {
+			return nil, err
+		}
 		return e, nil
 	case KindVehicleSpawn:
 		e := &VehicleSpawn{}
-		_ = binary.Read(rd, le, &e.VehicleID)
-		_ = binary.Read(rd, le, &e.OriginNode)
-		_ = binary.Read(rd, le, &e.DestNode)
+		if err := binary.Read(rd, le, &e.VehicleID); err != nil {
+			return nil, err
+		}
+		if err := binary.Read(rd, le, &e.OriginNode); err != nil {
+			return nil, err
+		}
+		if err := binary.Read(rd, le, &e.DestNode); err != nil {
+			return nil, err
+		}
 		var n uint16
-		_ = binary.Read(rd, le, &n)
+		if err := binary.Read(rd, le, &n); err != nil {
+			return nil, err
+		}
 		e.Route = make([]uint32, n)
 		for i := range e.Route {
-			_ = binary.Read(rd, le, &e.Route[i])
+			if err := binary.Read(rd, le, &e.Route[i]); err != nil {
+				return nil, err
+			}
 		}
 		return e, nil
 	case KindVehicleDespawn:
 		e := &VehicleDespawn{}
-		_ = binary.Read(rd, le, &e.VehicleID)
+		if err := binary.Read(rd, le, &e.VehicleID); err != nil {
+			return nil, err
+		}
 		return e, nil
 	case KindSignalPhase:
 		e := &SignalPhase{}
-		_ = binary.Read(rd, le, &e.IntersectionID)
-		_ = binary.Read(rd, le, &e.PhaseIdx)
+		if err := binary.Read(rd, le, &e.IntersectionID); err != nil {
+			return nil, err
+		}
+		if err := binary.Read(rd, le, &e.PhaseIdx); err != nil {
+			return nil, err
+		}
 		var y uint8
-		_ = binary.Read(rd, le, &y)
+		if err := binary.Read(rd, le, &y); err != nil {
+			return nil, err
+		}
 		e.IsYellow = y != 0
 		return e, nil
 	case KindMetricsTick:
 		e := &MetricsTick{}
-		_ = binary.Read(rd, le, &e.TotalVehicles)
-		_ = binary.Read(rd, le, &e.AvgSpeed)
-		_ = binary.Read(rd, le, &e.CongestionIdx)
+		if err := binary.Read(rd, le, &e.TotalVehicles); err != nil {
+			return nil, err
+		}
+		if err := binary.Read(rd, le, &e.AvgSpeed); err != nil {
+			return nil, err
+		}
+		if err := binary.Read(rd, le, &e.CongestionIdx); err != nil {
+			return nil, err
+		}
 		return e, nil
 	case KindSimEnd:
 		e := &SimEnd{}
 		var n uint16
-		_ = binary.Read(rd, le, &n)
+		if err := binary.Read(rd, le, &n); err != nil {
+			return nil, err
+		}
 		buf := make([]byte, n)
-		_, _ = rd.Read(buf)
+		if _, err := io.ReadFull(rd, buf); err != nil {
+			return nil, err
+		}
 		e.Reason = string(buf)
 		return e, nil
 	}
 	return nil, fmt.Errorf("unknown event kind: %d", k)
-}
-
-// byteReader is a tiny in-memory io.Reader over a []byte.
-type byteReader struct {
-	data []byte
-	pos  int
-}
-
-func (r *byteReader) Read(p []byte) (int, error) {
-	if r.pos >= len(r.data) {
-		return 0, io.EOF
-	}
-	n := copy(p, r.data[r.pos:])
-	r.pos += n
-	return n, nil
 }

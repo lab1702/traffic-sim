@@ -88,6 +88,9 @@ func encodePayload(b *bytes.Buffer, e Event) error {
 		if err := binary.Write(b, le, ev.DestNode); err != nil {
 			return err
 		}
+		if len(ev.Route) > 0xFFFF {
+			return fmt.Errorf("trace VehicleSpawn route too long: %d edges (max %d)", len(ev.Route), 0xFFFF)
+		}
 		if err := binary.Write(b, le, uint16(len(ev.Route))); err != nil {
 			return err
 		}
