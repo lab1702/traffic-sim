@@ -8,10 +8,12 @@ package e2e
 
 import (
 	"bytes"
+	"io"
 	"log/slog"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/lab1702/traffic-sim/internal/netbuild"
 	"github.com/lab1702/traffic-sim/internal/osmload"
@@ -91,4 +93,56 @@ func TestE2E_RealOSM_HeadlessRun(t *testing.T) {
 		t.Errorf("no spawns recorded")
 	}
 	t.Logf("trace: %d spawns, %d despawns", spawns, despawns)
+}
+
+// BenchmarkRealOSM measures sim-tick throughput against the real OSM
+// fixture used by TestE2E_RealOSM_HeadlessRun. The headline metric is
+// sim-s/wall-s — how many sim-seconds the engine can compute per wall
+// clock second. Anything ≥ 1.0 means the machine can run this map in
+// real time; well below 1.0 means it cannot.
+//
+// Skips when TRAFFIC_SIM_E2E_OSM is unset. Run with:
+//
+//	TRAFFIC_SIM_E2E_OSM=path/to/map.osm.pbf \
+//	  go test -tags=e2e -bench=BenchmarkRealOSM -benchtime=5s ./internal/e2e/
+func BenchmarkRealOSM(b *testing.B) {
+	path := os.Getenv("TRAFFIC_SIM_E2E_OSM")
+	if path == "" {
+		b.Skip("TRAFFIC_SIM_E2E_OSM not set; skipping benchmark")
+	}
+
+	// Silence WARN-level logs so they don't dominate the run.
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError})))
+	b.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+	feat, err := osmload.Load(path)
+	if err != nil {
+		b.Fatal(err)
+	}
+	net, _, err := netbuild.Build(feat)
+	if err != nil {
+		b.Fatal(err)
+	}
+	spawner := sim.NewRandomOD(net, 42, 10.0)
+	w := sim.NewWorld(net, spawner, nil)
+
+	// Warm up to a steady-state vehicle population before measuring.
+	// 30 sim-seconds at dt = 50 ms = 600 ticks.
+	const warmupTicks = 600
+	for i := 0; i < warmupTicks; i++ {
+		w.Step()
+	}
+
+	b.ResetTimer()
+	start := time.Now()
+	for i := 0; i < b.N; i++ {
+		w.Step()
+	}
+	elapsed := time.Since(start)
+	b.StopTimer()
+
+	simSeconds := float64(b.N) * sim.DefaultDt
+	b.ReportMetric(simSeconds/elapsed.Seconds(), "sim-s/wall-s")
+	b.ReportMetric(float64(len(w.Vehicles)), "alive")
 }
