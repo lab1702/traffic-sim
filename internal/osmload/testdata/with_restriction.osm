@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6">
+  <!-- 4-way intersection at node 1 -->
+  <node id="1" lat="40.0000" lon="-74.0000"/>  <!-- center -->
+  <node id="2" lat="40.0010" lon="-74.0000"/>  <!-- north -->
+  <node id="3" lat="40.0000" lon="-73.9990"/>  <!-- east -->
+  <node id="4" lat="39.9990" lon="-74.0000"/>  <!-- south -->
+  <node id="5" lat="40.0000" lon="-74.0010"/>  <!-- west -->
+
+  <!-- Four two-way ways forming a + at node 1 -->
+  <way id="10">
+    <nd ref="1"/><nd ref="2"/>
+    <tag k="highway" v="residential"/>
+  </way>
+  <way id="20">
+    <nd ref="1"/><nd ref="3"/>
+    <tag k="highway" v="residential"/>
+  </way>
+  <way id="30">
+    <nd ref="1"/><nd ref="4"/>
+    <tag k="highway" v="residential"/>
+  </way>
+  <way id="40">
+    <nd ref="1"/><nd ref="5"/>
+    <tag k="highway" v="residential"/>
+  </way>
+
+  <!-- A westbound vehicle (arriving from east on way 20) is forbidden
+       from turning south (onto way 30). Direction of travel = left turn. -->
+  <relation id="500">
+    <member type="way"  ref="20" role="from"/>
+    <member type="node" ref="1"  role="via"/>
+    <member type="way"  ref="30" role="to"/>
+    <tag k="type" v="restriction"/>
+    <tag k="restriction" v="no_left_turn"/>
+  </relation>
+</osm>

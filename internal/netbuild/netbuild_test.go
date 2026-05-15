@@ -3,6 +3,7 @@ package netbuild
 import (
 	"testing"
 
+	"github.com/lab1702/traffic-sim/internal/network"
 	"github.com/lab1702/traffic-sim/internal/osmload"
 	"github.com/paulmach/osm"
 )
@@ -209,5 +210,48 @@ func TestBuild_LeafOfTwoWayIsNotIntersection(t *testing.T) {
 	}
 	if len(net.Intersections) != 0 {
 		t.Errorf("dead-end leaves of a single two-way street should not be intersections, got %d", len(net.Intersections))
+	}
+}
+
+// TestBuild_AppliesNoLeftTurnRestriction loads the with_restriction.osm
+// fixture and asserts that the no_left_turn relation produced exactly one
+// BannedTurn entry at the central intersection, and that the banned (from,
+// to) pair classifies as a left turn.
+func TestBuild_AppliesNoLeftTurnRestriction(t *testing.T) {
+	feat, err := osmload.Load("../osmload/testdata/with_restriction.osm")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(feat.Restrictions) != 1 {
+		t.Fatalf("fixture should expose 1 restriction relation, got %d", len(feat.Restrictions))
+	}
+
+	net, rpt, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if rpt.RestrictionsApplied != 1 {
+		t.Errorf("RestrictionsApplied: want 1, got %d (skipped=%d)", rpt.RestrictionsApplied, rpt.RestrictionsSkipped)
+	}
+
+	// Find the center intersection. The graph has one 4-way intersection
+	// after pruning (the four leaves are non-intersections per the same
+	// usage-count rule the rest of the tests rely on).
+	if len(net.Intersections) != 1 {
+		t.Fatalf("expected 1 intersection (the center), got %d", len(net.Intersections))
+	}
+	x := &net.Intersections[0]
+	if len(x.BannedTurns) != 1 {
+		t.Fatalf("want exactly 1 BannedTurn at center, got %d", len(x.BannedTurns))
+	}
+
+	// The relation declares no_left_turn from way 20 (east arm) via node 1
+	// to way 30 (south arm) — i.e., westbound vehicle turning south =
+	// left turn at the center. Sanity-check the classification.
+	tr := x.BannedTurns[0]
+	cat := network.ClassifyTurn(net, tr.From, tr.To)
+	if cat != network.TurnLeft {
+		t.Errorf("banned turn should classify as TurnLeft, got %v (angle=%.3f rad)",
+			cat, network.TurnAngle(net, tr.From, tr.To))
 	}
 }

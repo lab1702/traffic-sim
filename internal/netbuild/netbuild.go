@@ -18,8 +18,10 @@ import (
 )
 
 type Report struct {
-	WaysSkipped       int
-	ComponentsDropped int
+	WaysSkipped          int
+	ComponentsDropped    int
+	RestrictionsApplied  int
+	RestrictionsSkipped  int
 }
 
 // Build constructs a Network. Returns the network and a report of what was
@@ -86,6 +88,10 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 	// segChains records the full ordered netID chain for each segment so
 	// keepLargestComponent can union interior shaping nodes with their edge.
 	var segChains [][]network.NodeID
+	// osmWayOfEdge tracks which OSM way each edge was derived from, so that
+	// restriction relations referencing OSM way IDs can later be resolved
+	// to internal EdgeIDs (post-prune).
+	var osmWayOfEdge []osm.WayID
 	report := Report{}
 	for _, w := range feat.Ways {
 		segs := splitAtIntersections(w, isIntersection)
@@ -134,12 +140,14 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 				ID: network.EdgeID(len(edges)), From: fromID, To: toID,
 				Lanes: lanes, Length: length, SpeedLimit: speed, Geometry: geom,
 			})
+			osmWayOfEdge = append(osmWayOfEdge, w.ID)
 			if !oneway {
 				revGeom := reverseGeom(geom)
 				edges = append(edges, network.Edge{
 					ID: network.EdgeID(len(edges)), From: toID, To: fromID,
 					Lanes: lanes, Length: length, SpeedLimit: speed, Geometry: revGeom,
 				})
+				osmWayOfEdge = append(osmWayOfEdge, w.ID)
 			}
 		}
 	}
@@ -157,8 +165,13 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 	intersections := buildIntersections(nodes, edges, feat, osmToNet, realIntersectionNetNodes)
 
 	// 6. Prune to largest connected component.
-	nodes, edges, intersections, droppedComponents := keepLargestComponent(nodes, edges, intersections, segChains)
+	nodes, edges, intersections, osmWayOfEdge, droppedComponents := keepLargestComponent(nodes, edges, intersections, segChains, osmWayOfEdge)
 	report.ComponentsDropped = droppedComponents
+
+	// 6b. Resolve OSM turn restriction relations to BannedTurns on the
+	// intersections (writes through pointers into the slice).
+	report.RestrictionsApplied, report.RestrictionsSkipped =
+		applyOSMRestrictions(intersections, edges, osmWayOfEdge, osmToNet, feat.Restrictions)
 
 	// 7. Build spatial grid.
 	bounds := computeBounds(nodes)
@@ -175,6 +188,8 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 		"intersections", len(intersections),
 		"ways_skipped", report.WaysSkipped,
 		"components_dropped", report.ComponentsDropped,
+		"restrictions_applied", report.RestrictionsApplied,
+		"restrictions_skipped", report.RestrictionsSkipped,
 	)
 
 	return &network.Network{
@@ -407,8 +422,8 @@ func buildIntersections(nodes []network.Node, edges []network.Edge,
 // their segment's component.
 // Returns the new slices and the number of dropped components.
 func keepLargestComponent(nodes []network.Node, edges []network.Edge,
-	xs []network.Intersection, segChains [][]network.NodeID,
-) ([]network.Node, []network.Edge, []network.Intersection, int) {
+	xs []network.Intersection, segChains [][]network.NodeID, osmWayOfEdge []osm.WayID,
+) ([]network.Node, []network.Edge, []network.Intersection, []osm.WayID, int) {
 	parent := make([]network.NodeID, len(nodes))
 	for i := range parent {
 		parent[i] = network.NodeID(i)
@@ -462,7 +477,8 @@ func keepLargestComponent(nodes []network.Node, edges []network.Edge,
 		}
 	}
 	var newEdges []network.Edge
-	for _, e := range edges {
+	var newOsmWayOf []osm.WayID
+	for i, e := range edges {
 		if !keep(e.From) || !keep(e.To) {
 			continue
 		}
@@ -470,6 +486,9 @@ func keepLargestComponent(nodes []network.Node, edges []network.Edge,
 		e.From = newNodeID[e.From]
 		e.To = newNodeID[e.To]
 		newEdges = append(newEdges, e)
+		if i < len(osmWayOfEdge) {
+			newOsmWayOf = append(newOsmWayOf, osmWayOfEdge[i])
+		}
 	}
 	// Intersections must be rebuilt because edge IDs changed.
 	inc := make(map[network.NodeID][]network.EdgeID)
@@ -494,5 +513,5 @@ func keepLargestComponent(nodes []network.Node, edges []network.Edge,
 	if dropped < 0 {
 		dropped = 0
 	}
-	return newNodes, newEdges, newXs, dropped
+	return newNodes, newEdges, newXs, newOsmWayOf, dropped
 }

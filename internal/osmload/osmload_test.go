@@ -30,6 +30,39 @@ func TestLoad_XML_FiltersAndKeepsSignalNodes(t *testing.T) {
 	}
 }
 
+func TestLoad_RetainsTurnRestrictionRelations(t *testing.T) {
+	f, err := Load("testdata/with_restriction.osm")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(f.Restrictions) != 1 {
+		t.Fatalf("want 1 retained restriction relation, got %d", len(f.Restrictions))
+	}
+	r := f.Restrictions[0]
+	if r.ID != osm.RelationID(500) {
+		t.Errorf("want relation ID 500, got %d", r.ID)
+	}
+	// Verify the tag values made it through.
+	var typeTag, restrictionTag string
+	for _, tg := range r.Tags {
+		switch tg.Key {
+		case "type":
+			typeTag = tg.Value
+		case "restriction":
+			restrictionTag = tg.Value
+		}
+	}
+	if typeTag != "restriction" {
+		t.Errorf("relation type tag: want 'restriction', got %q", typeTag)
+	}
+	if restrictionTag != "no_left_turn" {
+		t.Errorf("restriction tag: want 'no_left_turn', got %q", restrictionTag)
+	}
+	if len(r.Members) != 3 {
+		t.Errorf("want 3 members, got %d", len(r.Members))
+	}
+}
+
 func TestLoad_UnknownExtension(t *testing.T) {
 	_, err := Load("testdata/notarealfile.dat")
 	if err == nil {

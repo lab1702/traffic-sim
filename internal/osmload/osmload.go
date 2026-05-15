@@ -18,9 +18,12 @@ import (
 
 // Features is what netbuild consumes. Only highway-tagged ways are kept;
 // nodes are kept if referenced by a kept way OR tagged with traffic_signals.
+// Restrictions holds OSM `type=restriction` relations (turn restrictions);
+// netbuild resolves them into Intersection.BannedTurns entries.
 type Features struct {
-	Nodes map[osm.NodeID]*osm.Node
-	Ways  []*osm.Way
+	Nodes        map[osm.NodeID]*osm.Node
+	Ways         []*osm.Way
+	Restrictions []*osm.Relation
 }
 
 // Load reads an OSM file and returns the filtered Features set.
@@ -70,6 +73,10 @@ func collect(s scanner) (*Features, error) {
 			if isHighway(o) {
 				feat.Ways = append(feat.Ways, o)
 			}
+		case *osm.Relation:
+			if isTurnRestriction(o) {
+				feat.Restrictions = append(feat.Restrictions, o)
+			}
 		}
 	}
 	if err := s.Err(); err != nil && !errors.Is(err, io.EOF) {
@@ -109,6 +116,18 @@ func drivableHighway(v string) bool {
 		"motorway_link", "trunk_link", "primary_link",
 		"secondary_link", "tertiary_link":
 		return true
+	}
+	return false
+}
+
+// isTurnRestriction returns true for OSM relations tagged
+// `type=restriction` (turn restrictions: no_left_turn, only_straight_on, etc.).
+// netbuild filters these further; here we only triage what to retain.
+func isTurnRestriction(r *osm.Relation) bool {
+	for _, t := range r.Tags {
+		if t.Key == "type" && t.Value == "restriction" {
+			return true
+		}
 	}
 	return false
 }

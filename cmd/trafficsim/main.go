@@ -126,8 +126,18 @@ func runLoad(args []string) {
 		len(net.Nodes), len(net.Edges), len(net.Intersections), countSignals(net.Intersections))
 	fmt.Printf("ways_skipped=%d components_dropped=%d\n",
 		rpt.WaysSkipped, rpt.ComponentsDropped)
+	fmt.Printf("turn_restrictions: applied=%d skipped=%d total_intersection_bans=%d\n",
+		rpt.RestrictionsApplied, rpt.RestrictionsSkipped, countBannedTurns(net.Intersections))
 	fmt.Printf("bounds=(%.1f,%.1f)-(%.1f,%.1f) m\n",
 		net.Bounds.MinX, net.Bounds.MinY, net.Bounds.MaxX, net.Bounds.MaxY)
+}
+
+func countBannedTurns(xs []network.Intersection) int {
+	n := 0
+	for _, x := range xs {
+		n += len(x.BannedTurns)
+	}
+	return n
 }
 
 type runFlags struct {
