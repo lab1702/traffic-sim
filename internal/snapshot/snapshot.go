@@ -20,6 +20,7 @@ type Snapshot struct {
 type VehicleView struct {
 	ID      uint32
 	EdgeID  uint32
+	Lane    uint8
 	X, Y    float64
 	Heading float64 // radians (atan2(dy, dx))
 	Speed   float64

@@ -28,10 +28,34 @@ const (
 // Duplicated here to avoid importing sim; must match sim.VehicleLength.
 const vehicleLength = 5.0
 
-// rightSideOffset is how far perpendicular-right of the lane centerline
-// we shift vehicles on bidirectional roads, to visualize right-hand
-// driving. Roughly half a US lane width.
-const rightSideOffset = 1.8
+// laneWidth is how wide each lane is drawn in world meters. Used to
+// offset vehicles laterally so the lane they occupy is visible. Chosen
+// so a 1-lane two-way edge places vehicles 0.5*laneWidth = 1.8 m right
+// of the road centerline, matching the prior single-offset behavior.
+const laneWidth = 3.6
+
+// laneOffset returns the perpendicular-right distance, in world meters,
+// from the road centerline at which a vehicle in lane `lane` of an edge
+// with `numLanes` lanes should be drawn. Convention: lane 0 = rightmost
+// (curb side); higher indices move toward the centerline.
+//
+// On a two-way edge each direction occupies the right half of the road
+// (lanes stack outward from the centerline). On a one-way edge lanes
+// span the full road and fan out symmetrically around the centerline.
+func laneOffset(lane uint8, numLanes int, hasReverse bool) float64 {
+	if numLanes <= 0 {
+		return 0
+	}
+	i := float64(lane)
+	if int(lane) >= numLanes {
+		i = float64(numLanes - 1)
+	}
+	n := float64(numLanes)
+	if hasReverse {
+		return (n - i - 0.5) * laneWidth
+	}
+	return ((n-1)/2 - i) * laneWidth
+}
 
 type Viewport struct {
 	Net    *network.Network
@@ -317,21 +341,27 @@ func (v *Viewport) Draw(screen *ebiten.Image) {
 
 	// Draw vehicles as 5 m line segments in world units, oriented along
 	// the lane tangent. (vh.X, vh.Y) is the front bumper; the back bumper
-	// is 5 m back along the heading. On bidirectional roads we shift the
-	// car right of the centerline so opposing traffic visibly separates.
+	// is 5 m back along the heading. Vehicles are shifted perpendicular
+	// to the heading by laneOffset() so the occupied lane is visible.
 	// Pure world units: at low zoom the line shrinks below a pixel and
 	// effectively disappears.
 	vehColor := color.RGBA{0, 255, 255, 255}
 	for _, vh := range snap.Vehicles {
 		cosH := math.Cos(vh.Heading)
 		sinH := math.Sin(vh.Heading)
-		offX, offY := 0.0, 0.0
-		if int(vh.EdgeID) < len(v.edgeHasReverse) && v.edgeHasReverse[vh.EdgeID] {
-			// Perpendicular-right of heading H in math coords (y up) is
-			// (sin H, -cos H). Scale by the lane offset.
-			offX = sinH * rightSideOffset
-			offY = -cosH * rightSideOffset
+		numLanes := 0
+		hasReverse := false
+		if int(vh.EdgeID) < len(v.Net.Edges) {
+			numLanes = len(v.Net.Edges[vh.EdgeID].Lanes)
 		}
+		if int(vh.EdgeID) < len(v.edgeHasReverse) {
+			hasReverse = v.edgeHasReverse[vh.EdgeID]
+		}
+		d := laneOffset(vh.Lane, numLanes, hasReverse)
+		// Perpendicular-right of heading H in math coords (y up) is
+		// (sin H, -cos H). Scale by the signed lane offset.
+		offX := sinH * d
+		offY := -cosH * d
 		frontX := vh.X + offX
 		frontY := vh.Y + offY
 		backX := frontX - vehicleLength*cosH
