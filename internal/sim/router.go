@@ -102,8 +102,30 @@ func (r *Router) Route(src, dst network.NodeID) ([]network.EdgeID, error) {
 			fromBans = nodeBans[cur.state.ArrivedVia]
 		}
 
+		// Prohibit U-turns at intermediate nodes UNLESS the U-turn is
+		// the only non-banned option (e.g., dead-end streets). Vehicles
+		// at the origin have ArrivedVia=noEdge and can pick any outgoing
+		// edge — a true U-turn requires an arrival edge to flip from.
+		uTurnsAllowed := cur.state.ArrivedVia == noEdge
+		if !uTurnsAllowed {
+			uTurnsAllowed = true
+			for _, eid := range r.adjOut[cur.state.Node] {
+				if fromBans != nil && fromBans[eid] {
+					continue
+				}
+				if network.ClassifyTurn(r.net, cur.state.ArrivedVia, eid) != network.TurnUTurn {
+					uTurnsAllowed = false
+					break
+				}
+			}
+		}
+
 		for _, eid := range r.adjOut[cur.state.Node] {
 			if fromBans != nil && fromBans[eid] {
+				continue
+			}
+			if !uTurnsAllowed &&
+				network.ClassifyTurn(r.net, cur.state.ArrivedVia, eid) == network.TurnUTurn {
 				continue
 			}
 			e := &r.net.Edges[eid]
