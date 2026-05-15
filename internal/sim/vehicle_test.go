@@ -1,6 +1,9 @@
 package sim
 
 import (
+	"bytes"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/lab1702/traffic-sim/internal/network"
@@ -98,5 +101,55 @@ func TestStepIDM_LaneCarryOver_Straight_ClampsWhenNarrowing(t *testing.T) {
 	stepIDM(v, 10, 0, 0, false, net, DefaultIDM(), 1.0)
 	if v.Lane != 0 {
 		t.Errorf("straight onto 1-lane should clamp to 0, got %d", v.Lane)
+	}
+}
+
+func TestStepIDM_LaneCarryOver_EmitsSnapWarning(t *testing.T) {
+	net := makeCarryoverNet(3)
+	// Populate AllowedTurns so lane 0 is right-only, lane 2 is left-only.
+	net.Edges[0].Lanes[0].AllowedTurns = []network.EdgeID{1}
+	net.Edges[0].Lanes[1].AllowedTurns = []network.EdgeID{2}
+	net.Edges[0].Lanes[2].AllowedTurns = []network.EdgeID{3}
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	// Vehicle in lane 0 (right-only) trying to go left (edge 3).
+	v := &Vehicle{
+		ID: 42, Route: []network.EdgeID{0, 3}, Edge: 0, Lane: 0,
+		S: 99, V: 10,
+	}
+	stepIDM(v, 10, 0, 0, false, net, DefaultIDM(), 1.0)
+
+	if !strings.Contains(buf.String(), "turn-lane snap fallback") {
+		t.Errorf("expected snap-fallback warning; log was: %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "vehicle_id=42") {
+		t.Errorf("expected vehicle_id=42 in warning; log was: %s", buf.String())
+	}
+}
+
+func TestStepIDM_LaneCarryOver_NoWarningWhenBiasSucceeded(t *testing.T) {
+	net := makeCarryoverNet(3)
+	net.Edges[0].Lanes[0].AllowedTurns = []network.EdgeID{1}
+	net.Edges[0].Lanes[1].AllowedTurns = []network.EdgeID{2}
+	net.Edges[0].Lanes[2].AllowedTurns = []network.EdgeID{3}
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	// Vehicle in lane 2 (left-compatible) taking the left turn (edge 3).
+	v := &Vehicle{
+		ID: 43, Route: []network.EdgeID{0, 3}, Edge: 0, Lane: 2,
+		S: 99, V: 10,
+	}
+	stepIDM(v, 10, 0, 0, false, net, DefaultIDM(), 1.0)
+
+	if strings.Contains(buf.String(), "turn-lane snap fallback") {
+		t.Errorf("expected NO snap-fallback warning when bias succeeded; log: %s", buf.String())
 	}
 }
