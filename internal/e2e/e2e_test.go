@@ -8,7 +8,9 @@ package e2e
 
 import (
 	"bytes"
+	"log/slog"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/lab1702/traffic-sim/internal/netbuild"
@@ -22,6 +24,12 @@ func TestE2E_RealOSM_HeadlessRun(t *testing.T) {
 	if path == "" {
 		t.Skip("TRAFFIC_SIM_E2E_OSM not set; skipping E2E")
 	}
+
+	var logBuf bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
 	feat, err := osmload.Load(path)
 	if err != nil {
 		t.Fatal(err)
@@ -45,6 +53,18 @@ func TestE2E_RealOSM_HeadlessRun(t *testing.T) {
 		_ = tw.Write(tick, simTime, e)
 	}
 	w.Run(60.0) // 60 sim-seconds
+
+	snapWarnings := strings.Count(logBuf.String(), "turn-lane snap fallback")
+	// Generous bound: use alive-vehicle count as a rough denominator. This is
+	// a regression guard, not a quality metric. If snap fallback dwarfs the
+	// number of vehicles in the run, something is broken (bias range, compat
+	// check, etc.).
+	denom := len(w.Vehicles) + 1
+	if snapWarnings > 10*denom {
+		t.Errorf("snap fallback fired too often: %d warnings, alive=%d",
+			snapWarnings, len(w.Vehicles))
+	}
+	t.Logf("snap fallback warnings: %d / alive: %d", snapWarnings, len(w.Vehicles))
 
 	if w.Tick == 0 {
 		t.Fatalf("no ticks executed")
