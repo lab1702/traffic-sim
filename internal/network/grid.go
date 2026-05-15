@@ -13,6 +13,10 @@ type SpatialGrid struct {
 	cells    map[uint64][]EdgeID // key = row*cols + col
 }
 
+// NewSpatialGrid constructs a uniform grid index over the given bounds.
+// cellSize is in meters; smaller cells use more memory but yield tighter
+// candidate sets. A typical city-scale value is 50m. cols/rows are
+// clamped to at least 1.
 func NewSpatialGrid(b BoundingBox, cellSize float64) *SpatialGrid {
 	cols := int(math.Ceil((b.MaxX - b.MinX) / cellSize))
 	rows := int(math.Ceil((b.MaxY - b.MinY) / cellSize))
@@ -68,6 +72,7 @@ func (g *SpatialGrid) Query(p Point, radius float64) []EdgeID {
 	}
 	span := int(math.Ceil(radius / g.CellSize))
 	r2 := radius * radius
+	_ = r2 // conservative grid: callers re-check exact distance; see Query doc.
 	var out []EdgeID
 	for dr := -span; dr <= span; dr++ {
 		for dc := -span; dc <= span; dc++ {
@@ -76,9 +81,6 @@ func (g *SpatialGrid) Query(p Point, radius float64) []EdgeID {
 				continue
 			}
 			for _, id := range g.cells[g.key(c, r)] {
-				// Grid is conservative: returns edges in nearby cells.
-				// Callers re-check exact distance using their own geometry.
-				_ = r2
 				out = append(out, id)
 			}
 		}

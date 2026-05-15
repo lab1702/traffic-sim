@@ -14,6 +14,7 @@ type Point struct {
 	X, Y float64
 }
 
+// Node is a vertex in the routable graph; corresponds to one OSM node.
 type Node struct {
 	ID  NodeID
 	Pos Point
@@ -26,6 +27,8 @@ type Lane struct {
 	AllowedTurns []EdgeID
 }
 
+// Edge is a directed road segment between two nodes. Two-way streets produce two Edges.
+// SpeedLimit is in m/s; Geometry includes both endpoints.
 type Edge struct {
 	ID         EdgeID
 	From, To   NodeID
@@ -35,6 +38,10 @@ type Edge struct {
 	Geometry   []Point // polyline including endpoints
 }
 
+// Intersection is a node where edges meet. ID indexes into Network.Intersections
+// and is unrelated to NodeID — ID lives in IntersectionID-space, NodeID gives
+// the spatial position. Incoming and Outgoing list the edges that arrive at and
+// depart from NodeID.
 type Intersection struct {
 	ID           IntersectionID
 	NodeID       NodeID
@@ -43,6 +50,8 @@ type Intersection struct {
 	HasSignal    bool
 }
 
+// Network is the routable graph built once from OSM data, immutable after construction.
+// Sim and renderer read it without locks. Grid is populated by netbuild.
 type Network struct {
 	Nodes         []Node
 	Edges         []Edge
@@ -51,6 +60,7 @@ type Network struct {
 	Bounds        BoundingBox
 }
 
+// BoundingBox describes a rectangular region in the same planar frame as Point (meters).
 type BoundingBox struct {
 	MinX, MinY, MaxX, MaxY float64
 }
