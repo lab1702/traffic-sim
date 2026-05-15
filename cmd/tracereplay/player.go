@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/lab1702/traffic-sim/internal/network"
+	"github.com/lab1702/traffic-sim/internal/sim"
 	"github.com/lab1702/traffic-sim/internal/snapshot"
 	"github.com/lab1702/traffic-sim/internal/trace"
 )
@@ -25,16 +26,18 @@ const signalLightOffset = 8.0
 // for faithful replay.
 //
 // Signals: one entry per (intersection, incoming approach). Colors are
-// recomputed when a SignalPhase event fires for that intersection, using
-// the same even/odd default-plan rule the sim uses. YAML overrides will
-// not be reflected accurately — the trace doesn't carry the override
-// schedule. The sim itself renders signals correctly.
+// recomputed when a SignalPhase event fires for that intersection by
+// looking up the approach's membership in the rebuilt default plan
+// (using the same heading-based grouping the sim uses). YAML overrides
+// will not be reflected accurately — the trace doesn't carry the
+// override schedule. The sim itself renders signals correctly.
 type player struct {
-	net      *network.Network
-	r        *trace.Reader
-	buf      *snapshot.Buffer
-	vehicles map[uint32]*replayVehicle
-	signals  []approachLight
+	net          *network.Network
+	r            *trace.Reader
+	buf          *snapshot.Buffer
+	vehicles     map[uint32]*replayVehicle
+	signals      []approachLight
+	signalStates map[uint32]*sim.SignalState
 }
 
 type replayVehicle struct {
@@ -55,11 +58,15 @@ type approachLight struct {
 
 func newPlayer(net *network.Network, r *trace.Reader, buf *snapshot.Buffer) *player {
 	var lights []approachLight
+	states := make(map[uint32]*sim.SignalState)
 	for i := range net.Intersections {
 		x := &net.Intersections[i]
 		if !x.HasSignal {
 			continue
 		}
+		// Rebuild the default plan so we know which approaches are
+		// green in each phase. Same logic the sim uses.
+		states[uint32(x.ID)] = sim.NewSignalState(sim.DefaultSignalConfig(x.Incoming, net))
 		for j, eid := range x.Incoming {
 			e := &net.Edges[eid]
 			s := e.Length - signalLightOffset
@@ -79,11 +86,12 @@ func newPlayer(net *network.Network, r *trace.Reader, buf *snapshot.Buffer) *pla
 		}
 	}
 	return &player{
-		net:      net,
-		r:        r,
-		buf:      buf,
-		vehicles: make(map[uint32]*replayVehicle),
-		signals:  lights,
+		net:          net,
+		r:            r,
+		buf:          buf,
+		vehicles:     make(map[uint32]*replayVehicle),
+		signals:      lights,
+		signalStates: states,
 	}
 }
 
@@ -124,15 +132,17 @@ func (p *player) apply(hdr trace.Header, ev trace.Event) {
 	case *trace.VehicleDespawn:
 		delete(p.vehicles, e.VehicleID)
 	case *trace.SignalPhase:
-		// Default plan: even-indexed incoming approaches are green on
-		// even phases, odd-indexed on odd phases. During yellow the
-		// previously-green approaches show yellow; the rest show red.
-		phaseParity := int(e.PhaseIdx) % 2
+		st := p.signalStates[e.IntersectionID]
+		if st == nil {
+			return
+		}
+		st.PhaseIdx = int(e.PhaseIdx)
+		st.IsYellow = e.IsYellow
 		for i := range p.signals {
 			if p.signals[i].intersectionID != e.IntersectionID {
 				continue
 			}
-			isGreen := (p.signals[i].incomingPos % 2) == phaseParity
+			isGreen := st.GreenFor(p.signals[i].incomingPos)
 			p.signals[i].view.IsYellow = isGreen && e.IsYellow
 			p.signals[i].view.IsRed = !isGreen
 		}

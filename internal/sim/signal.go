@@ -1,6 +1,11 @@
 package sim
 
-import "github.com/lab1702/traffic-sim/internal/network"
+import (
+	"math"
+	"sort"
+
+	"github.com/lab1702/traffic-sim/internal/network"
+)
 
 // SignalConfig is the per-intersection plan: ordered phases that repeat.
 type SignalConfig struct {
@@ -77,28 +82,73 @@ func (s *SignalState) GreenFor(incomingPos int) bool {
 }
 
 // DefaultSignalConfig builds a fair fixed-time plan for an intersection
-// with the given incoming edges. Splits them into 2 phases (e.g.,
-// NS vs EW) by alternating index, 30s green + 3s yellow each.
-func DefaultSignalConfig(incoming []network.EdgeID) SignalConfig {
-	if len(incoming) <= 1 {
-		// 1-leg intersection: permanent green.
+// with the given incoming edges. Approaches are grouped by their
+// arrival-heading axis (heading mod π): opposing legs on the same road
+// (N+S, or E+W) end up in the same phase so they get green together —
+// the way real signals work. Each phase is 30 s green + 3 s yellow.
+//
+// 1-leg intersections (or those with no network for geometry) get a
+// single permanent-green phase.
+func DefaultSignalConfig(incoming []network.EdgeID, net *network.Network) SignalConfig {
+	if len(incoming) <= 1 || net == nil {
 		return SignalConfig{Phases: []SignalPhase{{
 			GreenEdges: phaseAllPositions(len(incoming)),
 			GreenDur:   30, YellowDur: 0,
 		}}}
 	}
-	var even, odd []int
-	for i := range incoming {
-		if i%2 == 0 {
-			even = append(even, i)
-		} else {
-			odd = append(odd, i)
+
+	// Bucket each approach by its arrival-heading folded to [0, π).
+	// Two approaches whose arrival directions differ by ~180° (opposite
+	// directions on the same road) share an axis and thus a bucket.
+	// 8 buckets = 22.5° resolution: tolerant of slight road misalignment,
+	// strict enough to keep perpendicular approaches in different phases.
+	const numBuckets = 8
+	groups := make(map[int][]int)
+	for j, eid := range incoming {
+		h := arrivalHeading(net, eid)
+		h = math.Mod(h, math.Pi)
+		if h < 0 {
+			h += math.Pi
 		}
+		b := int(h * float64(numBuckets) / math.Pi)
+		if b >= numBuckets {
+			b = numBuckets - 1
+		}
+		groups[b] = append(groups[b], j)
 	}
-	return SignalConfig{Phases: []SignalPhase{
-		{GreenEdges: even, GreenDur: 30, YellowDur: 3},
-		{GreenEdges: odd, GreenDur: 30, YellowDur: 3},
-	}}
+
+	// Deterministic phase ordering: sort buckets ascending.
+	keys := make([]int, 0, len(groups))
+	for k := range groups {
+		keys = append(keys, k)
+	}
+	sort.Ints(keys)
+
+	phases := make([]SignalPhase, 0, len(keys))
+	for _, k := range keys {
+		phases = append(phases, SignalPhase{
+			GreenEdges: groups[k],
+			GreenDur:   30,
+			YellowDur:  3,
+		})
+	}
+	return SignalConfig{Phases: phases}
+}
+
+// arrivalHeading returns the angle (radians, math convention) of vehicle
+// motion as it arrives at the downstream node of edge eid — the direction
+// of the final segment of the polyline.
+func arrivalHeading(net *network.Network, eid network.EdgeID) float64 {
+	if int(eid) >= len(net.Edges) {
+		return 0
+	}
+	g := net.Edges[eid].Geometry
+	if len(g) < 2 {
+		return 0
+	}
+	dx := g[len(g)-1].X - g[len(g)-2].X
+	dy := g[len(g)-1].Y - g[len(g)-2].Y
+	return math.Atan2(dy, dx)
 }
 
 func phaseAllPositions(n int) []int {

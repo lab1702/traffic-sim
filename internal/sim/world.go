@@ -64,7 +64,7 @@ func NewWorld(net *network.Network, spawner Spawner, overrides map[network.Inter
 			if cfg, ok := overrides[x.ID]; ok {
 				sigs[x.ID] = NewSignalState(cfg)
 			} else {
-				sigs[x.ID] = NewSignalState(DefaultSignalConfig(x.Incoming))
+				sigs[x.ID] = NewSignalState(DefaultSignalConfig(x.Incoming, net))
 			}
 		}
 	}

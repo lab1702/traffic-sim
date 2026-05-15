@@ -224,8 +224,8 @@ func TestWorld_SnapshotEmitsSignalPerApproach(t *testing.T) {
 		t.Fatalf("want 4 SignalViews (one per incoming approach), got %d", len(snap.Signals))
 	}
 
-	// With the DefaultSignalConfig 2-phase plan, even-indexed approaches
-	// are green during phase 0; odd-indexed are red. Verify.
+	// Default plan groups approaches by arrival-heading axis. For this
+	// orthogonal 4-way, expect exactly 2 green + 2 red.
 	greens, reds := 0, 0
 	for _, sv := range snap.Signals {
 		if sv.IsRed {
@@ -236,6 +236,74 @@ func TestWorld_SnapshotEmitsSignalPerApproach(t *testing.T) {
 	}
 	if greens != 2 || reds != 2 {
 		t.Errorf("default 2-phase plan: want 2 green + 2 red approaches in phase 0, got %d green / %d red", greens, reds)
+	}
+}
+
+// TestDefaultSignalConfig_PairsOpposingApproaches: opposing legs of a
+// 4-way intersection (N+S together, E+W together) must end up in the
+// same phase. This is the user-visible "real signals work this way"
+// property. Guards against accidentally regressing to index-parity grouping.
+func TestDefaultSignalConfig_PairsOpposingApproaches(t *testing.T) {
+	// Build the same 4-way geometry as the test above, then inspect the
+	// generated default plan directly.
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 100}},  // N
+		{ID: 1, Pos: network.Point{X: 100, Y: 0}},  // E
+		{ID: 2, Pos: network.Point{X: 0, Y: -100}}, // S
+		{ID: 3, Pos: network.Point{X: -100, Y: 0}}, // W
+		{ID: 4, Pos: network.Point{X: 0, Y: 0}},    // center
+	}
+	mkEdge := func(id, from, to int) network.Edge {
+		return network.Edge{
+			ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: 100, SpeedLimit: 10,
+			Geometry: []network.Point{nodes[from].Pos, nodes[to].Pos},
+		}
+	}
+	// Use sequential IDs so Edges[i].ID == EdgeID(i) — this invariant
+	// is what netbuild produces and what arrivalHeading/PositionOnEdge
+	// rely on for O(1) lookup.
+	net := &network.Network{
+		Nodes: nodes,
+		Edges: []network.Edge{
+			mkEdge(0, 0, 4), // N -> C (southbound on arrival)
+			mkEdge(1, 1, 4), // E -> C (westbound on arrival)
+			mkEdge(2, 2, 4), // S -> C (northbound on arrival)
+			mkEdge(3, 3, 4), // W -> C (eastbound on arrival)
+		},
+	}
+	incoming := []network.EdgeID{0, 1, 2, 3} // [N, E, S, W] positions
+
+	cfg := DefaultSignalConfig(incoming, net)
+	if len(cfg.Phases) != 2 {
+		t.Fatalf("want 2 phases for orthogonal 4-way, got %d", len(cfg.Phases))
+	}
+
+	// Find which phase contains position 0 (N) and assert position 2 (S)
+	// is in the SAME phase. Then position 1 (E) and 3 (W) must be in the
+	// OTHER phase.
+	phaseOf := func(pos int) int {
+		for i, p := range cfg.Phases {
+			for _, gp := range p.GreenEdges {
+				if gp == pos {
+					return i
+				}
+			}
+		}
+		return -1
+	}
+	pN, pE, pS, pW := phaseOf(0), phaseOf(1), phaseOf(2), phaseOf(3)
+	if pN < 0 || pE < 0 || pS < 0 || pW < 0 {
+		t.Fatalf("every approach must belong to a phase; got N=%d E=%d S=%d W=%d", pN, pE, pS, pW)
+	}
+	if pN != pS {
+		t.Errorf("N and S must share a phase, got N=phase%d S=phase%d", pN, pS)
+	}
+	if pE != pW {
+		t.Errorf("E and W must share a phase, got E=phase%d W=phase%d", pE, pW)
+	}
+	if pN == pE {
+		t.Errorf("NS pair must be in a different phase from EW pair; both ended up in phase %d", pN)
 	}
 }
 
