@@ -18,22 +18,81 @@ type World struct {
 
 	nextID   VehicleID
 	maxRetry int // spawn retries per tick before giving up
+
+	// SignalStates is indexed by IntersectionID; nil entries mean no signal.
+	SignalStates []*SignalState
+
+	// xByNodeID is a NodeID -> Intersection index for O(1) lookup during tick.
+	xByNodeID map[network.NodeID]*network.Intersection
 }
 
 const DefaultDt = 0.05 // 50 ms == 20 Hz
 
-func NewWorld(net *network.Network, spawner Spawner) *World {
-	return &World{
-		Net:      net,
-		Router:   NewRouter(net),
-		Spawner:  spawner,
-		dt:       DefaultDt,
-		maxRetry: 4,
+func NewWorld(net *network.Network, spawner Spawner, overrides map[network.IntersectionID]SignalConfig) *World {
+	sigs := make([]*SignalState, len(net.Intersections))
+	xByNode := make(map[network.NodeID]*network.Intersection, len(net.Intersections))
+	for i := range net.Intersections {
+		x := &net.Intersections[i]
+		xByNode[x.NodeID] = x
+		if x.HasSignal {
+			if cfg, ok := overrides[x.ID]; ok {
+				sigs[x.ID] = NewSignalState(cfg)
+			} else {
+				sigs[x.ID] = NewSignalState(DefaultSignalConfig(x.Incoming))
+			}
+		}
 	}
+	return &World{
+		Net:          net,
+		Router:       NewRouter(net),
+		Spawner:      spawner,
+		dt:           DefaultDt,
+		maxRetry:     4,
+		SignalStates: sigs,
+		xByNodeID:    xByNode,
+	}
+}
+
+// stopDistanceForRed returns (distance to stop line, true) if the vehicle
+// is on an incoming edge to a red-signalled intersection and the vehicle
+// is approaching it. Returns (0, false) otherwise.
+func (w *World) stopDistanceForRed(v *Vehicle) (float64, bool) {
+	edge := &w.Net.Edges[v.Edge]
+	x, ok := w.xByNodeID[edge.To]
+	if !ok {
+		return 0, false
+	}
+	if !x.HasSignal {
+		return 0, false
+	}
+	st := w.SignalStates[x.ID]
+	if st == nil {
+		return 0, false
+	}
+	pos := IncomingPos(x, v.Edge)
+	if pos < 0 {
+		return 0, false
+	}
+	if st.GreenFor(pos) {
+		return 0, false
+	}
+	// Red: stop line is at the end of this edge.
+	dist := edge.Length - v.S
+	if dist < 0 {
+		dist = 0
+	}
+	return dist, true
 }
 
 // Step advances the sim by one tick (DefaultDt seconds).
 func (w *World) Step() {
+	// 0. Advance all signal phases.
+	for _, s := range w.SignalStates {
+		if s != nil {
+			s.Advance(w.dt)
+		}
+	}
+
 	// 1. Demand.
 	reqs := w.Spawner.Tick(w.SimTime, w.dt)
 	for _, r := range reqs {
@@ -85,6 +144,17 @@ func (w *World) Step() {
 				edge := &w.Net.Edges[v.Edge]
 				lS = edge.Length + nv.S
 				lV = nv.V
+				has = true
+			}
+		}
+		// Apply red-light virtual leader if closer.
+		if d, isRed := w.stopDistanceForRed(v); isRed {
+			// Virtual leader sits at the stop line, stationary.
+			// Smaller S of leader vs real leader => the binding constraint.
+			virtualS := v.S + d
+			if !has || virtualS < lS {
+				lS = virtualS
+				lV = 0
 				has = true
 			}
 		}

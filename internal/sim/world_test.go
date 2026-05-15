@@ -41,7 +41,7 @@ func build2x2Grid() *network.Network {
 func TestWorld_VehiclesSpawnMoveDespawn(t *testing.T) {
 	net := build2x2Grid()
 	spawner := NewRandomOD(net, 7, 5.0) // 5 vehicles/sec
-	w := NewWorld(net, spawner)
+	w := NewWorld(net, spawner, nil)
 
 	w.Run(11.0) // 11 simulated seconds (100m edges at 10 m/s = 10s/edge; 11s lets the first spawned vehicles finish)
 
@@ -71,7 +71,7 @@ func TestWorld_VehiclesSpawnMoveDespawn(t *testing.T) {
 func TestWorld_IDMFollowingMaintainsGap(t *testing.T) {
 	net := buildLineGraph() // 3 edges, 100m each, 10 m/s
 	// No spawner — we'll inject vehicles directly.
-	w := NewWorld(net, NewRandomOD(net, 0, 0))
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
 
 	// Two vehicles on edge 0, leader 50m ahead, both starting at speed.
 	w.Vehicles = []Vehicle{
@@ -114,10 +114,50 @@ func TestWorld_IDMFollowingMaintainsGap(t *testing.T) {
 	}
 }
 
+func TestWorld_StopsAtRedLight(t *testing.T) {
+	// Build a single-edge graph ending at a signalized intersection.
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 1, Pos: network.Point{X: 200, Y: 0}},
+	}
+	edges := []network.Edge{
+		{ID: 0, From: 0, To: 1, Length: 200, SpeedLimit: 10,
+			Lanes: []network.Lane{{Index: 0}}},
+	}
+	xs := []network.Intersection{
+		{ID: 0, NodeID: 1, Incoming: []network.EdgeID{0}, HasSignal: true},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	// Force the signal to all-red by giving it an empty-green phase.
+	w.SignalStates[0] = NewSignalState(SignalConfig{
+		Phases: []SignalPhase{{GreenEdges: nil, GreenDur: 1000, YellowDur: 0}},
+	})
+
+	w.Vehicles = []Vehicle{{ID: 1, Route: []network.EdgeID{0}, Edge: 0, S: 50, V: 10}}
+	w.nextID = 2
+
+	for i := 0; i < 500; i++ { // 25 sim-seconds
+		w.Step()
+	}
+
+	if len(w.Vehicles) != 1 {
+		t.Fatalf("vehicle should not have completed (red light), got %d alive", len(w.Vehicles))
+	}
+	v := &w.Vehicles[0]
+	if v.V > 0.1 {
+		t.Errorf("vehicle should be stopped at red, V=%.2f", v.V)
+	}
+	if v.S < 190 {
+		t.Errorf("vehicle should be near the stop line, S=%.2f (edge length 200)", v.S)
+	}
+}
+
 func TestWorld_DeterminismSameSeed(t *testing.T) {
 	run := func() (uint32, int) {
 		net := build2x2Grid()
-		w := NewWorld(net, NewRandomOD(net, 123, 3.0))
+		w := NewWorld(net, NewRandomOD(net, 123, 3.0), nil)
 		w.Run(5.0)
 		return uint32(w.nextID), len(w.Vehicles)
 	}
