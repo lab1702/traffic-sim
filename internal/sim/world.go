@@ -45,7 +45,14 @@ type World struct {
 	lastPhase []signalLast
 }
 
-const DefaultDt = 0.05 // 50 ms == 20 Hz
+const (
+	DefaultDt = 0.05 // 50 ms == 20 Hz
+
+	// signalLightOffset is how far back from the stop line each per-approach
+	// signal indicator is drawn, in meters. Far enough to read distinct
+	// colors at zoom, close enough to read as "this is that intersection's".
+	signalLightOffset = 8.0
+)
 
 func NewWorld(net *network.Network, spawner Spawner, overrides map[network.IntersectionID]SignalConfig) *World {
 	sigs := make([]*SignalState, len(net.Intersections))
@@ -365,26 +372,30 @@ func (w *World) publishSnapshot() {
 			ID: uint32(v.ID), X: x, Y: y, Heading: hd, Speed: v.V,
 		})
 	}
+	// One SignalView per incoming approach, positioned a few meters back
+	// from the stop line along that approach so each leg of the intersection
+	// shows its own red/yellow/green state.
 	sigs := make([]snapshot.SignalView, 0, len(w.SignalStates))
 	for i, st := range w.SignalStates {
 		if st == nil {
 			continue
 		}
 		x := &w.Net.Intersections[i]
-		node := w.Net.Nodes[x.NodeID]
-		// "Is red" for visualization: red if no incoming edge is currently green.
-		isRed := true
-		for j := range x.Incoming {
-			if st.GreenFor(j) {
-				isRed = false
-				break
+		for j, eid := range x.Incoming {
+			green := st.GreenFor(j)
+			e := &w.Net.Edges[eid]
+			s := e.Length - signalLightOffset
+			if s < 0 {
+				s = 0
 			}
+			px, py, _ := network.PositionOnEdge(w.Net, eid, s)
+			sigs = append(sigs, snapshot.SignalView{
+				IntersectionID: uint32(x.ID),
+				X:              px, Y: py,
+				IsRed:    !green,
+				IsYellow: green && st.IsYellow,
+			})
 		}
-		sigs = append(sigs, snapshot.SignalView{
-			IntersectionID: uint32(x.ID),
-			X:              node.Pos.X, Y: node.Pos.Y,
-			IsRed: isRed, IsYellow: st.IsYellow,
-		})
 	}
 	w.SnapshotBuf.Publish(snapshot.Snapshot{
 		Tick: w.Tick, SimTime: w.SimTime,

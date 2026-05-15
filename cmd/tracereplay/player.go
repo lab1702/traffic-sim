@@ -12,18 +12,29 @@ import (
 	"github.com/lab1702/traffic-sim/internal/trace"
 )
 
+// signalLightOffset mirrors the constant in internal/sim/world.go: each
+// per-approach signal indicator is drawn this many meters back from the
+// stop line so individual approach colors are legible.
+const signalLightOffset = 8.0
+
 // player advances trace events at real wall-clock speed (1x), reconstructing
 // vehicle positions by simple kinematic extrapolation between events.
 // Phase 8 keeps this simple: vehicles teleport at spawn and disappear at
 // despawn; positions between are interpolated linearly along their route
 // at the edge's speed limit. Phase 9 can extend this with state snapshots
 // for faithful replay.
+//
+// Signals: one entry per (intersection, incoming approach). Colors are
+// recomputed when a SignalPhase event fires for that intersection, using
+// the same even/odd default-plan rule the sim uses. YAML overrides will
+// not be reflected accurately — the trace doesn't carry the override
+// schedule. The sim itself renders signals correctly.
 type player struct {
 	net      *network.Network
 	r        *trace.Reader
 	buf      *snapshot.Buffer
 	vehicles map[uint32]*replayVehicle
-	signals  []snapshot.SignalView
+	signals  []approachLight
 }
 
 type replayVehicle struct {
@@ -34,24 +45,45 @@ type replayVehicle struct {
 	enteredEdgeAt float64
 }
 
+// approachLight is one signal indicator for one incoming leg of one
+// intersection. The view position is fixed at startup; colors mutate.
+type approachLight struct {
+	intersectionID uint32
+	incomingPos    int
+	view           snapshot.SignalView
+}
+
 func newPlayer(net *network.Network, r *trace.Reader, buf *snapshot.Buffer) *player {
-	sigs := make([]snapshot.SignalView, 0)
+	var lights []approachLight
 	for i := range net.Intersections {
 		x := &net.Intersections[i]
 		if !x.HasSignal {
 			continue
 		}
-		node := net.Nodes[x.NodeID]
-		sigs = append(sigs, snapshot.SignalView{
-			IntersectionID: uint32(x.ID), X: node.Pos.X, Y: node.Pos.Y,
-		})
+		for j, eid := range x.Incoming {
+			e := &net.Edges[eid]
+			s := e.Length - signalLightOffset
+			if s < 0 {
+				s = 0
+			}
+			px, py, _ := network.PositionOnEdge(net, eid, s)
+			lights = append(lights, approachLight{
+				intersectionID: uint32(x.ID),
+				incomingPos:    j,
+				view: snapshot.SignalView{
+					IntersectionID: uint32(x.ID),
+					X:              px, Y: py,
+					IsRed: true, // default to red until first SignalPhase event
+				},
+			})
+		}
 	}
 	return &player{
 		net:      net,
 		r:        r,
 		buf:      buf,
 		vehicles: make(map[uint32]*replayVehicle),
-		signals:  sigs,
+		signals:  lights,
 	}
 }
 
@@ -92,13 +124,17 @@ func (p *player) apply(hdr trace.Header, ev trace.Event) {
 	case *trace.VehicleDespawn:
 		delete(p.vehicles, e.VehicleID)
 	case *trace.SignalPhase:
+		// Default plan: even-indexed incoming approaches are green on
+		// even phases, odd-indexed on odd phases. During yellow the
+		// previously-green approaches show yellow; the rest show red.
+		phaseParity := int(e.PhaseIdx) % 2
 		for i := range p.signals {
-			if p.signals[i].IntersectionID == e.IntersectionID {
-				// Approximate: phase idx 0 = green for principal approach.
-				// IsYellow always honored.
-				p.signals[i].IsYellow = e.IsYellow
-				p.signals[i].IsRed = !e.IsYellow && e.PhaseIdx%2 == 1
+			if p.signals[i].intersectionID != e.IntersectionID {
+				continue
 			}
+			isGreen := (p.signals[i].incomingPos % 2) == phaseParity
+			p.signals[i].view.IsYellow = isGreen && e.IsYellow
+			p.signals[i].view.IsRed = !isGreen
 		}
 	}
 }
@@ -126,11 +162,14 @@ func (p *player) publish(simTime float64) {
 			ID: id, X: x, Y: y, Heading: hd, Speed: edge.SpeedLimit,
 		})
 	}
+	sigViews := make([]snapshot.SignalView, len(p.signals))
+	for i, s := range p.signals {
+		sigViews[i] = s.view
+	}
 	p.buf.Publish(snapshot.Snapshot{
 		SimTime:  simTime,
 		Vehicles: views,
-		Signals:  p.signals,
+		Signals:  sigViews,
 		Bounds:   p.net.Bounds,
 	})
 }
-

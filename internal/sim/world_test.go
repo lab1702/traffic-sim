@@ -170,6 +170,75 @@ func TestWorld_DeterminismSameSeed(t *testing.T) {
 	}
 }
 
+// TestWorld_SnapshotEmitsSignalPerApproach: a signalized intersection
+// with N incoming approaches must produce N SignalViews in the snapshot,
+// not one combined view. Guards against regressing back to per-intersection
+// signal rendering.
+func TestWorld_SnapshotEmitsSignalPerApproach(t *testing.T) {
+	// Build a 4-way intersection: a center node with 4 incoming edges
+	// from N, E, S, W (and 4 outgoing back to those nodes — needed so
+	// the intersection has degree-8 in the graph).
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 100}},   // N
+		{ID: 1, Pos: network.Point{X: 100, Y: 0}},   // E
+		{ID: 2, Pos: network.Point{X: 0, Y: -100}},  // S
+		{ID: 3, Pos: network.Point{X: -100, Y: 0}},  // W
+		{ID: 4, Pos: network.Point{X: 0, Y: 0}},     // center
+	}
+	mkEdge := func(id, from, to int) network.Edge {
+		return network.Edge{
+			ID:         network.EdgeID(id),
+			From:       network.NodeID(from),
+			To:         network.NodeID(to),
+			Length:     100,
+			SpeedLimit: 10,
+			Lanes:      []network.Lane{{Index: 0}},
+			Geometry: []network.Point{
+				nodes[from].Pos,
+				nodes[to].Pos,
+			},
+		}
+	}
+	edges := []network.Edge{
+		mkEdge(0, 0, 4), mkEdge(1, 4, 0), // N <-> center
+		mkEdge(2, 1, 4), mkEdge(3, 4, 1), // E
+		mkEdge(4, 2, 4), mkEdge(5, 4, 2), // S
+		mkEdge(6, 3, 4), mkEdge(7, 4, 3), // W
+	}
+	xs := []network.Intersection{
+		{
+			ID:        0,
+			NodeID:    4,
+			Incoming:  []network.EdgeID{0, 2, 4, 6},
+			Outgoing:  []network.EdgeID{1, 3, 5, 7},
+			HasSignal: true,
+		},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	w.Step() // one tick to populate the snapshot
+
+	snap := w.SnapshotBuf.Read()
+	if len(snap.Signals) != 4 {
+		t.Fatalf("want 4 SignalViews (one per incoming approach), got %d", len(snap.Signals))
+	}
+
+	// With the DefaultSignalConfig 2-phase plan, even-indexed approaches
+	// are green during phase 0; odd-indexed are red. Verify.
+	greens, reds := 0, 0
+	for _, sv := range snap.Signals {
+		if sv.IsRed {
+			reds++
+		} else {
+			greens++
+		}
+	}
+	if greens != 2 || reds != 2 {
+		t.Errorf("default 2-phase plan: want 2 green + 2 red approaches in phase 0, got %d green / %d red", greens, reds)
+	}
+}
+
 func TestWorld_TraceDeterminism(t *testing.T) {
 	run := func() []byte {
 		net := build2x2Grid()
