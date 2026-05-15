@@ -64,7 +64,13 @@ func shouldApplyCornerCap(v, cap, distToCorner float64) bool {
 // the vehicle is within braking distance.
 func (w *World) computeDesiredSpeed(v *Vehicle) float64 {
 	edge := &w.Net.Edges[v.Edge]
-	v0 := edge.SpeedLimit
+	// Per-driver speed preference. A zero factor means a hand-constructed
+	// vehicle (test fixture) — treat as 1.0 so existing tests work.
+	factor := v.SpeedFactor
+	if factor == 0 {
+		factor = 1.0
+	}
+	v0 := edge.SpeedLimit * factor
 	if v.RouteIdx+1 >= len(v.Route) {
 		return v0 // no next edge: nothing to slow for
 	}

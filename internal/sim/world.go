@@ -2,6 +2,7 @@ package sim
 
 import (
 	"log/slog"
+	"math/rand/v2"
 
 	"github.com/lab1702/traffic-sim/internal/network"
 	"github.com/lab1702/traffic-sim/internal/snapshot"
@@ -59,6 +60,11 @@ type World struct {
 	// Control delivers runtime UI commands (e.g. mode toggles from clicks).
 	// Step drains it non-blocking at the top of each tick. Nil disables.
 	Control <-chan ControlEvent
+
+	// rng drives per-vehicle random properties sampled at spawn (currently
+	// SpeedFactor). Seeded with a fixed default so two runs of the same
+	// scenario produce identical vehicle profiles.
+	rng *rand.Rand
 }
 
 const (
@@ -68,6 +74,14 @@ const (
 	// signal indicator is drawn, in meters. Far enough to read distinct
 	// colors at zoom, close enough to read as "this is that intersection's".
 	signalLightOffset = 4.0
+
+	// Per-vehicle speed preference: Vehicle.SpeedFactor is sampled at
+	// spawn from Normal(1.0, speedFactorStdDev) and clamped to
+	// [speedFactorMin, speedFactorMax]. σ = 1.5% puts ~99.7% of draws
+	// within ±4.5%, well inside the ±5% clamp.
+	speedFactorStdDev = 0.015
+	speedFactorMin    = 0.95
+	speedFactorMax    = 1.05
 )
 
 func NewWorld(net *network.Network, spawner Spawner, overrides map[network.IntersectionID]SignalConfig) *World {
@@ -94,6 +108,7 @@ func NewWorld(net *network.Network, spawner Spawner, overrides map[network.Inter
 		xByNodeID:    xByNode,
 		SnapshotBuf:  snapshot.New(),
 		EmitTrace:    func(uint64, float64, trace.Event) {},
+		rng:          rand.New(rand.NewPCG(0xCAFE, 0xBEEF)),
 	}
 }
 
@@ -452,15 +467,28 @@ func (w *World) trySpawn(r SpawnRequest) {
 	if err != nil || len(route) == 0 {
 		return
 	}
-	// Spawn at the edge speed limit so vehicles enter at cruising speed.
-	// IDM will regulate from there (following, braking) as needed.
+	// Sample a per-driver speed preference: Normal(mean=1.0, σ=0.015),
+	// clamped to [0.95, 1.05]. The clamp basically never fires (≈3σ each
+	// side covers 99.7%), so the distribution is effectively a tight
+	// normal — most vehicles drive at the speed limit, a few noticeably
+	// slower or faster.
+	factor := 1.0 + w.rng.NormFloat64()*speedFactorStdDev
+	if factor < speedFactorMin {
+		factor = speedFactorMin
+	} else if factor > speedFactorMax {
+		factor = speedFactorMax
+	}
+
+	// Spawn at this driver's cruising speed (factor * edge limit) so they
+	// don't immediately decelerate. IDM regulates from there.
 	v := Vehicle{
-		ID:    w.nextID,
-		Route: route,
-		Edge:  route[0],
-		Lane:  0,
-		S:     0,
-		V:     w.Net.Edges[route[0]].SpeedLimit,
+		ID:          w.nextID,
+		Route:       route,
+		Edge:        route[0],
+		Lane:        0,
+		S:           0,
+		V:           w.Net.Edges[route[0]].SpeedLimit * factor,
+		SpeedFactor: factor,
 	}
 	w.nextID++
 	w.Vehicles = append(w.Vehicles, v)

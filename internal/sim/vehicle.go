@@ -32,6 +32,12 @@ type Vehicle struct {
 	// stuckTimeoutSec the vehicle is logged at WARN and despawned.
 	StuckTime float64
 
+	// SpeedFactor is a per-driver multiplier on the edge speed limit,
+	// sampled once at spawn from a normal distribution. Typical range
+	// [0.95, 1.05] around mean 1.0. A zero value is treated as 1.0 to
+	// keep hand-constructed test vehicles working without modification.
+	SpeedFactor float64
+
 	Despawned bool
 }
 
