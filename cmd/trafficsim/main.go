@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/lab1702/traffic-sim/internal/config"
 	"github.com/lab1702/traffic-sim/internal/netbuild"
 	"github.com/lab1702/traffic-sim/internal/network"
 	"github.com/lab1702/traffic-sim/internal/osmload"
@@ -67,10 +68,11 @@ func runLoad(args []string) {
 func runRun(args []string) {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	var (
-		headless  = fs.Bool("headless", false, "skip rendering, run sim only")
-		duration  = fs.Duration("duration", 0, "stop after this much sim time (0 = unbounded)")
-		seed      = fs.Uint64("seed", 1, "RNG seed for deterministic runs")
-		spawnRate = fs.Float64("spawn-rate", 5.0, "vehicles spawned per simulated second")
+		headless    = fs.Bool("headless", false, "skip rendering, run sim only")
+		duration    = fs.Duration("duration", 0, "stop after this much sim time (0 = unbounded)")
+		seed        = fs.Uint64("seed", 1, "RNG seed for deterministic runs")
+		spawnRate   = fs.Float64("spawn-rate", 5.0, "vehicles spawned per simulated second")
+		signalsPath = fs.String("signals", "", "path to signal overrides YAML")
 	)
 	if err := fs.Parse(args); err != nil {
 		os.Exit(2)
@@ -101,8 +103,35 @@ func runRun(args []string) {
 		os.Exit(1)
 	}
 
+	overrides := map[network.IntersectionID]sim.SignalConfig{}
+	if *signalsPath != "" {
+		list, err := config.LoadSignalOverrides(*signalsPath)
+		if err != nil {
+			slog.Error("signals load failed", "err", err)
+			os.Exit(1)
+		}
+		for _, o := range list {
+			phases := make([]sim.SignalPhase, len(o.Phases))
+			for i, p := range o.Phases {
+				phases[i] = sim.SignalPhase{
+					GreenEdges: p.GreenEdges, GreenDur: p.GreenDur, YellowDur: p.YellowDur,
+				}
+			}
+			// Validate intersection_id is in range; warn and skip if not.
+			if int(o.IntersectionID) >= len(net.Intersections) {
+				slog.Warn("signal override references unknown intersection",
+					"id", o.IntersectionID, "max", len(net.Intersections)-1)
+				continue
+			}
+			overrides[network.IntersectionID(o.IntersectionID)] = sim.SignalConfig{
+				IntersectionID: network.IntersectionID(o.IntersectionID),
+				Phases:         phases,
+			}
+		}
+	}
+
 	spawner := sim.NewRandomOD(net, *seed, *spawnRate)
-	w := sim.NewWorld(net, spawner)
+	w := sim.NewWorld(net, spawner, overrides)
 
 	w.Run(duration.Seconds())
 	fmt.Printf("done. final_vehicles=%d ticks=%d sim_time=%.2fs\n",
