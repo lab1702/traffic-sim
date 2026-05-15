@@ -213,6 +213,81 @@ func TestBuild_LeafOfTwoWayIsNotIntersection(t *testing.T) {
 	}
 }
 
+// TestBuild_TwoWayEdgesHaveDistinctLaneSlices verifies that mutating one
+// direction's lanes does not affect the reverse direction's lanes. This
+// matters once per-direction state (AllowedTurns) is stored on Lane.
+func TestBuild_TwoWayEdgesHaveDistinctLaneSlices(t *testing.T) {
+	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
+		1: mkNode(1, 40.0, -74.0),
+		2: mkNode(2, 40.0, -74.001),
+	}}
+	feat.Ways = []*osm.Way{mkWay(10, "residential", false, 1, 2)}
+
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(net.Edges) != 2 {
+		t.Fatalf("want 2 edges (fwd+rev), got %d", len(net.Edges))
+	}
+	// Mutate one direction's lanes; the other must not change.
+	net.Edges[0].Lanes[0].AllowedTurns = []network.EdgeID{99}
+	if len(net.Edges[1].Lanes[0].AllowedTurns) != 0 {
+		t.Errorf("reverse edge lanes aliased to forward; got AllowedTurns=%v",
+			net.Edges[1].Lanes[0].AllowedTurns)
+	}
+}
+
+// Builds a + intersection like TestBuild_PlusShape but verifies that the
+// incoming edges at the central intersection have their lane AllowedTurns
+// populated (geometric fallback, since no turn:lanes tag).
+func TestBuild_PopulatesAllowedTurnsAtIntersections(t *testing.T) {
+	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
+		1: mkNode(1, 40.0, -74.0010),
+		2: mkNode(2, 40.0010, -74.0005),
+		3: mkNode(3, 40.0, 0.0),
+		4: mkNode(4, 39.9990, -74.0005),
+		5: mkNode(5, 40.0, -74.0005),
+	}}
+	// Two two-way ways crossing at node 5. Set lanes=4 so each direction has 2 lanes.
+	primary := mkWay(10, "primary", false, 1, 5, 3)
+	primary.Tags = append(primary.Tags, osm.Tag{Key: "lanes", Value: "4"})
+	cross := mkWay(20, "primary", false, 2, 5, 4)
+	cross.Tags = append(cross.Tags, osm.Tag{Key: "lanes", Value: "4"})
+	feat.Ways = []*osm.Way{primary, cross}
+
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	var central *network.Intersection
+	for i := range net.Intersections {
+		if len(net.Intersections[i].Incoming) >= 3 {
+			central = &net.Intersections[i]
+			break
+		}
+	}
+	if central == nil {
+		t.Fatal("no central intersection found")
+	}
+	for _, eid := range central.Incoming {
+		e := &net.Edges[eid]
+		if len(e.Lanes) < 2 {
+			continue // skip 1-lane edges (only populated when multi-lane)
+		}
+		anyPopulated := false
+		for _, l := range e.Lanes {
+			if len(l.AllowedTurns) > 0 {
+				anyPopulated = true
+				break
+			}
+		}
+		if !anyPopulated {
+			t.Errorf("incoming edge %d has 2 lanes but no AllowedTurns populated", eid)
+		}
+	}
+}
+
 // TestBuild_AppliesNoLeftTurnRestriction loads the with_restriction.osm
 // fixture and asserts that the no_left_turn relation produced exactly one
 // BannedTurn entry at the central intersection, and that the banned (from,

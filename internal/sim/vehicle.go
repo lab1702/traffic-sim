@@ -1,6 +1,7 @@
 package sim
 
 import (
+	"log/slog"
 	"math"
 
 	"github.com/lab1702/traffic-sim/internal/network"
@@ -70,6 +71,8 @@ func stepIDM(v *Vehicle, v0 float64, leaderS float64, leaderV float64, hasLeader
 
 	for v.S >= edge.Length {
 		v.S -= edge.Length
+		prevEdge := v.Edge
+		prevLane := v.Lane
 		v.RouteIdx++
 		if v.RouteIdx >= len(v.Route) {
 			v.Despawned = true
@@ -78,5 +81,55 @@ func stepIDM(v *Vehicle, v0 float64, leaderS float64, leaderV float64, hasLeader
 		}
 		v.Edge = v.Route[v.RouteIdx]
 		edge = &net.Edges[v.Edge]
+
+		// Lane carry-over: pick the new lane based on the just-completed
+		// turn. This is both the normal post-turn carry-over AND the snap
+		// fallback when bias didn't get us to a compatible lane in time.
+		cat := network.ClassifyTurn(net, prevEdge, v.Edge)
+
+		// Diagnostic: warn when the previous lane was incompatible with the
+		// just-taken turn — bias didn't get us there, so this snap is a teleport.
+		prevLanes := net.Edges[prevEdge].Lanes
+		if int(prevLane) < len(prevLanes) {
+			allowed := prevLanes[prevLane].AllowedTurns
+			if len(allowed) > 0 {
+				compat := false
+				for _, e := range allowed {
+					if e == v.Edge {
+						compat = true
+						break
+					}
+				}
+				if !compat {
+					slog.Warn("turn-lane snap fallback",
+						"vehicle_id", v.ID,
+						"prev_edge", prevEdge,
+						"prev_lane", prevLane,
+						"new_edge", v.Edge,
+						"turn_cat", cat,
+					)
+				}
+			}
+		}
+
+		nLanes := uint8(len(edge.Lanes))
+		switch cat {
+		case network.TurnRight:
+			v.Lane = 0
+		case network.TurnLeft:
+			if nLanes > 0 {
+				v.Lane = nLanes - 1
+			} else {
+				v.Lane = 0
+			}
+		case network.TurnStraight:
+			if uint8(prevLane) >= nLanes && nLanes > 0 {
+				v.Lane = nLanes - 1
+			} else {
+				v.Lane = prevLane
+			}
+		default: // TurnUTurn or unclassified
+			v.Lane = 0
+		}
 	}
 }
