@@ -73,13 +73,31 @@ func sortIncomingByPriority(
 	}
 	for i := range intersections {
 		x := &intersections[i]
-		sort.SliceStable(x.Incoming, func(a, b int) bool {
-			pa := priorityOf(x.Incoming[a])
-			pb := priorityOf(x.Incoming[b])
+		// Sort the Incoming slice and apply the same permutation to
+		// IncomingControl so the two stay aligned. Index-permutation
+		// approach keeps both slices in sync without a custom sort.Sort
+		// receiver.
+		idx := make([]int, len(x.Incoming))
+		for j := range idx {
+			idx[j] = j
+		}
+		sort.SliceStable(idx, func(a, b int) bool {
+			ea, eb := x.Incoming[idx[a]], x.Incoming[idx[b]]
+			pa, pb := priorityOf(ea), priorityOf(eb)
 			if pa != pb {
 				return pa < pb
 			}
-			return x.Incoming[a] < x.Incoming[b]
+			return ea < eb
 		})
+		newInc := make([]network.EdgeID, len(x.Incoming))
+		newCtrl := make([]network.Control, len(x.IncomingControl))
+		for newI, oldI := range idx {
+			newInc[newI] = x.Incoming[oldI]
+			if oldI < len(x.IncomingControl) {
+				newCtrl[newI] = x.IncomingControl[oldI]
+			}
+		}
+		x.Incoming = newInc
+		x.IncomingControl = newCtrl
 	}
 }

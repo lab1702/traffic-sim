@@ -399,12 +399,17 @@ func buildIntersections(nodes []network.Node, edges []network.Edge,
 		if !isReal && !signalNodes[n.ID] {
 			continue
 		}
+		ctrl := make([]network.Control, len(incE))
+		// Default to ControlNone for every approach. Real per-approach
+		// values are assigned later in resolveControls (called after
+		// sortIncomingByPriority).
 		xs = append(xs, network.Intersection{
-			ID:        network.IntersectionID(len(xs)),
-			NodeID:    n.ID,
-			Incoming:  incE,
-			Outgoing:  outE,
-			HasSignal: signalNodes[n.ID],
+			ID:              network.IntersectionID(len(xs)),
+			NodeID:          n.ID,
+			Incoming:        incE,
+			IncomingControl: ctrl,
+			Outgoing:        outE,
+			HasSignal:       signalNodes[n.ID],
 		})
 	}
 	return xs
