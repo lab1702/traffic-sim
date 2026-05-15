@@ -28,17 +28,23 @@ type Vehicle struct {
 	Despawned bool
 }
 
-// stepIDM advances vehicle i by one tick using IDM with the supplied leader.
-// leader may be nil; if non-nil, both vehicles are assumed to be on the same
-// edge (cross-edge leaders are handled by world.go via lookahead).
-func stepIDM(v *Vehicle, leaderS float64, leaderV float64, hasLeader bool,
+// stepIDM advances vehicle i by one tick using IDM with the supplied
+// leader and an explicit desired speed (v0). leader may be nil; if
+// non-nil, both vehicles are assumed to be on the same edge or on the
+// cross-edge lookahead path (world.go handles the framing).
+//
+// Passing v0 explicitly lets the caller blend the edge speed limit with
+// caps for upcoming corners, signals, etc.
+func stepIDM(v *Vehicle, v0 float64, leaderS float64, leaderV float64, hasLeader bool,
 	net *network.Network, params IDMParams, dt float64,
 ) {
 	if v.Despawned {
 		return
 	}
 	edge := &net.Edges[v.Edge]
-	v0 := edge.SpeedLimit
+	if v0 <= 0 {
+		v0 = edge.SpeedLimit
+	}
 
 	gap := math.Inf(1)
 	deltaV := 0.0

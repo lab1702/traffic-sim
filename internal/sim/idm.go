@@ -15,30 +15,52 @@ func DefaultIDM() IDMParams {
 	return IDMParams{A: 1.0, B: 1.5, S0: 2.0, T: 1.5, Delta: 4}
 }
 
-// IDMAcceleration returns the acceleration in m/s^2.
+// MaxBraking is the strongest deceleration any vehicle will apply. Vanilla
+// IDM's freeTerm = 1 - (v/v0)^delta can produce wildly negative values
+// when v >> v0 (e.g. a sudden tight corner ahead), which translates to
+// unrealistic decelerations like -200 m/s². We clamp the IDM output to
+// this physical panic-brake limit (~0.8 g) so the simulation behaves like
+// real cars.
+const MaxBraking = 8.0
+
+// MaxAccel mirrors MaxBraking on the positive side. Real cars top out at
+// ~3-4 m/s²; IDM at p.A=1 won't normally exceed that, but clamp for
+// safety in case future tuning increases p.A.
+const MaxAccel = 4.0
+
+// IDMAcceleration returns the acceleration in m/s^2, clamped to a
+// physical range [-MaxBraking, +MaxAccel].
 //
 //	v       current speed (m/s)
 //	v0      desired speed (m/s) — typically the edge speed limit
 //	gap     bumper-to-bumper distance to leader (m); pass math.Inf(1) if none
 //	deltaV  v - vLeader (positive = closing)
 //
-// The result may be negative (braking) and is mathematically defined for
-// all non-negative gaps; the caller is responsible for clamping the
-// resulting speed to >= 0 after integration.
+// The caller is responsible for clamping the resulting speed to >= 0
+// after integration.
 func IDMAcceleration(p IDMParams, v, v0, gap, deltaV float64) float64 {
 	if v0 <= 0 {
 		v0 = 0.1
 	}
 	freeTerm := 1.0 - math.Pow(v/v0, p.Delta)
 
+	var a float64
 	if math.IsInf(gap, 1) {
-		return p.A * freeTerm
+		a = p.A * freeTerm
+	} else {
+		// Desired dynamic gap.
+		sStar := p.S0 + math.Max(0, v*p.T+(v*deltaV)/(2*math.Sqrt(p.A*p.B)))
+		if gap < 0.01 {
+			gap = 0.01
+		}
+		intTerm := (sStar / gap) * (sStar / gap)
+		a = p.A * (freeTerm - intTerm)
 	}
-	// Desired dynamic gap.
-	sStar := p.S0 + math.Max(0, v*p.T+(v*deltaV)/(2*math.Sqrt(p.A*p.B)))
-	if gap < 0.01 {
-		gap = 0.01
+	if a > MaxAccel {
+		a = MaxAccel
 	}
-	intTerm := (sStar / gap) * (sStar / gap)
-	return p.A * (freeTerm - intTerm)
+	if a < -MaxBraking {
+		a = -MaxBraking
+	}
+	return a
 }

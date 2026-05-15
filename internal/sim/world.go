@@ -367,7 +367,8 @@ func (w *World) Step() {
 			}
 		}
 
-		stepIDM(v, lS, lV, has, w.Net, DefaultIDM(), w.dt)
+		v0 := w.computeDesiredSpeed(v)
+		stepIDM(v, v0, lS, lV, has, w.Net, DefaultIDM(), w.dt)
 		if v.Despawned {
 			w.EmitTrace(w.Tick, w.SimTime, &trace.VehicleDespawn{VehicleID: uint32(v.ID)})
 		}

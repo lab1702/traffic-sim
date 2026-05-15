@@ -10,7 +10,6 @@ import (
 	"math"
 	"sort"
 	"strconv"
-	"strings"
 
 	"github.com/lab1702/traffic-sim/internal/network"
 	"github.com/lab1702/traffic-sim/internal/osmload"
@@ -98,7 +97,10 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 		oneway := isOneway(w)
 		hwType := highwayType(w)
 		def := defaultsFor(hwType)
-		speed := parseSpeed(w, def.SpeedLimit)
+		// Forward and reverse may have different `maxspeed:forward`/`backward`
+		// tags. Resolve both up-front; fall back to the highway-type default.
+		speedFwd := parseSpeedForDirection(w, true, def.SpeedLimit)
+		speedBwd := parseSpeedForDirection(w, false, def.SpeedLimit)
 		lanesPerDir := parseLanes(w, def.LanesPerDir)
 
 		for _, seg := range segs {
@@ -138,14 +140,14 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 			lanes := makeLanes(lanesPerDir)
 			edges = append(edges, network.Edge{
 				ID: network.EdgeID(len(edges)), From: fromID, To: toID,
-				Lanes: lanes, Length: length, SpeedLimit: speed, Geometry: geom,
+				Lanes: lanes, Length: length, SpeedLimit: speedFwd, Geometry: geom,
 			})
 			osmWayOfEdge = append(osmWayOfEdge, w.ID)
 			if !oneway {
 				revGeom := reverseGeom(geom)
 				edges = append(edges, network.Edge{
 					ID: network.EdgeID(len(edges)), From: toID, To: fromID,
-					Lanes: lanes, Length: length, SpeedLimit: speed, Geometry: revGeom,
+					Lanes: lanes, Length: length, SpeedLimit: speedBwd, Geometry: revGeom,
 				})
 				osmWayOfEdge = append(osmWayOfEdge, w.ID)
 			}
@@ -224,27 +226,6 @@ func isOneway(w *osm.Way) bool {
 		}
 	}
 	return false
-}
-
-func parseSpeed(w *osm.Way, fallback float64) float64 {
-	for _, t := range w.Tags {
-		if t.Key != "maxspeed" {
-			continue
-		}
-		// Strip units; assume km/h if numeric, mph if " mph" suffix.
-		v := strings.TrimSpace(t.Value)
-		if strings.HasSuffix(v, "mph") {
-			n, err := strconv.ParseFloat(strings.TrimSpace(strings.TrimSuffix(v, "mph")), 64)
-			if err == nil {
-				return n * 0.44704
-			}
-		}
-		n, err := strconv.ParseFloat(v, 64)
-		if err == nil {
-			return n / 3.6 // km/h -> m/s
-		}
-	}
-	return fallback
 }
 
 func parseLanes(w *osm.Way, fallback uint8) uint8 {

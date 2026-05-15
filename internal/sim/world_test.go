@@ -358,7 +358,7 @@ func TestWorld_FlashRedYields(t *testing.T) {
 		w.SignalStates[0].Mode = ModeFlashB
 		// One vehicle on E approach (flash-red), moving at speed limit.
 		w.Vehicles = []Vehicle{
-			{ID: 1, Route: []network.EdgeID{1, 5}, Edge: 1, S: 80, V: 10},
+			{ID: 1, Route: []network.EdgeID{1, 7}, Edge: 1, S: 80, V: 10}, // E -> W straight-through; no corner cap
 		}
 		w.nextID = 2
 		for i := 0; i < 100; i++ {
@@ -388,8 +388,8 @@ func TestWorld_FlashRedYields(t *testing.T) {
 		// E approach vehicle close to stop line + N approach vehicle
 		// approaching with ETA ≈ 2s (well inside the 3s gap threshold).
 		w.Vehicles = []Vehicle{
-			{ID: 1, Route: []network.EdgeID{1, 5}, Edge: 1, S: 70, V: 10}, // E (red)
-			{ID: 2, Route: []network.EdgeID{0, 6}, Edge: 0, S: 80, V: 10}, // N (yellow priority, ETA=2s)
+			{ID: 1, Route: []network.EdgeID{1, 7}, Edge: 1, S: 70, V: 10}, // E -> W straight (red, no corner cap)
+			{ID: 2, Route: []network.EdgeID{0, 6}, Edge: 0, S: 80, V: 10}, // N -> S straight (yellow priority, ETA=2s)
 		}
 		w.nextID = 3
 		// Tick twice — long enough for yield logic to kick in, short
