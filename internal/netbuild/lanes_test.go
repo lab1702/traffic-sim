@@ -109,6 +109,135 @@ func TestGeometricLaneAssignment(t *testing.T) {
 	}
 }
 
+// buildTestIntersection constructs a simple intersection: incoming edge 0
+// ends at node 0, with three outgoing edges 1 (right), 2 (straight), 3 (left).
+// Lane count on the incoming edge is configurable.
+func buildTestIntersection(numLanes int) *network.Network {
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 1, Pos: network.Point{X: -100, Y: 0}},  // upstream of incoming
+		{ID: 2, Pos: network.Point{X: 100, Y: -100}}, // right destination
+		{ID: 3, Pos: network.Point{X: 100, Y: 0}},    // straight destination
+		{ID: 4, Pos: network.Point{X: 100, Y: 100}},  // left destination
+	}
+	lanes := make([]network.Lane, numLanes)
+	for i := range lanes {
+		lanes[i] = network.Lane{Index: uint8(i)}
+	}
+	edges := []network.Edge{
+		// Incoming: node 1 -> 0, heading east (+X).
+		{ID: 0, From: 1, To: 0, Length: 100, SpeedLimit: 10, Lanes: lanes,
+			Geometry: []network.Point{nodes[1].Pos, nodes[0].Pos}},
+		// Outgoing right: 0 -> 2, heading SE (then south).
+		{ID: 1, From: 0, To: 2, Length: 140, SpeedLimit: 10,
+			Lanes:    []network.Lane{{Index: 0}},
+			Geometry: []network.Point{nodes[0].Pos, nodes[2].Pos}},
+		// Outgoing straight: 0 -> 3, heading east.
+		{ID: 2, From: 0, To: 3, Length: 100, SpeedLimit: 10,
+			Lanes:    []network.Lane{{Index: 0}},
+			Geometry: []network.Point{nodes[0].Pos, nodes[3].Pos}},
+		// Outgoing left: 0 -> 4, heading NE (then north).
+		{ID: 3, From: 0, To: 4, Length: 140, SpeedLimit: 10,
+			Lanes:    []network.Lane{{Index: 0}},
+			Geometry: []network.Point{nodes[0].Pos, nodes[4].Pos}},
+	}
+	intersections := []network.Intersection{
+		{ID: 0, NodeID: 0,
+			Incoming: []network.EdgeID{0},
+			Outgoing: []network.EdgeID{1, 2, 3},
+		},
+	}
+	return &network.Network{Nodes: nodes, Edges: edges, Intersections: intersections}
+}
+
+func TestAssignAllowedTurnsForEdge_GeometricFallback_TwoLanes(t *testing.T) {
+	net := buildTestIntersection(2)
+	// No OSM way ID for incoming → geometric fallback.
+	allowed := assignAllowedTurnsForEdge(net, 0, &net.Intersections[0], nil)
+
+	// Expected: lane 0 = {right, straight}, lane 1 = {left, straight}.
+	if len(allowed) != 2 {
+		t.Fatalf("want 2 lane assignments, got %d", len(allowed))
+	}
+	if !containsEdge(allowed[0], 1) || !containsEdge(allowed[0], 2) {
+		t.Errorf("lane 0 should include right (1) and straight (2), got %v", allowed[0])
+	}
+	if containsEdge(allowed[0], 3) {
+		t.Errorf("lane 0 should NOT include left (3), got %v", allowed[0])
+	}
+	if !containsEdge(allowed[1], 3) || !containsEdge(allowed[1], 2) {
+		t.Errorf("lane 1 should include left (3) and straight (2), got %v", allowed[1])
+	}
+	if containsEdge(allowed[1], 1) {
+		t.Errorf("lane 1 should NOT include right (1), got %v", allowed[1])
+	}
+}
+
+func TestAssignAllowedTurnsForEdge_GeometricFallback_ThreeLanes(t *testing.T) {
+	net := buildTestIntersection(3)
+	allowed := assignAllowedTurnsForEdge(net, 0, &net.Intersections[0], nil)
+
+	// Expected: lane 0 = {right}, lane 1 = {straight}, lane 2 = {left}.
+	if !containsEdge(allowed[0], 1) || containsEdge(allowed[0], 2) || containsEdge(allowed[0], 3) {
+		t.Errorf("lane 0 wrong: %v", allowed[0])
+	}
+	if containsEdge(allowed[1], 1) || !containsEdge(allowed[1], 2) || containsEdge(allowed[1], 3) {
+		t.Errorf("lane 1 wrong: %v", allowed[1])
+	}
+	if containsEdge(allowed[2], 1) || containsEdge(allowed[2], 2) || !containsEdge(allowed[2], 3) {
+		t.Errorf("lane 2 wrong: %v", allowed[2])
+	}
+}
+
+func TestAssignAllowedTurnsForEdge_OSMOverride(t *testing.T) {
+	net := buildTestIntersection(2)
+	// OSM says lane 0 = through+right, lane 1 = left only.
+	spec := parseTurnLanesString("through;right|left")
+	allowed := assignAllowedTurnsForEdge(net, 0, &net.Intersections[0], spec)
+
+	if !containsEdge(allowed[0], 1) || !containsEdge(allowed[0], 2) {
+		t.Errorf("lane 0 should have right (1) and straight (2), got %v", allowed[0])
+	}
+	if !containsEdge(allowed[1], 3) {
+		t.Errorf("lane 1 should have left (3), got %v", allowed[1])
+	}
+	if containsEdge(allowed[1], 2) {
+		t.Errorf("lane 1 should NOT have straight (2) per explicit OSM, got %v", allowed[1])
+	}
+}
+
+func TestAssignAllowedTurnsForEdge_BannedTurnExcluded(t *testing.T) {
+	net := buildTestIntersection(2)
+	// Ban the left turn (0 -> 3).
+	net.Intersections[0].BannedTurns = []network.TurnRestriction{
+		{From: 0, To: 3},
+	}
+	allowed := assignAllowedTurnsForEdge(net, 0, &net.Intersections[0], nil)
+
+	for i, lane := range allowed {
+		if containsEdge(lane, 3) {
+			t.Errorf("lane %d should not include banned edge 3, got %v", i, lane)
+		}
+	}
+}
+
+func TestAssignAllowedTurnsForEdge_AllOutgoingReachable(t *testing.T) {
+	net := buildTestIntersection(3)
+	allowed := assignAllowedTurnsForEdge(net, 0, &net.Intersections[0], nil)
+	for _, want := range []network.EdgeID{1, 2, 3} {
+		reachable := false
+		for _, lane := range allowed {
+			if containsEdge(lane, want) {
+				reachable = true
+				break
+			}
+		}
+		if !reachable {
+			t.Errorf("edge %d unreachable from any lane", want)
+		}
+	}
+}
+
 // equalAssignments compares two per-lane assignments treating each lane's
 // category list as an unordered set.
 func equalAssignments(a, b [][]network.TurnCategory) bool {

@@ -65,6 +65,120 @@ var turnTokenMap = map[string]network.TurnCategory{
 	// "reverse" intentionally absent — U-turns are dropped.
 }
 
+// assignAllowedTurnsForEdge computes the AllowedTurns lists for each lane
+// of `incoming` at intersection `x`.
+//
+// - osmSpec: pre-parsed turn:lanes tokens (nil if no OSM data). When the
+//   token count matches the lane count, this overrides geometric inference.
+//
+// Returns one []EdgeID per lane (same order as incoming.Lanes).
+func assignAllowedTurnsForEdge(
+	net *network.Network,
+	incoming network.EdgeID,
+	x *network.Intersection,
+	osmSpec [][]network.TurnCategory,
+) [][]network.EdgeID {
+	inc := &net.Edges[incoming]
+	numLanes := len(inc.Lanes)
+	if numLanes == 0 {
+		return nil
+	}
+
+	// Build banned-set keyed by outgoing edge.
+	banned := make(map[network.EdgeID]bool)
+	for _, br := range x.BannedTurns {
+		if br.From == incoming {
+			banned[br.To] = true
+		}
+	}
+
+	// Classify each non-banned, non-U-turn outgoing edge.
+	type outInfo struct {
+		eid network.EdgeID
+		cat network.TurnCategory
+	}
+	var outs []outInfo
+	categoriesPresent := make(map[network.TurnCategory]bool)
+	for _, oid := range x.Outgoing {
+		if banned[oid] {
+			continue
+		}
+		cat := network.ClassifyTurn(net, incoming, oid)
+		if cat == network.TurnUTurn {
+			continue
+		}
+		outs = append(outs, outInfo{oid, cat})
+		categoriesPresent[cat] = true
+	}
+	if len(outs) == 0 {
+		return make([][]network.EdgeID, numLanes)
+	}
+
+	// One-lane incoming or only one allowed outgoing: every lane gets
+	// every legal outgoing.
+	if numLanes == 1 || len(outs) == 1 {
+		all := make([]network.EdgeID, len(outs))
+		for i, o := range outs {
+			all[i] = o.eid
+		}
+		result := make([][]network.EdgeID, numLanes)
+		for i := range result {
+			result[i] = append([]network.EdgeID(nil), all...)
+		}
+		return result
+	}
+
+	// Decide per-lane categories: OSM if usable, else geometric.
+	var perLane [][]network.TurnCategory
+	if len(osmSpec) == numLanes {
+		perLane = osmSpec
+	} else {
+		var presentList []network.TurnCategory
+		for c := range categoriesPresent {
+			presentList = append(presentList, c)
+		}
+		perLane = assignLanesGeometric(presentList, numLanes)
+	}
+
+	// Translate per-lane categories to per-lane outgoing edges.
+	result := make([][]network.EdgeID, numLanes)
+	for i, cats := range perLane {
+		for _, o := range outs {
+			for _, c := range cats {
+				if c == o.cat {
+					result[i] = append(result[i], o.eid)
+					break
+				}
+			}
+		}
+	}
+
+	// Sanity: every non-banned outgoing must be reachable from some lane.
+	// If a category is present but unreachable, attach to the closest-side lane.
+	for _, o := range outs {
+		reachable := false
+		for _, lane := range result {
+			for _, e := range lane {
+				if e == o.eid {
+					reachable = true
+					break
+				}
+			}
+			if reachable {
+				break
+			}
+		}
+		if !reachable {
+			target := 0
+			if o.cat == network.TurnLeft {
+				target = numLanes - 1
+			}
+			result[target] = append(result[target], o.eid)
+		}
+	}
+	return result
+}
+
 // assignLanesGeometric returns a per-lane list of allowed turn categories
 // for an intersection where the given set of categories is present.
 // Convention: lane 0 = rightmost; higher index = closer to road centerline.
