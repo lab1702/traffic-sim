@@ -2,8 +2,10 @@ package sim
 
 import (
 	"log/slog"
+	"math"
 
 	"github.com/lab1702/traffic-sim/internal/network"
+	"github.com/lab1702/traffic-sim/internal/snapshot"
 )
 
 // World owns mutable simulation state. Only the sim goroutine touches it.
@@ -24,6 +26,9 @@ type World struct {
 
 	// xByNodeID is a NodeID -> Intersection index for O(1) lookup during tick.
 	xByNodeID map[network.NodeID]*network.Intersection
+
+	// SnapshotBuf is read by the renderer; published once per tick.
+	SnapshotBuf *snapshot.Buffer
 }
 
 const DefaultDt = 0.05 // 50 ms == 20 Hz
@@ -50,6 +55,7 @@ func NewWorld(net *network.Network, spawner Spawner, overrides map[network.Inter
 		maxRetry:     4,
 		SignalStates: sigs,
 		xByNodeID:    xByNode,
+		SnapshotBuf:  snapshot.New(),
 	}
 }
 
@@ -248,7 +254,10 @@ func (w *World) Step() {
 		}
 	}
 
-	// 4. Compact and advance time.
+	// 5. Publish snapshot for renderer (before compact so live vehicles are included).
+	w.publishSnapshot()
+
+	// 6. Compact and advance time.
 	w.compact()
 	w.Tick++
 	w.SimTime += w.dt
@@ -293,6 +302,79 @@ func (w *World) compact() {
 		dst++
 	}
 	w.Vehicles = w.Vehicles[:dst]
+}
+
+func (w *World) publishSnapshot() {
+	if w.SnapshotBuf == nil {
+		return
+	}
+	views := make([]snapshot.VehicleView, 0, len(w.Vehicles))
+	for i := range w.Vehicles {
+		v := &w.Vehicles[i]
+		if v.Despawned {
+			continue
+		}
+		x, y, hd := positionOnEdge(w.Net, v.Edge, v.S)
+		views = append(views, snapshot.VehicleView{
+			ID: uint32(v.ID), X: x, Y: y, Heading: hd, Speed: v.V,
+		})
+	}
+	sigs := make([]snapshot.SignalView, 0, len(w.SignalStates))
+	for i, st := range w.SignalStates {
+		if st == nil {
+			continue
+		}
+		x := &w.Net.Intersections[i]
+		node := w.Net.Nodes[x.NodeID]
+		// "Is red" for visualization: red if no incoming edge is currently green.
+		isRed := true
+		for j := range x.Incoming {
+			if st.GreenFor(j) {
+				isRed = false
+				break
+			}
+		}
+		sigs = append(sigs, snapshot.SignalView{
+			IntersectionID: uint32(x.ID),
+			X:              node.Pos.X, Y: node.Pos.Y,
+			IsRed: isRed, IsYellow: st.IsYellow,
+		})
+	}
+	w.SnapshotBuf.Publish(snapshot.Snapshot{
+		Tick: w.Tick, SimTime: w.SimTime,
+		Vehicles: views, Signals: sigs, Bounds: w.Net.Bounds,
+	})
+}
+
+// positionOnEdge returns (x, y, heading) for the point S meters along
+// edge's polyline geometry. Linear interpolation between vertices.
+func positionOnEdge(net *network.Network, eid network.EdgeID, s float64) (float64, float64, float64) {
+	e := &net.Edges[eid]
+	g := e.Geometry
+	if len(g) < 2 {
+		return 0, 0, 0
+	}
+	remaining := s
+	for i := 1; i < len(g); i++ {
+		dx := g[i].X - g[i-1].X
+		dy := g[i].Y - g[i-1].Y
+		segLen := math.Sqrt(dx*dx + dy*dy)
+		if remaining <= segLen || i == len(g)-1 {
+			t := 0.0
+			if segLen > 0 {
+				t = remaining / segLen
+			}
+			if t > 1 {
+				t = 1
+			}
+			x := g[i-1].X + dx*t
+			y := g[i-1].Y + dy*t
+			heading := math.Atan2(dy, dx)
+			return x, y, heading
+		}
+		remaining -= segLen
+	}
+	return g[len(g)-1].X, g[len(g)-1].Y, 0
 }
 
 // Run advances the sim for the given number of simulated seconds (headless).
