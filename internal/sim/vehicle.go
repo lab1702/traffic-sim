@@ -32,6 +32,12 @@ type Vehicle struct {
 	// stuckTimeoutSec the vehicle is logged at WARN and despawned.
 	StuckTime float64
 
+	// StoppedSinceSec is the sim-time at which this vehicle came to a
+	// complete stop at its current approach's stop line. Zero means
+	// "not currently stopped at a stop line." Reset to zero when the
+	// vehicle transitions to a new edge.
+	StoppedSinceSec float64
+
 	// SpeedFactor is a per-driver multiplier on the edge speed limit,
 	// sampled once at spawn from a normal distribution. Typical range
 	// [0.95, 1.05] around mean 1.0. A zero value is treated as 1.0 to
@@ -94,6 +100,10 @@ func stepIDM(v *Vehicle, v0 float64, leaderS float64, leaderV float64, hasLeader
 		}
 		v.Edge = v.Route[v.RouteIdx]
 		edge = &net.Edges[v.Edge]
+
+		// Clear any mandatory-stop arrival timestamp now that we've left
+		// the prior approach.
+		v.StoppedSinceSec = 0
 
 		// Lane carry-over: pick the new lane based on the just-completed
 		// turn. This is both the normal post-turn carry-over AND the snap
