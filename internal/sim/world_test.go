@@ -841,6 +841,7 @@ func TestWorld_StopSign_MandatoryDwell(t *testing.T) {
 	// With stuckSpeedThresh (0.1 m/s), V reaches ~0.1 at ~6s (tick ~120),
 	// dwell completes at ~6.5s, and the vehicle crosses to edge 1 by ~10.5s.
 	stoppedAt := -1.0
+	departedAt := -1.0
 	lastEdge := w.Vehicles[0].Edge
 	for i := 0; i < 300; i++ {
 		w.Step()
@@ -855,6 +856,9 @@ func TestWorld_StopSign_MandatoryDwell(t *testing.T) {
 		if stoppedAt < 0 && v.StoppedSinceSec > 0 {
 			stoppedAt = w.SimTime
 		}
+		if departedAt < 0 && v.Edge == 1 {
+			departedAt = w.SimTime
+		}
 	}
 
 	if stoppedAt < 0 {
@@ -866,6 +870,13 @@ func TestWorld_StopSign_MandatoryDwell(t *testing.T) {
 	// compacted, which also means it successfully traversed the intersection).
 	if lastEdge != 1 {
 		t.Errorf("vehicle should have advanced to outbound edge (1) after dwell, last seen on edge %d", lastEdge)
+	}
+	if departedAt < 0 {
+		t.Fatal("vehicle never crossed to outbound edge")
+	}
+	if departedAt-stoppedAt < stopDwellSec-w.dt-1e-9 {
+		t.Errorf("vehicle departed only %.3fs after stopping; want >= %.3fs dwell",
+			departedAt-stoppedAt, stopDwellSec)
 	}
 }
 

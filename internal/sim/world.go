@@ -313,8 +313,11 @@ func effectiveControl(w *World, x *network.Intersection, myPos int) network.Cont
 				return network.ControlNone // blinking yellow has priority
 			}
 			return network.ControlStop // blinking red is a stop sign
+		default:
+			// Unknown future signal mode — fall back to no control rather
+			// than silently changing semantics.
+			return network.ControlNone
 		}
-		return network.ControlNone
 	}
 	if myPos < len(x.IncomingControl) {
 		return x.IncomingControl[myPos]
