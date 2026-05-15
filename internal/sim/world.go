@@ -145,6 +145,15 @@ func NewWorld(net *network.Network, spawner Spawner, overrides map[network.Inter
 // stopDistanceForRed returns (distance to stop line, true) if the vehicle
 // is on an incoming edge to a red-signalled intersection and the vehicle
 // is approaching it. Returns (0, false) otherwise.
+//
+// Yellow is treated as soft-red: if the vehicle can comfortably stop
+// before the line at IDM's comfortable deceleration, a virtual stop
+// leader is applied (the driver elects to stop). Otherwise the vehicle
+// commits through, matching real-world dilemma-zone behavior — drivers
+// too close to brake without a panic stop carry on and clear before the
+// hard red. This prevents the case where a car cruises full-speed
+// through the entire yellow window and is still in the intersection
+// when the cross-stream turns green.
 func (w *World) stopDistanceForRed(v *Vehicle) (float64, bool) {
 	edge := &w.Net.Edges[v.Edge]
 	x, ok := w.xByNodeID[edge.To]
@@ -167,15 +176,36 @@ func (w *World) stopDistanceForRed(v *Vehicle) (float64, bool) {
 	if pos < 0 {
 		return 0, false
 	}
-	if st.GreenFor(pos) {
+	inPhase := st.GreenFor(pos) // true during both green and yellow for this approach
+	if inPhase && !st.IsYellow {
+		// Pure green: cruise through.
 		return 0, false
 	}
-	// Red: stop line is at the end of this edge.
+	// Red, or yellow for this approach. Stop line is end of edge.
 	dist := edge.Length - v.S
 	if dist < 0 {
 		dist = 0
 	}
+	if inPhase && st.IsYellow {
+		// Soft-red yellow: commit only when comfortable stop is not
+		// possible. Distance check uses the vehicle's current speed —
+		// a vehicle already slow (e.g. queued from a prior red) has a
+		// short comfortable distance and so stops.
+		if dist < comfortableStopDistance(v.V) {
+			return 0, false
+		}
+	}
 	return dist, true
+}
+
+// comfortableStopDistance is the distance a vehicle moving at speed v
+// needs to come to rest using IDM's comfortable deceleration B plus the
+// minimum stopping gap S0. Used by the soft-red yellow check to decide
+// whether to stop or commit. Conservative: uses comfortable braking, not
+// max braking, so cars in the legal-stop zone reliably stop.
+func comfortableStopDistance(v float64) float64 {
+	p := DefaultIDM()
+	return v*v/(2*p.B) + p.S0
 }
 
 const gapThresholdSec = 3.0

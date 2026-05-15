@@ -158,6 +158,112 @@ func TestWorld_StopsAtRedLight(t *testing.T) {
 	}
 }
 
+// buildSignalApproach returns a single-edge graph ending at a signalized
+// intersection: a 200m road from node 0 to node 1, with node 1 the
+// signal. Used by the soft-red yellow tests.
+func buildSignalApproach(speedLimit float64) *network.Network {
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 1, Pos: network.Point{X: 200, Y: 0}},
+	}
+	edges := []network.Edge{
+		{ID: 0, From: 0, To: 1, Length: 200, SpeedLimit: speedLimit,
+			Lanes:    []network.Lane{{Index: 0}},
+			Geometry: []network.Point{nodes[0].Pos, nodes[1].Pos}},
+	}
+	xs := []network.Intersection{
+		{ID: 0, NodeID: 1, Incoming: []network.EdgeID{0}, HasSignal: true},
+	}
+	return &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+}
+
+// TestWorld_YellowCommitsWhenTooClose: a vehicle in the dilemma zone
+// (closer to the stop line than its comfortable stopping distance) must
+// commit through yellow rather than panic-brake. This is the soft-red
+// yellow behavior — it prevents cars from being caught mid-intersection
+// when the cross-stream gets green.
+func TestWorld_YellowCommitsWhenTooClose(t *testing.T) {
+	net := buildSignalApproach(13)
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	w.SignalStates[0] = NewSignalState(SignalConfig{
+		Phases: []SignalPhase{{GreenEdges: []int{0}, GreenDur: 30, YellowDur: 3}},
+	})
+	w.SignalStates[0].IsYellow = true
+
+	// 10m from stop line at 13 m/s. Comfortable stop ≈ 13²/3 + 2 ≈ 58m,
+	// so 10m << 58m → must commit.
+	w.Vehicles = []Vehicle{{ID: 1, Route: []network.EdgeID{0}, Edge: 0, S: 190, V: 13}}
+	w.nextID = 2
+
+	if _, isRed := w.stopDistanceForRed(&w.Vehicles[0]); isRed {
+		t.Errorf("yellow + 10m at 13 m/s: expected commit, got virtual stop leader")
+	}
+}
+
+// TestWorld_YellowStopsWhenComfortable: a vehicle with comfortable
+// stopping distance available should treat yellow as red and stop.
+func TestWorld_YellowStopsWhenComfortable(t *testing.T) {
+	net := buildSignalApproach(13)
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	w.SignalStates[0] = NewSignalState(SignalConfig{
+		Phases: []SignalPhase{{GreenEdges: []int{0}, GreenDur: 30, YellowDur: 3}},
+	})
+	w.SignalStates[0].IsYellow = true
+
+	// 100m from line at 13 m/s. Comfortable stop ≈ 58m, so 100m > 58m → stop.
+	w.Vehicles = []Vehicle{{ID: 1, Route: []network.EdgeID{0}, Edge: 0, S: 100, V: 13}}
+	w.nextID = 2
+
+	d, isRed := w.stopDistanceForRed(&w.Vehicles[0])
+	if !isRed {
+		t.Errorf("yellow + 100m at 13 m/s: expected stop, got commit")
+	}
+	if d != 100 {
+		t.Errorf("yellow stop distance: want 100 (edge 200 - S 100), got %.2f", d)
+	}
+}
+
+// TestWorld_PureGreenDoesNotStop: green (with IsYellow=false) must not
+// apply a virtual leader. Regression guard for the soft-red split.
+func TestWorld_PureGreenDoesNotStop(t *testing.T) {
+	net := buildSignalApproach(13)
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	w.SignalStates[0] = NewSignalState(SignalConfig{
+		Phases: []SignalPhase{{GreenEdges: []int{0}, GreenDur: 30, YellowDur: 3}},
+	})
+	// IsYellow defaults to false → pure green for this approach.
+
+	w.Vehicles = []Vehicle{{ID: 1, Route: []network.EdgeID{0}, Edge: 0, S: 50, V: 13}}
+	w.nextID = 2
+
+	if _, isRed := w.stopDistanceForRed(&w.Vehicles[0]); isRed {
+		t.Errorf("pure green: expected no virtual leader, got isRed=true")
+	}
+}
+
+// TestWorld_YellowStopsWhenStandingStill: a vehicle already stopped at
+// the line during yellow must remain stopped (comfortable stop distance
+// from v=0 is just S0=2m, so any dist > 2m → stop; at dist≈0 the
+// vehicle still doesn't move because V=0 and there's no leader pull).
+// Confirms the soft-red check doesn't accidentally launch queued cars.
+func TestWorld_YellowStopsWhenStandingStill(t *testing.T) {
+	net := buildSignalApproach(13)
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	w.SignalStates[0] = NewSignalState(SignalConfig{
+		Phases: []SignalPhase{{GreenEdges: []int{0}, GreenDur: 30, YellowDur: 3}},
+	})
+	w.SignalStates[0].IsYellow = true
+
+	// Stopped 20m from the line. Comfortable stop from V=0 is S0=2m, so
+	// 20m > 2m → stop holds.
+	w.Vehicles = []Vehicle{{ID: 1, Route: []network.EdgeID{0}, Edge: 0, S: 180, V: 0}}
+	w.nextID = 2
+
+	if _, isRed := w.stopDistanceForRed(&w.Vehicles[0]); !isRed {
+		t.Errorf("stopped at yellow with 20m clearance: expected stop holds, got commit")
+	}
+}
+
 func TestWorld_DeterminismSameSeed(t *testing.T) {
 	run := func() (uint32, int) {
 		net := build2x2Grid()
