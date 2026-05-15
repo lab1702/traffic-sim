@@ -17,9 +17,8 @@ import (
 )
 
 type Report struct {
-	WaysSkipped         int
-	ComponentsDropped   int
-	NodesDroppedNoEdges int
+	WaysSkipped       int
+	ComponentsDropped int
 }
 
 // Build constructs a Network. Returns the network and a report of what was
@@ -32,33 +31,8 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 	// 1. Compute reference point (centroid of node bounding box) for projection.
 	refLat, refLon := refPoint(feat)
 
-	// 2. Build node-degree map: how many kept ways touch each node?
-	degree := make(map[osm.NodeID]int)
-	for _, w := range feat.Ways {
-		for i, n := range w.Nodes {
-			if i == 0 || i == len(w.Nodes)-1 {
-				degree[n.ID] += 1
-			} else {
-				// Interior nodes count as 1 unless they're endpoints in
-				// other ways; we'll add those separately.
-				degree[n.ID] += 0
-			}
-		}
-	}
-	// Endpoints of multiple ways become intersections.
-	endpointCount := make(map[osm.NodeID]int)
-	for _, w := range feat.Ways {
-		if len(w.Nodes) == 0 {
-			continue
-		}
-		endpointCount[w.Nodes[0].ID]++
-		endpointCount[w.Nodes[len(w.Nodes)-1].ID]++
-	}
-
-	// A node is an intersection if (a) >=2 ways touch it as endpoint,
-	// or (b) it's tagged as a traffic signal, or (c) it appears in
-	// the interior of one way and as an endpoint of another. We'll
-	// approximate "intersection" as: appears in >=2 ways anywhere.
+	// 2. Count how many distinct ways reference each node; a node shared
+	// by >=2 ways is a real intersection.
 	usageCount := make(map[osm.NodeID]int)
 	for _, w := range feat.Ways {
 		seen := make(map[osm.NodeID]bool)
@@ -169,9 +143,17 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 		}
 	}
 
-	// 5. Build intersections (one per node with degree>=2 in the final
-	// edge set, plus signal nodes even if degree=1).
-	intersections := buildIntersections(nodes, edges, feat, osmToNet)
+	// 5. Build intersections (one per node that is a real intersection
+	// per usageCount, plus signal nodes).
+	realIntersectionNetNodes := make(map[network.NodeID]bool)
+	for osmID := range feat.Nodes {
+		if isIntersection(osmID) {
+			if netID, ok := osmToNet[osmID]; ok {
+				realIntersectionNetNodes[netID] = true
+			}
+		}
+	}
+	intersections := buildIntersections(nodes, edges, feat, osmToNet, realIntersectionNetNodes)
 
 	// 6. Prune to largest connected component.
 	nodes, edges, intersections, droppedComponents := keepLargestComponent(nodes, edges, intersections, segChains)
@@ -373,6 +355,7 @@ func computeBounds(nodes []network.Node) network.BoundingBox {
 
 func buildIntersections(nodes []network.Node, edges []network.Edge,
 	feat *osmload.Features, osmToNet map[osm.NodeID]network.NodeID,
+	realIntersectionNetNodes map[network.NodeID]bool,
 ) []network.Intersection {
 	inc := make(map[network.NodeID][]network.EdgeID)
 	out := make(map[network.NodeID][]network.EdgeID)
@@ -395,7 +378,8 @@ func buildIntersections(nodes []network.Node, edges []network.Edge,
 	var xs []network.Intersection
 	for _, n := range nodes {
 		incE, outE := inc[n.ID], out[n.ID]
-		if len(incE) < 2 && len(outE) < 2 && !signalNodes[n.ID] {
+		isReal := realIntersectionNetNodes[n.ID]
+		if !isReal && !signalNodes[n.ID] {
 			continue
 		}
 		xs = append(xs, network.Intersection{

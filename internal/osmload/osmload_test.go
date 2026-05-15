@@ -1,6 +1,7 @@
 package osmload
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/paulmach/osm"
@@ -33,5 +34,9 @@ func TestLoad_UnknownExtension(t *testing.T) {
 	_, err := Load("testdata/notarealfile.dat")
 	if err == nil {
 		t.Fatalf("want error for unknown extension")
+	}
+	if !strings.Contains(err.Error(), "notarealfile.dat") &&
+		!strings.Contains(err.Error(), "unrecognized extension") {
+		t.Errorf("error should mention filename or be about extension, got: %v", err)
 	}
 }

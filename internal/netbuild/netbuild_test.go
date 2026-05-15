@@ -104,3 +104,110 @@ func TestBuild_OnewayProducesSingleEdge(t *testing.T) {
 		t.Errorf("oneway should produce 1 edge, got %d", len(net.Edges))
 	}
 }
+
+func TestBuild_RespectsMaxspeedKmh(t *testing.T) {
+	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
+		1: mkNode(1, 40.0, -74.0),
+		2: mkNode(2, 40.0001, -74.0),
+	}}
+	w := mkWay(100, "residential", false, 1, 2)
+	w.Tags = append(w.Tags, osm.Tag{Key: "maxspeed", Value: "50"}) // 50 km/h
+	feat.Ways = []*osm.Way{w}
+
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	// 50 km/h = 13.888... m/s
+	want := 50.0 / 3.6
+	for _, e := range net.Edges {
+		if e.SpeedLimit < want-0.01 || e.SpeedLimit > want+0.01 {
+			t.Errorf("edge speed: want %.3f m/s, got %.3f", want, e.SpeedLimit)
+		}
+	}
+}
+
+func TestBuild_RespectsMaxspeedMph(t *testing.T) {
+	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
+		1: mkNode(1, 40.0, -74.0),
+		2: mkNode(2, 40.0001, -74.0),
+	}}
+	w := mkWay(100, "residential", false, 1, 2)
+	w.Tags = append(w.Tags, osm.Tag{Key: "maxspeed", Value: "30 mph"})
+	feat.Ways = []*osm.Way{w}
+
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	// 30 mph = 13.4112 m/s
+	want := 30.0 * 0.44704
+	for _, e := range net.Edges {
+		if e.SpeedLimit < want-0.01 || e.SpeedLimit > want+0.01 {
+			t.Errorf("edge speed: want %.3f m/s, got %.3f", want, e.SpeedLimit)
+		}
+	}
+}
+
+func TestBuild_RespectsExplicitLanes(t *testing.T) {
+	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
+		1: mkNode(1, 40.0, -74.0),
+		2: mkNode(2, 40.0001, -74.0),
+	}}
+	w := mkWay(100, "residential", false, 1, 2)
+	w.Tags = append(w.Tags, osm.Tag{Key: "lanes", Value: "4"})
+	feat.Ways = []*osm.Way{w}
+
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	// lanes=4 on two-way => 2 per direction
+	for _, e := range net.Edges {
+		if len(e.Lanes) != 2 {
+			t.Errorf("want 2 lanes per direction, got %d", len(e.Lanes))
+		}
+	}
+}
+
+// TestBuild_OnewayJunctionIsIntersection guards against a threshold bug
+// where a node where two oneways meet (1 incoming + 1 outgoing) gets
+// mis-classified. Such a node IS shared by 2 ways so it must register
+// as an intersection.
+func TestBuild_OnewayJunctionIsIntersection(t *testing.T) {
+	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
+		1: mkNode(1, 40.0, -74.0),
+		2: mkNode(2, 40.0001, -74.0),
+		3: mkNode(3, 40.0002, -74.0),
+	}}
+	// Way 10: 1->2 (oneway). Way 20: 2->3 (oneway). Node 2 is shared.
+	feat.Ways = []*osm.Way{
+		mkWay(10, "primary", true, 1, 2),
+		mkWay(20, "primary", true, 2, 3),
+	}
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(net.Intersections) != 1 {
+		t.Errorf("oneway-to-oneway junction at node 2 should produce 1 intersection, got %d", len(net.Intersections))
+	}
+}
+
+// TestBuild_LeafOfTwoWayIsNotIntersection: a dead-end node on a single
+// two-way street should NOT be classified as an intersection (it only
+// touches one way, regardless of edge counts).
+func TestBuild_LeafOfTwoWayIsNotIntersection(t *testing.T) {
+	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
+		1: mkNode(1, 40.0, -74.0),
+		2: mkNode(2, 40.0001, -74.0),
+	}}
+	feat.Ways = []*osm.Way{mkWay(100, "residential", false, 1, 2)}
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(net.Intersections) != 0 {
+		t.Errorf("dead-end leaves of a single two-way street should not be intersections, got %d", len(net.Intersections))
+	}
+}
