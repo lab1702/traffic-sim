@@ -146,75 +146,106 @@ func (w *World) Step() {
 		w.trySpawn(r)
 	}
 
-	// 2. Bucket vehicles by edge for leader lookup, sorted by S ascending.
+	// 2. Bucket vehicles by edge and by (edge, lane) for leader lookup,
+	//    sorted by S ascending within each bucket.
 	byEdge := make(map[network.EdgeID][]int, 1024)
+	byEdgeLane := make(map[network.EdgeID]map[uint8][]int, 1024)
 	for i := range w.Vehicles {
 		if w.Vehicles[i].Despawned {
 			continue
 		}
 		eid := w.Vehicles[i].Edge
 		byEdge[eid] = append(byEdge[eid], i)
+		if _, ok := byEdgeLane[eid]; !ok {
+			byEdgeLane[eid] = make(map[uint8][]int)
+		}
+		byEdgeLane[eid][w.Vehicles[i].Lane] = append(byEdgeLane[eid][w.Vehicles[i].Lane], i)
 	}
 	for _, idxs := range byEdge {
 		sortVehicleIdxByS(w.Vehicles, idxs)
 	}
+	for _, lanes := range byEdgeLane {
+		for _, idxs := range lanes {
+			sortVehicleIdxByS(w.Vehicles, idxs)
+		}
+	}
 
-	// 3. Step each vehicle, finding its leader as the next vehicle ahead
-	//    on the same edge (or the first vehicle on the next route edge
-	//    if no same-edge leader exists and gap to end-of-edge is small).
-	//    Iterate vehicles in a stable index order to preserve determinism.
+	// 3. Pre-compute leaders per vehicle index using per-lane buckets.
+	//    This is done in a separate pass to avoid order-dependence during stepping.
+	type leaderInfo struct {
+		lS, lV float64
+		has    bool
+	}
+	leaders := make(map[int]leaderInfo, len(w.Vehicles))
+	for eid, lanes := range byEdgeLane {
+		edge := &w.Net.Edges[eid]
+		for ln, idxs := range lanes {
+			for pos, vi := range idxs {
+				info := leaderInfo{}
+				if pos+1 < len(idxs) {
+					ld := &w.Vehicles[idxs[pos+1]]
+					info.lS, info.lV, info.has = ld.S, ld.V, true
+				} else {
+					v := &w.Vehicles[vi]
+					if v.RouteIdx+1 < len(v.Route) {
+						nextE := v.Route[v.RouteIdx+1]
+						if nlanes, ok := byEdgeLane[nextE]; ok {
+							// Use first vehicle in the same lane index on the next edge if exists.
+							if ne := &w.Net.Edges[nextE]; uint8(ln) < uint8(len(ne.Lanes)) {
+								if nidxs, ok2 := nlanes[ln]; ok2 && len(nidxs) > 0 {
+									nv := &w.Vehicles[nidxs[0]]
+									info.lS = edge.Length + nv.S
+									info.lV = nv.V
+									info.has = true
+								}
+							}
+						}
+					}
+				}
+				leaders[vi] = info
+			}
+		}
+	}
+
+	// 4. Step each vehicle, applying signal/yield virtual leaders.
+	//    Iterate vehicles in stable index order to preserve determinism.
 	for i := range w.Vehicles {
 		if w.Vehicles[i].Despawned {
 			continue
 		}
 		v := &w.Vehicles[i]
-		idxs := byEdge[v.Edge]
-		// Find this vehicle's position within the sorted bucket.
-		pos := -1
-		for k, vi := range idxs {
-			if vi == i {
-				pos = k
-				break
-			}
-		}
+		info := leaders[i]
+		lS, lV, has := info.lS, info.lV, info.has
 
-		var lS, lV float64
-		has := false
-		if pos >= 0 && pos+1 < len(idxs) {
-			ld := &w.Vehicles[idxs[pos+1]]
-			lS, lV, has = ld.S, ld.V, true
-		} else if v.RouteIdx+1 < len(v.Route) {
-			// Lookahead to next edge's first vehicle.
-			nextE := v.Route[v.RouteIdx+1]
-			if nidxs, ok := byEdge[nextE]; ok && len(nidxs) > 0 {
-				nv := &w.Vehicles[nidxs[0]]
-				edge := &w.Net.Edges[v.Edge]
-				lS = edge.Length + nv.S
-				lV = nv.V
-				has = true
-			}
-		}
 		// Apply red-light virtual leader if closer.
 		if d, isRed := w.stopDistanceForRed(v); isRed {
-			// Virtual leader sits at the stop line, stationary.
-			// Smaller S of leader vs real leader => the binding constraint.
 			virtualS := v.S + d
 			if !has || virtualS < lS {
-				lS = virtualS
-				lV = 0
-				has = true
+				lS, lV, has = virtualS, 0, true
 			}
 		}
 		// Apply unsignalized-yield virtual leader if closer.
 		if d, mustYield := w.stopDistanceForYield(v, byEdge); mustYield {
 			virtualS := v.S + d
 			if !has || virtualS < lS {
-				lS = virtualS
-				lV = 0
-				has = true
+				lS, lV, has = virtualS, 0, true
 			}
 		}
+
 		stepIDM(v, lS, lV, has, w.Net, DefaultIDM(), w.dt)
+
+		// Decrement lane-change cooldown.
+		if v.LaneChangeCooldown > 0 {
+			v.LaneChangeCooldown -= w.dt
+			if v.LaneChangeCooldown < 0 {
+				v.LaneChangeCooldown = 0
+			}
+		}
+		// Try lane change after stepping (byEdgeLane is a tick-old snapshot —
+		// consistent and avoids order-dependence).
+		if lanes, ok := byEdgeLane[v.Edge]; ok {
+			tryLaneChange(v, i, lanes, w.Vehicles, w.Net)
+		}
 	}
 
 	// 4. Compact and advance time.

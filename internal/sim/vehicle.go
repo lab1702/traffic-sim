@@ -21,6 +21,10 @@ type Vehicle struct {
 	V        float64 // m/s
 	A        float64 // m/s^2 (last computed accel; useful for tracing)
 
+	// LaneChangeCooldown counts down in seconds. Cannot change lanes
+	// again until this reaches 0. Prevents oscillation.
+	LaneChangeCooldown float64
+
 	Despawned bool
 }
 
