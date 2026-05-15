@@ -14,12 +14,16 @@ import (
 // ebitenutil.DebugPrintAt (its built-in font is roughly 16 px tall).
 const hudLineHeight = 16
 
-// DrawHUD renders text overlay (sim time, vehicle count, FPS).
-func DrawHUD(screen *ebiten.Image, simTime float64, vehicleCount int) {
+// DrawHUD renders text overlay (sim time, vehicle count, FPS, view size
+// in world meters). viewWidthM/viewHeightM are window dimensions divided
+// by the current zoom and indicate how many meters of world are visible.
+func DrawHUD(screen *ebiten.Image, simTime float64, vehicleCount int, viewWidthM, viewHeightM float64) {
 	line1 := fmt.Sprintf("sim t=%.1fs  vehicles=%d", simTime, vehicleCount)
 	line2 := fmt.Sprintf("FPS=%.1f  TPS=%.1f", ebiten.ActualFPS(), ebiten.ActualTPS())
+	line3 := fmt.Sprintf("view: %.0f m wide x %.0f m tall", viewWidthM, viewHeightM)
 	ebitenutil.DebugPrintAt(screen, line1, 8, 8)
 	ebitenutil.DebugPrintAt(screen, line2, 8, 8+hudLineHeight)
+	ebitenutil.DebugPrintAt(screen, line3, 8, 8+2*hudLineHeight)
 }
 
 // DrawSelectionPanel renders an info block for the currently selected

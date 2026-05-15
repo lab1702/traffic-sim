@@ -24,11 +24,25 @@ const (
 	modeOff     = 3
 )
 
+// vehicleLength is the bumper-to-bumper length used to draw vehicles.
+// Duplicated here to avoid importing sim; must match sim.VehicleLength.
+const vehicleLength = 5.0
+
+// rightSideOffset is how far perpendicular-right of the lane centerline
+// we shift vehicles on bidirectional roads, to visualize right-hand
+// driving. Roughly half a US lane width.
+const rightSideOffset = 1.8
+
 type Viewport struct {
 	Net    *network.Network
 	Buf    *snapshot.Buffer
 	Width  int
 	Height int
+
+	// edgeHasReverse[i] is true iff edge i belongs to a bidirectional road
+	// (its reverse twin exists). Computed once at construction; used to
+	// decide whether to offset vehicles to the right of the centerline.
+	edgeHasReverse []bool
 
 	// Pan/zoom state.
 	camX, camY float64 // world meters at screen center
@@ -66,8 +80,29 @@ func NewViewport(net *network.Network, buf *snapshot.Buffer, w, h int) *Viewport
 	}
 	return &Viewport{
 		Net: net, Buf: buf, Width: w, Height: h,
-		camX: cx, camY: cy, zoom: z,
+		edgeHasReverse: computeReverseEdgeMap(net),
+		camX:           cx, camY: cy, zoom: z,
 	}
+}
+
+// computeReverseEdgeMap returns a parallel slice where entry i is true
+// iff edges[i] has a twin going the opposite direction between the same
+// node pair (i.e. it's part of a two-way road).
+func computeReverseEdgeMap(net *network.Network) []bool {
+	type pair struct{ a, b network.NodeID }
+	exists := make(map[pair]struct{}, len(net.Edges))
+	for i := range net.Edges {
+		e := &net.Edges[i]
+		exists[pair{e.From, e.To}] = struct{}{}
+	}
+	out := make([]bool, len(net.Edges))
+	for i := range net.Edges {
+		e := &net.Edges[i]
+		if _, ok := exists[pair{e.To, e.From}]; ok {
+			out[i] = true
+		}
+	}
+	return out
 }
 
 // World->screen transformation. Y is flipped (world y up, screen y down).
@@ -280,18 +315,39 @@ func (v *Viewport) Draw(screen *ebiten.Image) {
 		vector.StrokeLine(screen, cx-d, cy-d, cx+d, cy+d, 1.5, colorNoMark, true)
 	}
 
-	// Draw vehicles.
-	vehColor := color.RGBA{230, 230, 240, 255}
+	// Draw vehicles as 5 m line segments in world units, oriented along
+	// the lane tangent. (vh.X, vh.Y) is the front bumper; the back bumper
+	// is 5 m back along the heading. On bidirectional roads we shift the
+	// car right of the centerline so opposing traffic visibly separates.
+	// Pure world units: at low zoom the line shrinks below a pixel and
+	// effectively disappears.
+	vehColor := color.RGBA{0, 255, 255, 255}
 	for _, vh := range snap.Vehicles {
-		x, y := v.toScreen(vh.X, vh.Y)
-		vector.DrawFilledCircle(screen, x, y, 2.5, vehColor, true)
+		cosH := math.Cos(vh.Heading)
+		sinH := math.Sin(vh.Heading)
+		offX, offY := 0.0, 0.0
+		if int(vh.EdgeID) < len(v.edgeHasReverse) && v.edgeHasReverse[vh.EdgeID] {
+			// Perpendicular-right of heading H in math coords (y up) is
+			// (sin H, -cos H). Scale by the lane offset.
+			offX = sinH * rightSideOffset
+			offY = -cosH * rightSideOffset
+		}
+		frontX := vh.X + offX
+		frontY := vh.Y + offY
+		backX := frontX - vehicleLength*cosH
+		backY := frontY - vehicleLength*sinH
+		fx, fy := v.toScreen(frontX, frontY)
+		rx, ry := v.toScreen(backX, backY)
+		vector.StrokeLine(screen, fx, fy, rx, ry, 1.5, vehColor, true)
 	}
 
-	DrawHUD(screen, snap.SimTime, len(snap.Vehicles))
+	viewWidthM := float64(v.Width) / v.zoom
+	viewHeightM := float64(v.Height) / v.zoom
+	DrawHUD(screen, snap.SimTime, len(snap.Vehicles), viewWidthM, viewHeightM)
 	if v.hasSelection {
-		// HUD draws two lines starting at y=8; selection panel starts
+		// HUD draws three lines starting at y=8; selection panel starts
 		// just below with a small gap.
-		DrawSelectionPanel(screen, v.Net, snap, v.selectedID, 8+2*hudLineHeight+8)
+		DrawSelectionPanel(screen, v.Net, snap, v.selectedID, 8+3*hudLineHeight+8)
 	}
 }
 

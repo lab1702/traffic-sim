@@ -185,7 +185,7 @@ func (p *player) publish(simTime float64) {
 		v.s = s
 		x, y, hd := network.PositionOnEdge(p.net, v.curEdge, v.s)
 		views = append(views, snapshot.VehicleView{
-			ID: id, X: x, Y: y, Heading: hd, Speed: edge.SpeedLimit,
+			ID: id, EdgeID: uint32(v.curEdge), X: x, Y: y, Heading: hd, Speed: edge.SpeedLimit,
 		})
 	}
 	sigViews := make([]snapshot.SignalView, len(p.signals))
