@@ -84,6 +84,53 @@ func (w *World) stopDistanceForRed(v *Vehicle) (float64, bool) {
 	return dist, true
 }
 
+const gapThresholdSec = 3.0
+
+// stopDistanceForYield returns (distance to stop line, true) if the
+// vehicle's current edge ends at an UNSIGNALIZED intersection AND a
+// higher-priority incoming edge has a vehicle approaching within
+// gapThresholdSec seconds. "Higher priority" is defined here as a lower
+// Incoming index (i.e., x.Incoming[0] is the priority road).
+func (w *World) stopDistanceForYield(v *Vehicle, byEdge map[network.EdgeID][]int) (float64, bool) {
+	edge := &w.Net.Edges[v.Edge]
+	x, ok := w.xByNodeID[edge.To]
+	if !ok || x.HasSignal {
+		return 0, false
+	}
+	myPos := IncomingPos(x, v.Edge)
+	if myPos <= 0 {
+		// No higher-priority edge; we're the priority road (or unknown).
+		return 0, false
+	}
+	myDist := edge.Length - v.S
+	for i := 0; i < myPos; i++ {
+		otherEdgeID := x.Incoming[i]
+		others := byEdge[otherEdgeID]
+		if len(others) == 0 {
+			continue
+		}
+		// Find the closest-to-stop-line vehicle on the other approach.
+		otherEdge := &w.Net.Edges[otherEdgeID]
+		bestETA := 1e9
+		for _, oi := range others {
+			ov := &w.Vehicles[oi]
+			d := otherEdge.Length - ov.S
+			ovV := ov.V
+			if ovV < 0.5 {
+				ovV = 0.5
+			}
+			eta := d / ovV
+			if eta < bestETA {
+				bestETA = eta
+			}
+		}
+		if bestETA < gapThresholdSec {
+			return myDist, true
+		}
+	}
+	return myDist, false
+}
+
 // Step advances the sim by one tick (DefaultDt seconds).
 func (w *World) Step() {
 	// 0. Advance all signal phases.
@@ -151,6 +198,15 @@ func (w *World) Step() {
 		if d, isRed := w.stopDistanceForRed(v); isRed {
 			// Virtual leader sits at the stop line, stationary.
 			// Smaller S of leader vs real leader => the binding constraint.
+			virtualS := v.S + d
+			if !has || virtualS < lS {
+				lS = virtualS
+				lV = 0
+				has = true
+			}
+		}
+		// Apply unsignalized-yield virtual leader if closer.
+		if d, mustYield := w.stopDistanceForYield(v, byEdge); mustYield {
 			virtualS := v.S + d
 			if !has || virtualS < lS {
 				lS = virtualS
