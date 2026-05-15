@@ -1,7 +1,3 @@
-// Command trafficsim is the live simulator + viewer binary.
-//
-// For now (Phase 2 milestone) it only supports the `load` subcommand,
-// which parses an OSM file, builds the graph, and prints stats.
 package main
 
 import (
@@ -9,10 +5,12 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"time"
 
 	"github.com/lab1702/traffic-sim/internal/netbuild"
 	"github.com/lab1702/traffic-sim/internal/network"
 	"github.com/lab1702/traffic-sim/internal/osmload"
+	"github.com/lab1702/traffic-sim/internal/sim"
 )
 
 func main() {
@@ -23,6 +21,8 @@ func main() {
 	switch os.Args[1] {
 	case "load":
 		runLoad(os.Args[2:])
+	case "run":
+		runRun(os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -32,7 +32,8 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: trafficsim <subcommand> [flags]")
 	fmt.Fprintln(os.Stderr, "subcommands:")
-	fmt.Fprintln(os.Stderr, "  load <path-to-osm>   parse and print graph stats")
+	fmt.Fprintln(os.Stderr, "  load <path-to-osm>           parse and print graph stats")
+	fmt.Fprintln(os.Stderr, "  run  <path-to-osm> [flags]   run the simulation")
 }
 
 func runLoad(args []string) {
@@ -62,6 +63,51 @@ func runLoad(args []string) {
 		rpt.WaysSkipped, rpt.ComponentsDropped)
 	fmt.Printf("bounds=(%.1f,%.1f)-(%.1f,%.1f) m\n",
 		net.Bounds.MinX, net.Bounds.MinY, net.Bounds.MaxX, net.Bounds.MaxY)
+}
+
+func runRun(args []string) {
+	fs := flag.NewFlagSet("run", flag.ExitOnError)
+	var (
+		headless  = fs.Bool("headless", false, "skip rendering, run sim only")
+		duration  = fs.Duration("duration", 0, "stop after this much sim time (0 = unbounded)")
+		seed      = fs.Uint64("seed", 1, "RNG seed for deterministic runs")
+		spawnRate = fs.Float64("spawn-rate", 5.0, "vehicles spawned per simulated second")
+	)
+	if err := fs.Parse(args); err != nil {
+		os.Exit(2)
+	}
+	if fs.NArg() != 1 {
+		fmt.Fprintln(os.Stderr, "run: need exactly one OSM path")
+		os.Exit(2)
+	}
+	path := fs.Arg(0)
+
+	feat, err := osmload.Load(path)
+	if err != nil {
+		slog.Error("load failed", "err", err)
+		os.Exit(1)
+	}
+	net, _, err := netbuild.Build(feat)
+	if err != nil {
+		slog.Error("build failed", "err", err)
+		os.Exit(1)
+	}
+
+	spawner := sim.NewRandomOD(net, *seed, *spawnRate)
+	w := sim.NewWorld(net, spawner)
+
+	if !*headless {
+		fmt.Fprintln(os.Stderr, "warning: rendering not implemented yet; pass --headless")
+		os.Exit(2)
+	}
+	if *duration == 0 {
+		fmt.Fprintln(os.Stderr, "error: --headless requires --duration > 0")
+		os.Exit(2)
+	}
+	w.Run(duration.Seconds())
+	fmt.Printf("done. final_vehicles=%d ticks=%d sim_time=%.2fs\n",
+		len(w.Vehicles), w.Tick, w.SimTime)
+	_ = time.Now() // keep time import live if unused
 }
 
 func countSignals(xs []network.Intersection) int {
