@@ -288,6 +288,11 @@ func (v *Viewport) Draw(screen *ebiten.Image) {
 	}
 
 	DrawHUD(screen, snap.SimTime, len(snap.Vehicles))
+	if v.hasSelection {
+		// HUD draws two lines starting at y=8; selection panel starts
+		// just below with a small gap.
+		DrawSelectionPanel(screen, v.Net, snap, v.selectedID, 8+2*hudLineHeight+8)
+	}
 }
 
 // Layout is called by Ebitengine on every frame with the current outside
