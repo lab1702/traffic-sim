@@ -10,6 +10,25 @@ import (
 	"github.com/lab1702/traffic-sim/internal/trace"
 )
 
+// allNone returns a slice of n ControlNone entries — the default for
+// signaled intersections (where IncomingControl is not consulted under
+// ModeNormal) and for hand-built fixtures that want priority/yield
+// behavior to come from explicit setup.
+func allNone(n int) []network.Control {
+	out := make([]network.Control, n)
+	return out
+}
+
+// ctrls is a syntactic shorthand for assembling an IncomingControl slice
+// inline in a fixture literal. Example:
+//
+//	IncomingControl: ctrls(network.ControlNone, network.ControlStop),
+func ctrls(cs ...network.Control) []network.Control {
+	out := make([]network.Control, len(cs))
+	copy(out, cs)
+	return out
+}
+
 // build2x2Grid returns a 2x2 grid: 4 nodes arranged in a square,
 // with edges between adjacent nodes in both directions. 100m blocks.
 //
