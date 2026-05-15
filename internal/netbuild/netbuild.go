@@ -137,17 +137,16 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 				continue
 			}
 			segChains = append(segChains, chain)
-			lanes := makeLanes(lanesPerDir)
 			edges = append(edges, network.Edge{
 				ID: network.EdgeID(len(edges)), From: fromID, To: toID,
-				Lanes: lanes, Length: length, SpeedLimit: speedFwd, Geometry: geom,
+				Lanes: makeLanes(lanesPerDir), Length: length, SpeedLimit: speedFwd, Geometry: geom,
 			})
 			osmWayOfEdge = append(osmWayOfEdge, w.ID)
 			if !oneway {
 				revGeom := reverseGeom(geom)
 				edges = append(edges, network.Edge{
 					ID: network.EdgeID(len(edges)), From: toID, To: fromID,
-					Lanes: lanes, Length: length, SpeedLimit: speedBwd, Geometry: revGeom,
+					Lanes: makeLanes(lanesPerDir), Length: length, SpeedLimit: speedBwd, Geometry: revGeom,
 				})
 				osmWayOfEdge = append(osmWayOfEdge, w.ID)
 			}

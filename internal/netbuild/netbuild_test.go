@@ -213,6 +213,31 @@ func TestBuild_LeafOfTwoWayIsNotIntersection(t *testing.T) {
 	}
 }
 
+// TestBuild_TwoWayEdgesHaveDistinctLaneSlices verifies that mutating one
+// direction's lanes does not affect the reverse direction's lanes. This
+// matters once per-direction state (AllowedTurns) is stored on Lane.
+func TestBuild_TwoWayEdgesHaveDistinctLaneSlices(t *testing.T) {
+	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
+		1: mkNode(1, 40.0, -74.0),
+		2: mkNode(2, 40.0, -74.001),
+	}}
+	feat.Ways = []*osm.Way{mkWay(10, "residential", false, 1, 2)}
+
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(net.Edges) != 2 {
+		t.Fatalf("want 2 edges (fwd+rev), got %d", len(net.Edges))
+	}
+	// Mutate one direction's lanes; the other must not change.
+	net.Edges[0].Lanes[0].AllowedTurns = []network.EdgeID{99}
+	if len(net.Edges[1].Lanes[0].AllowedTurns) != 0 {
+		t.Errorf("reverse edge lanes aliased to forward; got AllowedTurns=%v",
+			net.Edges[1].Lanes[0].AllowedTurns)
+	}
+}
+
 // TestBuild_AppliesNoLeftTurnRestriction loads the with_restriction.osm
 // fixture and asserts that the no_left_turn relation produced exactly one
 // BannedTurn entry at the central intersection, and that the banned (from,
