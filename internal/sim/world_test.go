@@ -1848,3 +1848,109 @@ func TestWorld_LeftTurn_AllWayStop_BothLeftsPass(t *testing.T) {
 		t.Error("AllWayStop left turner B should have made it through (mutual lefts pass)")
 	}
 }
+
+// TestWorld_LeftTurn_AllWayStop_CrossTrafficLeftDoesYield: at a 4-way
+// AllWayStop, a left turner must NOT proceed simultaneously with a
+// cross-traffic left turner — their paths cross. Mutual-left only
+// applies to opposing approaches.
+func TestWorld_LeftTurn_AllWayStop_CrossTrafficLeftDoesYield(t *testing.T) {
+	// 4-way: N, E, S, W approaches all AllWayStop.
+	// A: N approach turning left (heading east).
+	// B: E approach turning left (heading south).
+	// They are cross-traffic, NOT opposing. B paths through the center
+	// going south while A paths through going east — they collide.
+	// A is "lower position" so FIFO normally would let A go; the bug
+	// would also let B go (because both are left-turners). With the fix,
+	// B must yield to A.
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 100}},  // N
+		{ID: 1, Pos: network.Point{X: 100, Y: 0}},  // E
+		{ID: 2, Pos: network.Point{X: 0, Y: -100}}, // S
+		{ID: 3, Pos: network.Point{X: -100, Y: 0}}, // W
+		{ID: 4, Pos: network.Point{X: 0, Y: 0}},    // center
+		{ID: 5, Pos: network.Point{X: 200, Y: 0}},  // A's exit east
+		{ID: 6, Pos: network.Point{X: 0, Y: -200}}, // B's exit south
+	}
+	mkEdge := func(id, from, to int) network.Edge {
+		return network.Edge{
+			ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: 100, SpeedLimit: 10,
+			Lanes:    []network.Lane{{Index: 0}},
+			Geometry: []network.Point{nodes[from].Pos, nodes[to].Pos},
+		}
+	}
+	edges := []network.Edge{
+		mkEdge(0, 0, 4), // N->C  (A's approach)
+		mkEdge(1, 1, 4), // E->C  (B's approach)
+		mkEdge(2, 2, 4), // S->C
+		mkEdge(3, 3, 4), // W->C
+		mkEdge(4, 4, 5), // C->E (A's left turn)
+		mkEdge(5, 4, 6), // C->S (B's left turn)
+	}
+	// We need an Opposing relation that correctly pairs N with S and E with W.
+	// In Incoming order [0:N, 1:E, 2:S, 3:W]:
+	//   Opposing[0] = 2 (N opposes S)
+	//   Opposing[1] = 3 (E opposes W)
+	//   Opposing[2] = 0
+	//   Opposing[3] = 1
+	xs := []network.Intersection{
+		{
+			ID: 0, NodeID: 4,
+			Incoming: []network.EdgeID{0, 1, 2, 3},
+			IncomingControl: ctrls(
+				network.ControlAllWayStop, network.ControlAllWayStop,
+				network.ControlAllWayStop, network.ControlAllWayStop,
+			),
+			Opposing:  []int8{2, 3, 0, 1},
+			Outgoing:  []network.EdgeID{4, 5},
+			HasSignal: false,
+		},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0, 4}, Edge: 0, S: 98, V: 0.5}, // A: N->E left
+		{ID: 2, Route: []network.EdgeID{1, 5}, Edge: 1, S: 98, V: 0.5}, // B: E->S left
+	}
+	w.nextID = 3
+
+	// Stop both vehicles at the line simultaneously, then run.
+	// With identical StoppedSinceSec, FIFO tie-break (lower Incoming
+	// index wins) means A (position 0) goes first, B (position 1) yields.
+	// The mutual-left bug would have let both go simultaneously.
+	//
+	// We detect the bug by checking whether B is on its outbound edge (5)
+	// in the very first tick that A transitions onto its outbound edge (4).
+	// With the bug, both cross in the same tick; with the fix, B stays on
+	// edge 1 while A clears the intersection.
+	aEnteredOutboundTick := -1
+	bEnteredOutboundTick := -1
+	for i := 0; i < 600; i++ {
+		w.Step()
+		for j := range w.Vehicles {
+			v := &w.Vehicles[j]
+			if v.ID == 1 && v.Edge == 4 && aEnteredOutboundTick < 0 {
+				aEnteredOutboundTick = i
+			}
+			if v.ID == 2 && v.Edge == 5 && bEnteredOutboundTick < 0 {
+				bEnteredOutboundTick = i
+			}
+		}
+		if aEnteredOutboundTick >= 0 && bEnteredOutboundTick >= 0 {
+			break // both recorded; no need to run further
+		}
+	}
+
+	// B (cross-traffic left) must NOT enter its outbound edge in the same
+	// tick as A. With the fix, B yields until A has moved clear.
+	if aEnteredOutboundTick < 0 {
+		t.Fatal("vehicle A never reached its outbound edge")
+	}
+	if bEnteredOutboundTick < 0 {
+		t.Fatal("vehicle B never reached its outbound edge")
+	}
+	if bEnteredOutboundTick == aEnteredOutboundTick {
+		t.Errorf("cross-traffic left turner B (tick %d) entered outbound edge simultaneously with A (tick %d); mutual-left must not apply to cross-traffic", bEnteredOutboundTick, aEnteredOutboundTick)
+	}
+}

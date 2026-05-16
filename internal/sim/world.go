@@ -447,10 +447,11 @@ func (w *World) allWayStopFIFO(v *Vehicle, x *network.Intersection, myPos int,
 			}
 		}
 
-		// Mutual-left pass: if both are turning left from opposing approaches,
-		// both proceed simultaneously.
-		if vIsLeftTurn && oppIsLeftTurn {
-			continue // don't yield to opposing left-turner
+		// Mutual-left pass: if both are turning left AND j is the
+		// opposing approach (not cross-traffic), both proceed
+		// simultaneously without yielding to each other.
+		if vIsLeftTurn && oppIsLeftTurn && myPos < len(x.Opposing) && int(x.Opposing[myPos]) == j {
+			continue
 		}
 
 		if lead.StoppedSinceSec < v.StoppedSinceSec {
