@@ -422,7 +422,7 @@ func (w *World) yieldGapCheck(v *Vehicle, x *network.Intersection, myPos int,
 			if ovV < 0.5 {
 				ovV = 0.5
 			}
-			if d/ovV < gapThresholdSec {
+			if d/ovV < effectiveGap(v, gapThresholdSec) {
 				return myDist, true
 			}
 		}
@@ -559,7 +559,7 @@ func (w *World) leftTurnYieldsToOpposing(v *Vehicle, byEdge map[network.EdgeID][
 		if ovV < 0.5 {
 			ovV = 0.5
 		}
-		if d/ovV < leftTurnGapSec {
+		if d/ovV < effectiveGap(v, leftTurnGapSec) {
 			return myDist, true
 		}
 	}
