@@ -725,3 +725,79 @@ func TestNetbuild_InteriorNodeOverridesIntersectionNode(t *testing.T) {
 		t.Errorf("expected >=1 Yield from intersection-node tag, got %d", yieldCount)
 	}
 }
+
+// TestNetbuild_InteriorNodeDoesNotDowngradeAllWayStop: stop=all on the
+// intersection node promotes every approach to ControlAllWayStop. An
+// interior highway=give_way on one approach must NOT downgrade it —
+// the AllWayStop skip-guard protects the strictest control from
+// being weakened.
+func TestNetbuild_InteriorNodeDoesNotDowngradeAllWayStop(t *testing.T) {
+	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
+		1: mkNode(1, 40.0000, -74.0010),
+		2: mkNode(2, 40.0010, -74.0005),
+		3: mkNode(3, 40.0000, -74.0000),
+		4: mkNode(4, 39.9990, -74.0005),
+		5: mkNode(5, 40.0000, -74.0005, "stop", "all"),
+		6: mkNode(6, 40.0000, -74.0008, "highway", "give_way"),
+	}}
+	feat.Ways = []*osm.Way{
+		mkWay(10, "primary", false, 1, 6, 5, 3),
+		mkWay(20, "service", false, 2, 5, 4),
+	}
+
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	x := net.Intersections[0]
+
+	for i, c := range x.IncomingControl {
+		if c != network.ControlAllWayStop {
+			t.Errorf("approach %d should be AllWayStop (stop=all), got %v", i, c)
+		}
+	}
+}
+
+// TestNetbuild_InteriorNodeClosestToXWins: an approach has TWO sign-
+// tagged interior nodes. The one geographically closer to X (the
+// intersection) wins — the walk starts at xIdx and steps toward fromIdx,
+// returning the first match.
+func TestNetbuild_InteriorNodeClosestToXWins(t *testing.T) {
+	// Way: 1 (start) -> 7 (far interior, highway=stop) -> 6 (near
+	// interior, highway=give_way) -> 5 (intersection) -> 3.
+	// The W approach should get ControlYield (node 6 is closer to 5).
+	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
+		1: mkNode(1, 40.0000, -74.0020),
+		2: mkNode(2, 40.0010, -74.0005),
+		3: mkNode(3, 40.0000, -74.0000),
+		4: mkNode(4, 39.9990, -74.0005),
+		5: mkNode(5, 40.0000, -74.0005),
+		6: mkNode(6, 40.0000, -74.0008, "highway", "give_way"), // closer to 5
+		7: mkNode(7, 40.0000, -74.0015, "highway", "stop"),     // farther from 5
+	}}
+	feat.Ways = []*osm.Way{
+		mkWay(10, "primary", false, 1, 7, 6, 5, 3),
+		mkWay(20, "service", false, 2, 5, 4),
+	}
+
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	x := net.Intersections[0]
+
+	var sawPrimaryYield bool
+	for i, eid := range x.Incoming {
+		hw := highwayOfEdge(net, eid, feat)
+		c := x.IncomingControl[i]
+		if hw == "primary" && c == network.ControlYield {
+			sawPrimaryYield = true
+		}
+		if hw == "primary" && c == network.ControlStop {
+			t.Errorf("primary approach should be Yield (closest interior tag wins), got Stop")
+		}
+	}
+	if !sawPrimaryYield {
+		t.Error("primary approach should be ControlYield from closer interior node")
+	}
+}
