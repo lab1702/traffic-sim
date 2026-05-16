@@ -502,3 +502,74 @@ func TestNetbuild_Opposing_Symmetric(t *testing.T) {
 		}
 	}
 }
+
+// TestNetbuild_DirectionBackward: same fixture as DirectionForward but
+// direction=backward. The backward-direction approaches on each way
+// get ControlStop. (Two approaches at a 4-way crossing of two
+// equal-class ways: backward on N-S way and backward on E-W way.)
+func TestNetbuild_DirectionBackward(t *testing.T) {
+	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
+		1: mkNode(1, 39.9990, -74.0005),
+		2: mkNode(2, 40.0010, -74.0005),
+		3: mkNode(3, 40.0000, -74.0010),
+		4: mkNode(4, 40.0000, -74.0000),
+		5: mkNode(5, 40.0000, -74.0005, "highway", "stop", "direction", "backward"),
+	}}
+	feat.Ways = []*osm.Way{
+		mkWay(10, "primary", false, 1, 5, 2),
+		mkWay(20, "primary", false, 3, 5, 4),
+	}
+
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	x := net.Intersections[0]
+
+	stopCount := 0
+	for i := range x.Incoming {
+		if x.IncomingControl[i] == network.ControlStop {
+			stopCount++
+		}
+	}
+	if stopCount != 2 {
+		t.Errorf("direction=backward at multi-way intersection should mark 2 approaches as Stop, got %d", stopCount)
+		for i := range x.Incoming {
+			t.Logf("  Incoming[%d] edge=%d control=%v", i, x.Incoming[i], x.IncomingControl[i])
+		}
+	}
+}
+
+// TestNetbuild_DirectionMissingStillLenient: when direction= tag is
+// absent, the Phase 1 lenient behavior is preserved — sign applies to
+// every approach (subject to the AllWayStop skip guard for
+// non-directional signs).
+func TestNetbuild_DirectionMissingStillLenient(t *testing.T) {
+	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
+		1: mkNode(1, 39.9990, -74.0005),
+		2: mkNode(2, 40.0010, -74.0005),
+		3: mkNode(3, 40.0000, -74.0010),
+		4: mkNode(4, 40.0000, -74.0000),
+		5: mkNode(5, 40.0000, -74.0005, "highway", "stop"), // no direction
+	}}
+	feat.Ways = []*osm.Way{
+		mkWay(10, "primary", false, 1, 5, 2),
+		mkWay(20, "primary", false, 3, 5, 4),
+	}
+
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	x := net.Intersections[0]
+
+	// Without direction tag, the non-directional applyNodeLevelSign
+	// branch fires. With equal-class primaries, class-fallback first
+	// sets all 4 approaches to AllWayStop. The non-directional branch
+	// skips AllWayStop approaches, so they stay AllWayStop.
+	for i, c := range x.IncomingControl {
+		if c != network.ControlAllWayStop {
+			t.Errorf("approach %d should be AllWayStop (non-directional sign skips AllWayStop), got %v", i, c)
+		}
+	}
+}
