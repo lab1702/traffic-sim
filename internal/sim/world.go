@@ -217,6 +217,27 @@ const gapThresholdSec = 3.0
 const leftTurnGapSec = 6.0
 
 const (
+	// Per-driver gap preference — Normal(1.0, gapFactorStdDev) clamped
+	// to [gapFactorMin, gapFactorMax]. Same Normal-then-clamp shape as
+	// SpeedFactor but wider, since gap tolerance varies more across
+	// drivers than cruising-speed preference.
+	gapFactorStdDev = 0.1
+	gapFactorMin    = 0.8
+	gapFactorMax    = 1.2
+
+	// impatienceDecayRate is the seconds of accepted-gap reduction per
+	// second of wait time. At 0.1, a 30-second wait reduces the
+	// accepted gap by 3 seconds. Reduction floors at minAcceptedGap.
+	impatienceDecayRate = 0.1
+
+	// minAcceptedGap is the lower bound on the accepted gap regardless
+	// of wait time. Prevents impatience from producing physically
+	// unsafe gaps. 1.5s is on the aggressive end of normal human gap
+	// acceptance.
+	minAcceptedGap = 1.5
+)
+
+const (
 	// stuckSpeedThresh is the speed (m/s) below which a vehicle is
 	// considered "not moving". Used for two purposes:
 	//   1. Stuck-despawn guard: a vehicle below this threshold with no
