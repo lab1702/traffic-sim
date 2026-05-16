@@ -190,7 +190,7 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 		o, ok := osmToNetReverse[nid]
 		return o, ok
 	}
-	resolveControls(intersections, feat, osmWayOfEdge, osmNodeOf)
+	resolveControls(intersections, feat, osmWayOfEdge, osmNodeOf, edges)
 
 	// Resolve opposing approaches for left-turn yield logic. Needs
 	// edge geometry; build a partial *Network containing just edges.

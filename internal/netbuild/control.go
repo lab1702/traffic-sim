@@ -27,6 +27,7 @@ func resolveControls(
 	feat *osmload.Features,
 	osmWayOfEdge []osm.WayID,
 	osmNodeOf func(network.NodeID) (osm.NodeID, bool),
+	edges []network.Edge,
 ) {
 	wayByID := make(map[osm.WayID]*osm.Way, len(feat.Ways))
 	for _, w := range feat.Ways {
@@ -48,10 +49,19 @@ func resolveControls(
 		return 100
 	}
 
+	edgeFromOSM := func(eid network.EdgeID) (osm.NodeID, bool) {
+		if int(eid) >= len(edges) {
+			return 0, false
+		}
+		return osmNodeOf(edges[eid].From)
+	}
+
 	for i := range xs {
 		x := &xs[i]
 		var nodeTags osm.Tags
+		var xOSMID osm.NodeID
 		if osmID, ok := osmNodeOf(x.NodeID); ok {
+			xOSMID = osmID
 			if n, ok2 := feat.Nodes[osmID]; ok2 && n != nil {
 				nodeTags = n.Tags
 			}
@@ -62,7 +72,8 @@ func resolveControls(
 		// Task 13 adds node-level highway=stop / give_way).
 		applyClassFallback(x, classOfEdge)
 		applyStopAllOrMinor(x, nodeTags, classOfEdge)
-		applyNodeLevelSign(x, nodeTags)
+		applyNodeLevelSign(x, nodeTags, wayByID, osmWayOfEdge, edgeFromOSM, xOSMID)
+		applyInteriorNodeSign(x, wayByID, osmWayOfEdge, edgeFromOSM, xOSMID, feat.Nodes)
 	}
 }
 
@@ -103,35 +114,191 @@ func applyClassFallback(x *network.Intersection, classOfEdge func(network.EdgeID
 }
 
 // applyNodeLevelSign handles highway=stop and highway=give_way tags on
-// the intersection node itself. Without direction=, applies to all
-// approaches. Direction= refinement is deferred to a later phase; we
-// take the lenient interpretation (apply to all).
+// the intersection node. A direction= tag refines which approaches it
+// applies to:
+//   - direction=forward: only approaches whose direction-on-way is forward.
+//   - direction=backward: only approaches whose direction-on-way is backward.
+//   - no direction tag: all approaches (Phase 1 lenient behavior).
 //
-// Skips approaches that have already been promoted to AllWayStop by an
-// earlier rule (stop=all or equal-class fallback) — AllWayStop is
-// strictly stricter than Stop or Yield, so we never weaken it.
-func applyNodeLevelSign(x *network.Intersection, tags osm.Tags) {
+// Skips approaches already promoted to ControlAllWayStop when no
+// direction tag is present. When direction= is set, the explicit sign
+// takes precedence over the class-based AllWayStop for the matched
+// approach.
+func applyNodeLevelSign(
+	x *network.Intersection,
+	tags osm.Tags,
+	wayByID map[osm.WayID]*osm.Way,
+	osmWayOfEdge []osm.WayID,
+	edgeFromOSM func(network.EdgeID) (osm.NodeID, bool),
+	xOSMID osm.NodeID,
+) {
 	var target network.Control
 	hasSign := false
+	direction := ""
 	for _, t := range tags {
 		if t.Key == "highway" && t.Value == "stop" {
-			target = network.ControlStop
-			hasSign = true
+			target, hasSign = network.ControlStop, true
 		}
 		if t.Key == "highway" && t.Value == "give_way" {
-			target = network.ControlYield
-			hasSign = true
+			target, hasSign = network.ControlYield, true
+		}
+		if t.Key == "direction" && (t.Value == "forward" || t.Value == "backward") {
+			direction = t.Value
 		}
 	}
 	if !hasSign {
 		return
 	}
-	for j := range x.IncomingControl {
+	if direction == "" {
+		for j := range x.IncomingControl {
+			if x.IncomingControl[j] == network.ControlAllWayStop {
+				continue
+			}
+			x.IncomingControl[j] = target
+		}
+		return
+	}
+
+	for j, eid := range x.Incoming {
+		approachDir := approachDirectionOnWay(eid, xOSMID, wayByID, osmWayOfEdge, edgeFromOSM)
+		if approachDir == direction {
+			x.IncomingControl[j] = target
+		}
+	}
+}
+
+// approachDirectionOnWay returns "forward" or "backward" for approach
+// edge eid arriving at intersection node xOSMID, based on whether the
+// edge's From node appears before or after xOSMID in the underlying
+// OSM way's node sequence. Returns empty string if the direction
+// cannot be determined.
+func approachDirectionOnWay(
+	eid network.EdgeID,
+	xOSMID osm.NodeID,
+	wayByID map[osm.WayID]*osm.Way,
+	osmWayOfEdge []osm.WayID,
+	edgeFromOSM func(network.EdgeID) (osm.NodeID, bool),
+) string {
+	if int(eid) >= len(osmWayOfEdge) {
+		return ""
+	}
+	way, ok := wayByID[osmWayOfEdge[eid]]
+	if !ok || way == nil {
+		return ""
+	}
+	fromOSM, ok := edgeFromOSM(eid)
+	if !ok {
+		return ""
+	}
+	xIdx, fromIdx := -1, -1
+	for i, n := range way.Nodes {
+		if n.ID == xOSMID && xIdx < 0 {
+			xIdx = i
+		}
+		if n.ID == fromOSM && fromIdx < 0 {
+			fromIdx = i
+		}
+	}
+	if xIdx < 0 || fromIdx < 0 {
+		return ""
+	}
+	if fromIdx < xIdx {
+		return "forward"
+	}
+	if fromIdx > xIdx {
+		return "backward"
+	}
+	return ""
+}
+
+// applyInteriorNodeSign overrides per-approach Control based on
+// highway=stop or highway=give_way tags on interior shaping nodes —
+// nodes between the approach edge's From intersection and the
+// intersection X along the underlying OSM way. Mappers conventionally
+// place sign tags at the physical stop-line position rather than at
+// the intersection node, so honoring those tags gives per-approach
+// precision.
+//
+// Runs last in the resolution chain so interior tags win over
+// intersection-node tags when both apply to the same approach. Skips
+// approaches already promoted to ControlAllWayStop.
+func applyInteriorNodeSign(
+	x *network.Intersection,
+	wayByID map[osm.WayID]*osm.Way,
+	osmWayOfEdge []osm.WayID,
+	edgeFromOSM func(network.EdgeID) (osm.NodeID, bool),
+	xOSMID osm.NodeID,
+	nodeByID map[osm.NodeID]*osm.Node,
+) {
+	for j, eid := range x.Incoming {
 		if x.IncomingControl[j] == network.ControlAllWayStop {
 			continue
 		}
-		x.IncomingControl[j] = target
+		sign := interiorSignFor(eid, xOSMID, wayByID, osmWayOfEdge, edgeFromOSM, nodeByID)
+		if sign != network.ControlNone {
+			x.IncomingControl[j] = sign
+		}
 	}
+}
+
+// interiorSignFor walks the underlying OSM way's node sequence between
+// (exclusive) the approach edge's From node and the intersection node
+// xOSMID, looking for the closest sign-tagged interior shaping node.
+// Returns ControlStop for highway=stop, ControlYield for highway=give_way,
+// or ControlNone if no sign-tagged interior node exists. The walk
+// starts at xOSMID and steps toward fromOSM so the FIRST tag encountered
+// is the one closest to X (the stop-line position).
+func interiorSignFor(
+	eid network.EdgeID,
+	xOSMID osm.NodeID,
+	wayByID map[osm.WayID]*osm.Way,
+	osmWayOfEdge []osm.WayID,
+	edgeFromOSM func(network.EdgeID) (osm.NodeID, bool),
+	nodeByID map[osm.NodeID]*osm.Node,
+) network.Control {
+	if int(eid) >= len(osmWayOfEdge) {
+		return network.ControlNone
+	}
+	way, ok := wayByID[osmWayOfEdge[eid]]
+	if !ok || way == nil {
+		return network.ControlNone
+	}
+	fromOSM, ok := edgeFromOSM(eid)
+	if !ok {
+		return network.ControlNone
+	}
+	xIdx, fromIdx := -1, -1
+	for i, n := range way.Nodes {
+		if n.ID == xOSMID && xIdx < 0 {
+			xIdx = i
+		}
+		if n.ID == fromOSM && fromIdx < 0 {
+			fromIdx = i
+		}
+	}
+	if xIdx < 0 || fromIdx < 0 || xIdx == fromIdx {
+		return network.ControlNone
+	}
+	step := -1
+	if fromIdx > xIdx {
+		step = 1
+	}
+	for i := xIdx + step; i != fromIdx; i += step {
+		n := way.Nodes[i]
+		node, ok := nodeByID[n.ID]
+		if !ok || node == nil {
+			continue
+		}
+		for _, t := range node.Tags {
+			if t.Key == "highway" && t.Value == "stop" {
+				return network.ControlStop
+			}
+			if t.Key == "highway" && t.Value == "give_way" {
+				return network.ControlYield
+			}
+		}
+	}
+	return network.ControlNone
 }
 
 // applyStopAllOrMinor overrides class-fallback with explicit OSM tags

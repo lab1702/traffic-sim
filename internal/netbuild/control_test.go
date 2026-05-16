@@ -87,6 +87,10 @@ func TestNetbuild_Fallback_EqualClass(t *testing.T) {
 // highwayOfEdge returns the highway= tag of the OSM way an edge was derived from.
 // Built via a node-position reverse map to avoid relying on NodeID ↔ osm.NodeID
 // arithmetic.
+//
+// Handles both simple edges (From and To are adjacent in the way) and edges
+// with interior shaping nodes (From and To appear in the same way but may not
+// be directly adjacent).
 func highwayOfEdge(net *network.Network, eid network.EdgeID, feat *osmload.Features) string {
 	e := net.Edges[eid]
 	netToOSM := buildNetToOSM(net, feat)
@@ -96,6 +100,7 @@ func highwayOfEdge(net *network.Network, eid network.EdgeID, feat *osmload.Featu
 		return ""
 	}
 	for _, w := range feat.Ways {
+		// First try adjacent pairs (common case — no interior shaping nodes).
 		for i := 0; i+1 < len(w.Nodes); i++ {
 			a, b := w.Nodes[i].ID, w.Nodes[i+1].ID
 			if (a == fromOSM && b == toOSM) || (a == toOSM && b == fromOSM) {
@@ -103,6 +108,24 @@ func highwayOfEdge(net *network.Network, eid network.EdgeID, feat *osmload.Featu
 					if t.Key == "highway" {
 						return t.Value
 					}
+				}
+			}
+		}
+		// Fall back: both endpoints appear somewhere in the way (edge has
+		// interior shaping nodes, so From and To are not adjacent).
+		hasFrom, hasTo := false, false
+		for _, n := range w.Nodes {
+			if n.ID == fromOSM {
+				hasFrom = true
+			}
+			if n.ID == toOSM {
+				hasTo = true
+			}
+		}
+		if hasFrom && hasTo {
+			for _, t := range w.Tags {
+				if t.Key == "highway" {
+					return t.Value
 				}
 			}
 		}
@@ -418,6 +441,64 @@ func TestNetbuild_Opposing_TThrough(t *testing.T) {
 	}
 }
 
+// TestNetbuild_DirectionForward: a 4-way crossing of two equal-class
+// primaries carries `highway=stop direction=forward` on the intersection
+// node. Two behaviors compose here:
+//
+//   1. Spec's "over-apply at multi-way intersections": a directional
+//      tag applies to ALL approaches whose direction-on-their-way is
+//      forward, across every way passing through the node. That's two
+//      forward approaches (one per way).
+//
+//   2. Directional-tag override of class-inferred AllWayStop: equal
+//      classes produce AllWayStop via class fallback. The directional
+//      branch of applyNodeLevelSign deliberately does NOT skip
+//      AllWayStop (unlike the non-directional branch), because an
+//      explicit mapper-set direction tag conveys more specific intent
+//      than class inference. So both forward approaches transition
+//      from AllWayStop to Stop.
+//
+// Expected result: stopCount == 2.
+func TestNetbuild_DirectionForward(t *testing.T) {
+	// Layout (planar approximation):
+	//   N is at lat 40.0010, S at 39.9990 → "lower index first" way
+	//   means we list S, X, N as the node sequence; vehicle going from
+	//   S to X (heading N) is moving "forward" along the way.
+	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
+		1: mkNode(1, 39.9990, -74.0005), // S origin (N-S way, forward)
+		2: mkNode(2, 40.0010, -74.0005), // N origin (N-S way, backward)
+		3: mkNode(3, 40.0000, -74.0010), // W origin (E-W way)
+		4: mkNode(4, 40.0000, -74.0000), // E origin
+		5: mkNode(5, 40.0000, -74.0005, "highway", "stop", "direction", "forward"),
+	}}
+	feat.Ways = []*osm.Way{
+		mkWay(10, "primary", false, 1, 5, 2), // N-S way: forward = S→N
+		mkWay(20, "primary", false, 3, 5, 4), // E-W way: forward = W→E
+	}
+
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(net.Intersections) != 1 {
+		t.Fatalf("want 1 intersection, got %d", len(net.Intersections))
+	}
+	x := net.Intersections[0]
+
+	stopCount := 0
+	for i := range x.Incoming {
+		if x.IncomingControl[i] == network.ControlStop {
+			stopCount++
+		}
+	}
+	if stopCount != 2 {
+		t.Errorf("direction=forward at multi-way intersection should mark BOTH forward-direction approaches as Stop, got %d", stopCount)
+		for i := range x.Incoming {
+			t.Logf("  Incoming[%d] edge=%d control=%v", i, x.Incoming[i], x.IncomingControl[i])
+		}
+	}
+}
+
 // TestNetbuild_Opposing_Symmetric: across a mixed-geometry network,
 // Opposing[Opposing[i]] == i whenever Opposing[i] != -1.
 func TestNetbuild_Opposing_Symmetric(t *testing.T) {
@@ -453,5 +534,281 @@ func TestNetbuild_Opposing_Symmetric(t *testing.T) {
 				t.Errorf("intersection %d: Opposing[%d]=%d but Opposing[%d]=%d (not symmetric)", xi, i, j, j, back)
 			}
 		}
+	}
+}
+
+// TestNetbuild_DirectionBackward: same fixture and same composed
+// behaviors as TestNetbuild_DirectionForward, but with `direction=backward`.
+// The two backward-direction approaches (one per way) transition from
+// AllWayStop (from class fallback) to Stop (from the directional tag).
+func TestNetbuild_DirectionBackward(t *testing.T) {
+	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
+		1: mkNode(1, 39.9990, -74.0005),
+		2: mkNode(2, 40.0010, -74.0005),
+		3: mkNode(3, 40.0000, -74.0010),
+		4: mkNode(4, 40.0000, -74.0000),
+		5: mkNode(5, 40.0000, -74.0005, "highway", "stop", "direction", "backward"),
+	}}
+	feat.Ways = []*osm.Way{
+		mkWay(10, "primary", false, 1, 5, 2),
+		mkWay(20, "primary", false, 3, 5, 4),
+	}
+
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	x := net.Intersections[0]
+
+	stopCount := 0
+	for i := range x.Incoming {
+		if x.IncomingControl[i] == network.ControlStop {
+			stopCount++
+		}
+	}
+	if stopCount != 2 {
+		t.Errorf("direction=backward at multi-way intersection should mark 2 approaches as Stop, got %d", stopCount)
+		for i := range x.Incoming {
+			t.Logf("  Incoming[%d] edge=%d control=%v", i, x.Incoming[i], x.IncomingControl[i])
+		}
+	}
+}
+
+// TestNetbuild_InteriorNodeStop: a primary way has an interior shaping
+// node tagged `highway=stop`. The approach edge whose geometry contains
+// that node should get ControlStop, overriding the class-fallback
+// ControlNone that a primary approach would otherwise have.
+func TestNetbuild_InteriorNodeStop(t *testing.T) {
+	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
+		1: mkNode(1, 40.0000, -74.0010), // W primary endpoint
+		2: mkNode(2, 40.0010, -74.0005), // N service endpoint
+		3: mkNode(3, 40.0000, -74.0000), // E primary endpoint
+		4: mkNode(4, 39.9990, -74.0005), // S service endpoint
+		5: mkNode(5, 40.0000, -74.0005), // intersection
+		6: mkNode(6, 40.0000, -74.0008, "highway", "stop"), // interior on W approach
+	}}
+	feat.Ways = []*osm.Way{
+		mkWay(10, "primary", false, 1, 6, 5, 3),
+		mkWay(20, "service", false, 2, 5, 4),
+	}
+
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(net.Intersections) != 1 {
+		t.Fatalf("want 1 intersection, got %d", len(net.Intersections))
+	}
+	x := net.Intersections[0]
+
+	// W primary approach (with interior stop) -> Stop.
+	// E primary approach (no interior) -> None (class fallback).
+	// Service approaches (lower class) -> Stop (class fallback).
+	var sawPrimaryStop, sawPrimaryNone bool
+	for i, eid := range x.Incoming {
+		hw := highwayOfEdge(net, eid, feat)
+		c := x.IncomingControl[i]
+		if hw == "primary" && c == network.ControlStop {
+			sawPrimaryStop = true
+		}
+		if hw == "primary" && c == network.ControlNone {
+			sawPrimaryNone = true
+		}
+	}
+	if !sawPrimaryStop {
+		t.Error("primary approach with interior stop-tagged node should be ControlStop")
+	}
+	if !sawPrimaryNone {
+		t.Error("the other primary approach (no interior tag) should remain ControlNone")
+	}
+}
+
+// TestNetbuild_DirectionMissingStillLenient: when direction= tag is
+// absent, the Phase 1 lenient behavior is preserved — sign applies to
+// every approach (subject to the AllWayStop skip guard for
+// non-directional signs).
+func TestNetbuild_DirectionMissingStillLenient(t *testing.T) {
+	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
+		1: mkNode(1, 39.9990, -74.0005),
+		2: mkNode(2, 40.0010, -74.0005),
+		3: mkNode(3, 40.0000, -74.0010),
+		4: mkNode(4, 40.0000, -74.0000),
+		5: mkNode(5, 40.0000, -74.0005, "highway", "stop"), // no direction
+	}}
+	feat.Ways = []*osm.Way{
+		mkWay(10, "primary", false, 1, 5, 2),
+		mkWay(20, "primary", false, 3, 5, 4),
+	}
+
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	x := net.Intersections[0]
+
+	// Without direction tag, the non-directional applyNodeLevelSign
+	// branch fires. With equal-class primaries, class-fallback first
+	// sets all 4 approaches to AllWayStop. The non-directional branch
+	// skips AllWayStop approaches, so they stay AllWayStop.
+	for i, c := range x.IncomingControl {
+		if c != network.ControlAllWayStop {
+			t.Errorf("approach %d should be AllWayStop (non-directional sign skips AllWayStop), got %v", i, c)
+		}
+	}
+}
+
+// TestNetbuild_InteriorNodeGiveWay: same shape as InteriorNodeStop but
+// the interior tag is highway=give_way → ControlYield.
+func TestNetbuild_InteriorNodeGiveWay(t *testing.T) {
+	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
+		1: mkNode(1, 40.0000, -74.0010),
+		2: mkNode(2, 40.0010, -74.0005),
+		3: mkNode(3, 40.0000, -74.0000),
+		4: mkNode(4, 39.9990, -74.0005),
+		5: mkNode(5, 40.0000, -74.0005),
+		6: mkNode(6, 40.0000, -74.0008, "highway", "give_way"),
+	}}
+	feat.Ways = []*osm.Way{
+		mkWay(10, "primary", false, 1, 6, 5, 3),
+		mkWay(20, "service", false, 2, 5, 4),
+	}
+
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	x := net.Intersections[0]
+
+	var sawPrimaryYield bool
+	for i, eid := range x.Incoming {
+		hw := highwayOfEdge(net, eid, feat)
+		c := x.IncomingControl[i]
+		if hw == "primary" && c == network.ControlYield {
+			sawPrimaryYield = true
+		}
+	}
+	if !sawPrimaryYield {
+		t.Error("primary approach with interior give_way-tagged node should be ControlYield")
+	}
+}
+
+// TestNetbuild_InteriorNodeOverridesIntersectionNode: intersection node
+// has highway=give_way (which would set Yield on all approaches via
+// Section 1) AND one approach has an interior highway=stop. The
+// approach with the interior sign gets Stop (interior wins); other
+// approaches get Yield.
+func TestNetbuild_InteriorNodeOverridesIntersectionNode(t *testing.T) {
+	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
+		1: mkNode(1, 40.0000, -74.0010),
+		2: mkNode(2, 40.0010, -74.0005),
+		3: mkNode(3, 40.0000, -74.0000),
+		4: mkNode(4, 39.9990, -74.0005),
+		5: mkNode(5, 40.0000, -74.0005, "highway", "give_way"),  // intersection give_way
+		6: mkNode(6, 40.0000, -74.0008, "highway", "stop"),      // interior on W approach
+	}}
+	feat.Ways = []*osm.Way{
+		mkWay(10, "primary", false, 1, 6, 5, 3),
+		mkWay(20, "service", false, 2, 5, 4),
+	}
+
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	x := net.Intersections[0]
+
+	// W approach (primary, interior stop) -> Stop (interior wins).
+	// E approach (primary, no interior) -> Yield (from intersection-node tag).
+	// Service approaches -> Yield (from intersection-node tag).
+	stopCount, yieldCount := 0, 0
+	for i := range x.Incoming {
+		switch x.IncomingControl[i] {
+		case network.ControlStop:
+			stopCount++
+		case network.ControlYield:
+			yieldCount++
+		}
+	}
+	if stopCount != 1 {
+		t.Errorf("expected exactly 1 Stop (interior wins on W primary), got %d", stopCount)
+	}
+	if yieldCount < 1 {
+		t.Errorf("expected >=1 Yield from intersection-node tag, got %d", yieldCount)
+	}
+}
+
+// TestNetbuild_InteriorNodeDoesNotDowngradeAllWayStop: stop=all on the
+// intersection node promotes every approach to ControlAllWayStop. An
+// interior highway=give_way on one approach must NOT downgrade it —
+// the AllWayStop skip-guard protects the strictest control from
+// being weakened.
+func TestNetbuild_InteriorNodeDoesNotDowngradeAllWayStop(t *testing.T) {
+	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
+		1: mkNode(1, 40.0000, -74.0010),
+		2: mkNode(2, 40.0010, -74.0005),
+		3: mkNode(3, 40.0000, -74.0000),
+		4: mkNode(4, 39.9990, -74.0005),
+		5: mkNode(5, 40.0000, -74.0005, "stop", "all"),
+		6: mkNode(6, 40.0000, -74.0008, "highway", "give_way"),
+	}}
+	feat.Ways = []*osm.Way{
+		mkWay(10, "primary", false, 1, 6, 5, 3),
+		mkWay(20, "service", false, 2, 5, 4),
+	}
+
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	x := net.Intersections[0]
+
+	for i, c := range x.IncomingControl {
+		if c != network.ControlAllWayStop {
+			t.Errorf("approach %d should be AllWayStop (stop=all), got %v", i, c)
+		}
+	}
+}
+
+// TestNetbuild_InteriorNodeClosestToXWins: an approach has TWO sign-
+// tagged interior nodes. The one geographically closer to X (the
+// intersection) wins — the walk starts at xIdx and steps toward fromIdx,
+// returning the first match.
+func TestNetbuild_InteriorNodeClosestToXWins(t *testing.T) {
+	// Way: 1 (start) -> 7 (far interior, highway=stop) -> 6 (near
+	// interior, highway=give_way) -> 5 (intersection) -> 3.
+	// The W approach should get ControlYield (node 6 is closer to 5).
+	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
+		1: mkNode(1, 40.0000, -74.0020),
+		2: mkNode(2, 40.0010, -74.0005),
+		3: mkNode(3, 40.0000, -74.0000),
+		4: mkNode(4, 39.9990, -74.0005),
+		5: mkNode(5, 40.0000, -74.0005),
+		6: mkNode(6, 40.0000, -74.0008, "highway", "give_way"), // closer to 5
+		7: mkNode(7, 40.0000, -74.0015, "highway", "stop"),     // farther from 5
+	}}
+	feat.Ways = []*osm.Way{
+		mkWay(10, "primary", false, 1, 7, 6, 5, 3),
+		mkWay(20, "service", false, 2, 5, 4),
+	}
+
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	x := net.Intersections[0]
+
+	var sawPrimaryYield bool
+	for i, eid := range x.Incoming {
+		hw := highwayOfEdge(net, eid, feat)
+		c := x.IncomingControl[i]
+		if hw == "primary" && c == network.ControlYield {
+			sawPrimaryYield = true
+		}
+		if hw == "primary" && c == network.ControlStop {
+			t.Errorf("primary approach should be Yield (closest interior tag wins), got Stop")
+		}
+	}
+	if !sawPrimaryYield {
+		t.Error("primary approach should be ControlYield from closer interior node")
 	}
 }
