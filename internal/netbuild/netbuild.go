@@ -179,6 +179,19 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 	// arterial purely because of edge-ordering accident.
 	sortIncomingByPriority(intersections, osmWayOfEdge, feat)
 
+	// Resolve per-approach right-of-way controls. Runs after the priority
+	// sort so each IncomingControl[i] aligns with the final sorted
+	// position of Incoming[i].
+	osmToNetReverse := make(map[network.NodeID]osm.NodeID, len(osmToNet))
+	for k, v := range osmToNet {
+		osmToNetReverse[v] = k
+	}
+	osmNodeOf := func(nid network.NodeID) (osm.NodeID, bool) {
+		o, ok := osmToNetReverse[nid]
+		return o, ok
+	}
+	resolveControls(intersections, feat, osmWayOfEdge, osmNodeOf)
+
 	// 6b. Resolve OSM turn restriction relations to BannedTurns on the
 	// intersections (writes through pointers into the slice).
 	report.RestrictionsApplied, report.RestrictionsSkipped =
