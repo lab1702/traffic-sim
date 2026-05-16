@@ -55,7 +55,6 @@ func resolveControls(
 		}
 		return osmNodeOf(edges[eid].From)
 	}
-	_ = edgeFromOSM // used in Tasks 2/4
 
 	for i := range xs {
 		x := &xs[i]
@@ -67,14 +66,13 @@ func resolveControls(
 				nodeTags = n.Tags
 			}
 		}
-		_ = xOSMID // used in Tasks 2/4
 
 		// Start from the class-based fallback, then layer explicit OSM
 		// signage on top (Task 12 covers fallback + stop=all/stop=minor;
 		// Task 13 adds node-level highway=stop / give_way).
 		applyClassFallback(x, classOfEdge)
 		applyStopAllOrMinor(x, nodeTags, classOfEdge)
-		applyNodeLevelSign(x, nodeTags)
+		applyNodeLevelSign(x, nodeTags, wayByID, osmWayOfEdge, edgeFromOSM, xOSMID)
 	}
 }
 
@@ -115,35 +113,143 @@ func applyClassFallback(x *network.Intersection, classOfEdge func(network.EdgeID
 }
 
 // applyNodeLevelSign handles highway=stop and highway=give_way tags on
-// the intersection node itself. Without direction=, applies to all
-// approaches. Direction= refinement is deferred to a later phase; we
-// take the lenient interpretation (apply to all).
+// the intersection node. A direction= tag refines which approaches it
+// applies to:
+//   - direction=forward: only approaches whose direction-on-way is forward.
+//   - direction=backward: only approaches whose direction-on-way is backward.
+//   - no direction tag: all approaches (Phase 1 lenient behavior).
 //
-// Skips approaches that have already been promoted to AllWayStop by an
-// earlier rule (stop=all or equal-class fallback) — AllWayStop is
-// strictly stricter than Stop or Yield, so we never weaken it.
-func applyNodeLevelSign(x *network.Intersection, tags osm.Tags) {
+// Skips approaches already promoted to ControlAllWayStop when no
+// direction tag is present. When direction= is set, the explicit sign
+// takes precedence over the class-based AllWayStop for the matched
+// approach.
+func applyNodeLevelSign(
+	x *network.Intersection,
+	tags osm.Tags,
+	wayByID map[osm.WayID]*osm.Way,
+	osmWayOfEdge []osm.WayID,
+	edgeFromOSM func(network.EdgeID) (osm.NodeID, bool),
+	xOSMID osm.NodeID,
+) {
 	var target network.Control
 	hasSign := false
+	direction := ""
 	for _, t := range tags {
 		if t.Key == "highway" && t.Value == "stop" {
-			target = network.ControlStop
-			hasSign = true
+			target, hasSign = network.ControlStop, true
 		}
 		if t.Key == "highway" && t.Value == "give_way" {
-			target = network.ControlYield
-			hasSign = true
+			target, hasSign = network.ControlYield, true
+		}
+		if t.Key == "direction" && (t.Value == "forward" || t.Value == "backward") {
+			direction = t.Value
 		}
 	}
 	if !hasSign {
 		return
 	}
-	for j := range x.IncomingControl {
-		if x.IncomingControl[j] == network.ControlAllWayStop {
+	if direction == "" {
+		for j := range x.IncomingControl {
+			if x.IncomingControl[j] == network.ControlAllWayStop {
+				continue
+			}
+			x.IncomingControl[j] = target
+		}
+		return
+	}
+
+	// direction= is set: find the canonical way for this sign (lowest WayID
+	// that contains xOSMID and has at least one matching approach). Apply
+	// the sign only to approaches on that one way.
+	canonicalWayID := canonicalSignWay(x.Incoming, xOSMID, direction, wayByID, osmWayOfEdge, edgeFromOSM)
+	if canonicalWayID == 0 {
+		return
+	}
+	for j, eid := range x.Incoming {
+		if int(eid) >= len(osmWayOfEdge) || osmWayOfEdge[eid] != canonicalWayID {
 			continue
 		}
-		x.IncomingControl[j] = target
+		approachDir := approachDirectionOnWay(eid, xOSMID, wayByID, osmWayOfEdge, edgeFromOSM)
+		if approachDir == direction {
+			x.IncomingControl[j] = target
+		}
 	}
+}
+
+// approachDirectionOnWay returns "forward" or "backward" for approach
+// edge eid arriving at intersection node xOSMID, based on whether the
+// edge's From node appears before or after xOSMID in the underlying
+// OSM way's node sequence. Returns empty string if the direction
+// cannot be determined.
+func approachDirectionOnWay(
+	eid network.EdgeID,
+	xOSMID osm.NodeID,
+	wayByID map[osm.WayID]*osm.Way,
+	osmWayOfEdge []osm.WayID,
+	edgeFromOSM func(network.EdgeID) (osm.NodeID, bool),
+) string {
+	if int(eid) >= len(osmWayOfEdge) {
+		return ""
+	}
+	way, ok := wayByID[osmWayOfEdge[eid]]
+	if !ok || way == nil {
+		return ""
+	}
+	fromOSM, ok := edgeFromOSM(eid)
+	if !ok {
+		return ""
+	}
+	xIdx, fromIdx := -1, -1
+	for i, n := range way.Nodes {
+		if n.ID == xOSMID && xIdx < 0 {
+			xIdx = i
+		}
+		if n.ID == fromOSM && fromIdx < 0 {
+			fromIdx = i
+		}
+	}
+	if xIdx < 0 || fromIdx < 0 {
+		return ""
+	}
+	if fromIdx < xIdx {
+		return "forward"
+	}
+	if fromIdx > xIdx {
+		return "backward"
+	}
+	return ""
+}
+
+// canonicalSignWay returns the WayID of the way that should be treated as
+// the "owner" of a directional sign at intersection node xOSMID. When the
+// node is shared by several ways and multiple ways have a matching approach
+// in the given direction, we pick the lowest WayID that has at least one
+// matching approach — a deterministic tie-breaking rule that mirrors how
+// OSM editors list ways (and ensures stable behaviour as the map grows).
+// Returns 0 if no way has a matching approach.
+func canonicalSignWay(
+	incoming []network.EdgeID,
+	xOSMID osm.NodeID,
+	direction string,
+	wayByID map[osm.WayID]*osm.Way,
+	osmWayOfEdge []osm.WayID,
+	edgeFromOSM func(network.EdgeID) (osm.NodeID, bool),
+) osm.WayID {
+	var best osm.WayID
+	for _, eid := range incoming {
+		if int(eid) >= len(osmWayOfEdge) {
+			continue
+		}
+		wid := osmWayOfEdge[eid]
+		if best != 0 && wid >= best {
+			continue // already have a better (lower) candidate
+		}
+		d := approachDirectionOnWay(eid, xOSMID, wayByID, osmWayOfEdge, edgeFromOSM)
+		if d == direction {
+			best = wid
+		}
+	}
+	return best
 }
 
 // applyStopAllOrMinor overrides class-fallback with explicit OSM tags

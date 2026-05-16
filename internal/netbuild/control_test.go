@@ -418,6 +418,58 @@ func TestNetbuild_Opposing_TThrough(t *testing.T) {
 	}
 }
 
+// TestNetbuild_DirectionForward: a 4-way crossing where the intersection
+// node carries `highway=stop direction=forward`. Only the approach
+// traversing the way in the forward direction (lower-to-higher index
+// in the way's node sequence) should get ControlStop. The opposing
+// approach on the same way AND the approaches on the crossing way
+// should NOT be stopped (they may have other Controls from class
+// fallback, just not from this tag).
+func TestNetbuild_DirectionForward(t *testing.T) {
+	// Layout (planar approximation):
+	//   N is at lat 40.0010, S at 39.9990 → "lower index first" way
+	//   means we list S, X, N as the node sequence; vehicle going from
+	//   S to X (heading N) is moving "forward" along the way.
+	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
+		1: mkNode(1, 39.9990, -74.0005), // S origin (N-S way, forward)
+		2: mkNode(2, 40.0010, -74.0005), // N origin (N-S way, backward)
+		3: mkNode(3, 40.0000, -74.0010), // W origin (E-W way)
+		4: mkNode(4, 40.0000, -74.0000), // E origin
+		5: mkNode(5, 40.0000, -74.0005, "highway", "stop", "direction", "forward"),
+	}}
+	feat.Ways = []*osm.Way{
+		mkWay(10, "primary", false, 1, 5, 2), // N-S way: forward = S→N
+		mkWay(20, "primary", false, 3, 5, 4), // E-W way: forward = W→E
+	}
+
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(net.Intersections) != 1 {
+		t.Fatalf("want 1 intersection, got %d", len(net.Intersections))
+	}
+	x := net.Intersections[0]
+
+	// Exactly one approach should be ControlStop — the one whose
+	// underlying way edge goes from a node with lower way-index to
+	// the X node. The other three approaches should NOT be Stop from
+	// this tag. (They may be ControlAllWayStop or ControlNone from
+	// equal-class fallback.)
+	stopCount := 0
+	for i := range x.Incoming {
+		if x.IncomingControl[i] == network.ControlStop {
+			stopCount++
+		}
+	}
+	if stopCount != 1 {
+		t.Errorf("direction=forward should mark exactly 1 approach as Stop, got %d", stopCount)
+		for i := range x.Incoming {
+			t.Logf("  Incoming[%d] edge=%d control=%v", i, x.Incoming[i], x.IncomingControl[i])
+		}
+	}
+}
+
 // TestNetbuild_Opposing_Symmetric: across a mixed-geometry network,
 // Opposing[Opposing[i]] == i whenever Opposing[i] != -1.
 func TestNetbuild_Opposing_Symmetric(t *testing.T) {
