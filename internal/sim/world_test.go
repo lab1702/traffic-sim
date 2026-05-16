@@ -2093,3 +2093,81 @@ func TestWorld_Impatience_StraightCrossingShrinksGap(t *testing.T) {
 		t.Errorf("expected crossing in [4, 20] sim-seconds, got %.2f", crossedAt)
 	}
 }
+
+// TestWorld_Impatience_LeftTurnShrinksGap: priority-road left turner
+// with perpetual opposing through at ETA=3.5s. Base 6s × 1.0 = 6s.
+// To drop to 3.5s: 6 - 0.1*t = 3.5 → t = 25s. Vehicle waits ~25s
+// then accepts.
+func TestWorld_Impatience_LeftTurnShrinksGap(t *testing.T) {
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 100}},
+		{ID: 1, Pos: network.Point{X: 0, Y: -100}},
+		{ID: 2, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 3, Pos: network.Point{X: 100, Y: 0}},  // E destination (A's left)
+		{ID: 4, Pos: network.Point{X: 0, Y: 200}},  // N destination (B's through)
+	}
+	mkEdge := func(id, from, to int) network.Edge {
+		return network.Edge{
+			ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: 100, SpeedLimit: 10,
+			Lanes:    []network.Lane{{Index: 0}},
+			Geometry: []network.Point{nodes[from].Pos, nodes[to].Pos},
+		}
+	}
+	edges := []network.Edge{
+		mkEdge(0, 0, 2),
+		mkEdge(1, 1, 2),
+		mkEdge(2, 2, 3), // C->E (A's left turn)
+		mkEdge(3, 2, 4), // C->N (B's through)
+	}
+	xs := []network.Intersection{
+		{
+			ID: 0, NodeID: 2,
+			Incoming:        []network.EdgeID{0, 1},
+			IncomingControl: ctrls(network.ControlNone, network.ControlNone),
+			Opposing:        []int8{1, 0},
+			Outgoing:        []network.EdgeID{2, 3},
+			HasSignal:       false,
+		},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	// A: left turner, near line. B: opposing through, pinned at ETA=3.5s
+	// (d=2m, V=2/3.5 ≈ 0.571 m/s).
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0, 2}, Edge: 0, S: 99, V: 0.5},
+		{ID: 2, Route: []network.EdgeID{1, 3}, Edge: 1, S: 98, V: 0.5714},
+	}
+	w.nextID = 3
+
+	var crossedAt float64 = -1.0
+	for i := 0; i < 1200; i++ {
+		for j := range w.Vehicles {
+			if w.Vehicles[j].ID == 2 && !w.Vehicles[j].Despawned {
+				w.Vehicles[j].S = 98
+				w.Vehicles[j].V = 0.5714
+			}
+		}
+		w.Step()
+		for j := range w.Vehicles {
+			v := &w.Vehicles[j]
+			if v.ID == 1 && !v.Despawned && v.Edge == 2 && crossedAt < 0 {
+				crossedAt = w.SimTime
+			}
+		}
+		if crossedAt > 0 {
+			break
+		}
+	}
+
+	if crossedAt < 0 {
+		t.Fatal("left turner never crossed; impatience never reduced gap below ETA")
+	}
+	// Predicted wait: gap drops from 6 to 3.5 = 2.5s reduction → 25s of
+	// wait. Plus a few seconds of approach. Expect crossing in [20, 40]
+	// sim-seconds.
+	if crossedAt < 20 || crossedAt > 40 {
+		t.Errorf("expected crossing in [20, 40] sim-seconds, got %.2f", crossedAt)
+	}
+}
