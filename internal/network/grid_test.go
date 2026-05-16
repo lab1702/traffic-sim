@@ -41,6 +41,31 @@ func TestSpatialGrid_InsertOutOfBoundsDropped(t *testing.T) {
 	}
 }
 
+// TestSpatialGrid_QueryRadiusIsExact verifies that Query honors the documented
+// `radius` semantics rather than returning every edge in the candidate cells.
+// With cellSize=10 and radius=5, a point at (5,5) lands in cell (0,0) and the
+// query span covers cells (-1..1, -1..1). Edge at (15,15) sits in cell (1,1) and
+// would be returned by a coarse cell-only query, but its true distance is
+// sqrt(200) ≈ 14.14 m, well outside the 5 m radius.
+func TestSpatialGrid_QueryRadiusIsExact(t *testing.T) {
+	g := NewSpatialGrid(BoundingBox{0, 0, 100, 100}, 10)
+	g.Insert(EdgeID(1), Point{5, 5})   // at query point
+	g.Insert(EdgeID(2), Point{15, 15}) // adjacent cell, 14.14 m away
+	g.Insert(EdgeID(3), Point{8, 5})   // 3 m away
+
+	near := g.Query(Point{5, 5}, 5)
+	got := map[EdgeID]bool{}
+	for _, id := range near {
+		got[id] = true
+	}
+	if !got[1] || !got[3] {
+		t.Errorf("want edges 1 and 3 (within 5m), got %v", got)
+	}
+	if got[2] {
+		t.Errorf("edge 2 is 14.14m away — outside 5m radius — but was returned, got %v", got)
+	}
+}
+
 func TestSpatialGrid_QueryOutOfBounds(t *testing.T) {
 	g := NewSpatialGrid(BoundingBox{0, 0, 100, 100}, 10)
 	g.Insert(EdgeID(1), Point{5, 5})

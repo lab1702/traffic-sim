@@ -10,7 +10,12 @@ type SpatialGrid struct {
 	CellSize float64
 	cols     int
 	rows     int
-	cells    map[uint64][]EdgeID // key = row*cols + col
+	cells    map[uint64][]gridEntry // key = row*cols + col
+}
+
+type gridEntry struct {
+	id EdgeID
+	p  Point
 }
 
 // NewSpatialGrid constructs a uniform grid index over the given bounds.
@@ -29,7 +34,7 @@ func NewSpatialGrid(b BoundingBox, cellSize float64) *SpatialGrid {
 	return &SpatialGrid{
 		Bounds: b, CellSize: cellSize,
 		cols: cols, rows: rows,
-		cells: make(map[uint64][]EdgeID),
+		cells: make(map[uint64][]gridEntry),
 	}
 }
 
@@ -59,7 +64,7 @@ func (g *SpatialGrid) Insert(id EdgeID, p Point) {
 		return
 	}
 	k := g.key(col, row)
-	g.cells[k] = append(g.cells[k], id)
+	g.cells[k] = append(g.cells[k], gridEntry{id: id, p: p})
 }
 
 // Query returns edge IDs whose inserted points are within `radius` meters of p.
@@ -72,7 +77,6 @@ func (g *SpatialGrid) Query(p Point, radius float64) []EdgeID {
 	}
 	span := int(math.Ceil(radius / g.CellSize))
 	r2 := radius * radius
-	_ = r2 // conservative grid: callers re-check exact distance; see Query doc.
 	var out []EdgeID
 	for dr := -span; dr <= span; dr++ {
 		for dc := -span; dc <= span; dc++ {
@@ -80,8 +84,12 @@ func (g *SpatialGrid) Query(p Point, radius float64) []EdgeID {
 			if c < 0 || c >= g.cols || r < 0 || r >= g.rows {
 				continue
 			}
-			for _, id := range g.cells[g.key(c, r)] {
-				out = append(out, id)
+			for _, e := range g.cells[g.key(c, r)] {
+				dx := e.p.X - p.X
+				dy := e.p.Y - p.Y
+				if dx*dx+dy*dy <= r2 {
+					out = append(out, e.id)
+				}
 			}
 		}
 	}
