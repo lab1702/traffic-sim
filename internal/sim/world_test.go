@@ -1225,6 +1225,87 @@ func TestWorld_StopSign_GapAcceptance(t *testing.T) {
 	}
 }
 
+// TestWorld_LeftTurn_PriorityRoad_YieldsToOpposing: a priority-road
+// vehicle turning left across opposing through-traffic must yield until
+// the gap clears.
+func TestWorld_LeftTurn_PriorityRoad_YieldsToOpposing(t *testing.T) {
+	// 4-way: N-S priority road, with W-E side road (unsignalized).
+	// Vehicle A: north approach, turning left (heading west out).
+	// Vehicle B: south approach (opposing A), going straight (heading north out).
+	// Both approaches are ControlNone (priority road).
+	// Expect A to yield (mustYield via leftTurnYieldsToOpposing).
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 100}},  // N origin (A starts here)
+		{ID: 1, Pos: network.Point{X: 0, Y: -100}}, // S origin (B starts here)
+		{ID: 2, Pos: network.Point{X: 0, Y: 0}},    // center
+		{ID: 3, Pos: network.Point{X: 100, Y: 0}},  // E destination (A turns left here — southbound left = east)
+		{ID: 4, Pos: network.Point{X: 0, Y: -200}}, // S destination (unused)
+		{ID: 5, Pos: network.Point{X: 0, Y: 200}},  // N destination (B continues straight here)
+	}
+	mkEdge := func(id, from, to int) network.Edge {
+		return network.Edge{
+			ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: 100, SpeedLimit: 10,
+			Lanes:    []network.Lane{{Index: 0}},
+			Geometry: []network.Point{nodes[from].Pos, nodes[to].Pos},
+		}
+	}
+	edges := []network.Edge{
+		mkEdge(0, 0, 2), // N->C   (A's approach, vehicle heading south)
+		mkEdge(1, 1, 2), // S->C   (B's approach, opposing A, vehicle heading north)
+		mkEdge(2, 2, 3), // C->E   (A turns left here — southbound left is east)
+		mkEdge(3, 2, 5), // C->N   (B continues straight to here)
+	}
+	xs := []network.Intersection{
+		{
+			ID: 0, NodeID: 2,
+			Incoming:        []network.EdgeID{0, 1},
+			IncomingControl: ctrls(network.ControlNone, network.ControlNone),
+			Opposing:        []int8{1, 0}, // N opposes S
+			Outgoing:        []network.EdgeID{2, 3},
+			HasSignal:       false,
+		},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	// A approaches at V=5 from S=80 (going to turn left).
+	// B pinned at S=98, V=0.5 → ETA = 2/0.5 = 4s, inside leftTurnGapSec=6s.
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0, 2}, Edge: 0, S: 80, V: 5},
+		{ID: 2, Route: []network.EdgeID{1, 3}, Edge: 1, S: 98, V: 0.5},
+	}
+	w.nextID = 3
+
+	for i := 0; i < 300; i++ {
+		// Re-pin B so the imminent-ETA condition persists.
+		for j := range w.Vehicles {
+			if w.Vehicles[j].ID == 2 && !w.Vehicles[j].Despawned {
+				w.Vehicles[j].S = 98
+				w.Vehicles[j].V = 0.5
+			}
+		}
+		w.Step()
+	}
+
+	// A should still be on edge 0 (its approach), not despawned, not stuck.
+	var a *Vehicle
+	for j := range w.Vehicles {
+		if w.Vehicles[j].ID == 1 {
+			a = &w.Vehicles[j]
+		}
+	}
+	if a == nil || a.Despawned {
+		t.Fatal("left-turning vehicle should not be despawned during legitimate yield")
+	}
+	if a.Edge != 0 {
+		t.Errorf("left-turning vehicle should still be on approach edge 0 (yielding), got edge %d", a.Edge)
+	}
+	if a.StuckTime != 0 {
+		t.Errorf("yielding vehicle's StuckTime must be 0, got %.3f", a.StuckTime)
+	}
+}
+
 // TestWorld_SignalOff_TreatedAsAllWayStop: an intersection with
 // HasSignal=true and Mode=ModeOff behaves like an AllWayStop: every
 // approach must stop and dwell before departing.
