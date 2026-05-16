@@ -1,6 +1,8 @@
 package netbuild
 
 import (
+	"math"
+
 	"github.com/lab1702/traffic-sim/internal/network"
 	"github.com/lab1702/traffic-sim/internal/osmload"
 	"github.com/paulmach/osm"
@@ -162,4 +164,71 @@ func applyStopAllOrMinor(x *network.Intersection, tags osm.Tags, classOfEdge fun
 			return
 		}
 	}
+}
+
+// resolveOpposing populates x.Opposing for each intersection. Two
+// approaches are opposing iff:
+//
+//  1. Their arrival headings fold to the same axis bucket (same
+//     8-bucket / 22.5° resolution as DefaultSignalConfig in sim).
+//  2. AND their arrival headings are > π/2 apart (excludes
+//     same-direction misalignment at Y-junctions and skewed forks).
+//
+// If a bucket has more than two members (degenerate star geometry),
+// each approach pairs with whichever bucket-mate has the largest
+// |Δheading|, i.e. the one most nearly opposite.
+//
+// Receives a *network.Network containing at least Edges so it can
+// call network.ArrivalHeading.
+func resolveOpposing(xs []network.Intersection, net *network.Network) {
+	const numBuckets = 8
+	for i := range xs {
+		x := &xs[i]
+		if len(x.Opposing) != len(x.Incoming) {
+			x.Opposing = make([]int8, len(x.Incoming))
+		}
+		for k := range x.Opposing {
+			x.Opposing[k] = -1
+		}
+		headings := make([]float64, len(x.Incoming))
+		buckets := make([]int, len(x.Incoming))
+		for j, eid := range x.Incoming {
+			h := network.ArrivalHeading(net, eid)
+			headings[j] = h
+			ax := math.Mod(h, math.Pi)
+			if ax < 0 {
+				ax += math.Pi
+			}
+			buckets[j] = int(math.Round(ax*numBuckets/math.Pi)) % numBuckets
+		}
+		for j := range x.Incoming {
+			best := -1
+			bestDelta := math.Pi / 2
+			for k := range x.Incoming {
+				if k == j || buckets[k] != buckets[j] {
+					continue
+				}
+				d := math.Abs(angleDiff(headings[j], headings[k]))
+				if d > bestDelta {
+					bestDelta = d
+					best = k
+				}
+			}
+			if best >= 0 {
+				x.Opposing[j] = int8(best)
+			}
+		}
+	}
+}
+
+// angleDiff returns the signed angle (radians, (-π, π]) from a to b.
+func angleDiff(a, b float64) float64 {
+	d := b - a
+	for d > math.Pi {
+		d -= 2 * math.Pi
+	}
+	for d <= -math.Pi {
+		d += 2 * math.Pi
+	}
+	return d
 }

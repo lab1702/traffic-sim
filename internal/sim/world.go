@@ -211,6 +211,11 @@ func comfortableStopDistance(v float64) float64 {
 
 const gapThresholdSec = 3.0
 
+// leftTurnGapSec is the minimum oncoming-traffic ETA a left turner
+// accepts before crossing. Larger than gapThresholdSec because the
+// left-turn maneuver takes longer to execute. Literature: 6–8s.
+const leftTurnGapSec = 6.0
+
 const (
 	// stuckSpeedThresh is the speed (m/s) below which a vehicle is
 	// considered "not moving". Used for two purposes:
@@ -389,10 +394,21 @@ func (w *World) yieldGapCheck(v *Vehicle, x *network.Intersection, myPos int,
 // its mandatory-stop dwell, it scans every other approach for a lead
 // vehicle that came to a complete stop earlier than v. If one exists, we
 // yield. Otherwise we proceed. Ties (same StoppedSinceSec) are broken by
-// lower Incoming index winning.
+// lower Incoming index winning. Exception: if both v and the lead are
+// making left turns from opposing approaches, both proceed simultaneously
+// (mutual-left pass).
 func (w *World) allWayStopFIFO(v *Vehicle, x *network.Intersection, myPos int,
 	myDist float64, byEdge map[network.EdgeID][]int,
 ) (float64, bool) {
+	// Check if v is making a left turn.
+	vIsLeftTurn := false
+	if v.RouteIdx+1 < len(v.Route) {
+		nextEdge := v.Route[v.RouteIdx+1]
+		if network.ClassifyTurn(w.Net, v.Edge, nextEdge) == network.TurnLeft {
+			vIsLeftTurn = true
+		}
+	}
+
 	for j := range x.Incoming {
 		if j == myPos {
 			continue
@@ -421,6 +437,23 @@ func (w *World) allWayStopFIFO(v *Vehicle, x *network.Intersection, myPos int,
 		if lead.StoppedSinceSec == 0 {
 			continue // not yet stopped; hasn't earned a FIFO slot
 		}
+
+		// Check if the opposing lead is also making a left turn.
+		oppIsLeftTurn := false
+		if lead.RouteIdx+1 < len(lead.Route) {
+			nextEdge := lead.Route[lead.RouteIdx+1]
+			if network.ClassifyTurn(w.Net, lead.Edge, nextEdge) == network.TurnLeft {
+				oppIsLeftTurn = true
+			}
+		}
+
+		// Mutual-left pass: if both are turning left AND j is the
+		// opposing approach (not cross-traffic), both proceed
+		// simultaneously without yielding to each other.
+		if vIsLeftTurn && oppIsLeftTurn && myPos < len(x.Opposing) && int(x.Opposing[myPos]) == j {
+			continue
+		}
+
 		if lead.StoppedSinceSec < v.StoppedSinceSec {
 			return myDist, true // they stopped first; we yield
 		}
@@ -429,6 +462,86 @@ func (w *World) allWayStopFIFO(v *Vehicle, x *network.Intersection, myPos int,
 		}
 	}
 	return 0, false
+}
+
+// leftTurnYieldsToOpposing returns (distance to stop line, true) when v
+// is making a left turn and an opposing-approach vehicle has imminent
+// ETA. Layered on top of Phase 1's yield rules — only engages when v
+// would otherwise proceed (priority road, green signal, or AllWayStop
+// FIFO winner). Two opposing left-turners pass simultaneously: the
+// inner gap loop skips opposing vehicles that are also turning left.
+func (w *World) leftTurnYieldsToOpposing(v *Vehicle, byEdge map[network.EdgeID][]int) (float64, bool) {
+	if v.RouteIdx+1 >= len(v.Route) {
+		return 0, false
+	}
+	edge := &w.Net.Edges[v.Edge]
+	x, ok := w.xByNodeID[edge.To]
+	if !ok {
+		return 0, false
+	}
+	myPos := IncomingPos(x, v.Edge)
+	if myPos < 0 || myPos >= len(x.Opposing) {
+		return 0, false
+	}
+	oppPos := int(x.Opposing[myPos])
+	if oppPos < 0 {
+		return 0, false
+	}
+	nextEdge := v.Route[v.RouteIdx+1]
+	if network.ClassifyTurn(w.Net, v.Edge, nextEdge) != network.TurnLeft {
+		return 0, false
+	}
+	if !w.entitledToProceed(v, byEdge) {
+		return 0, false
+	}
+
+	myDist := edge.Length - v.S
+	if myDist < 0 {
+		myDist = 0
+	}
+
+	oppEdgeID := x.Incoming[oppPos]
+	oppVehicles := byEdge[oppEdgeID]
+	if len(oppVehicles) == 0 {
+		return 0, false
+	}
+	oppEdge := &w.Net.Edges[oppEdgeID]
+	for _, oi := range oppVehicles {
+		ov := &w.Vehicles[oi]
+		// Skip opposing left-turners — they're yielding to us, so we
+		// don't yield to them (mutual-yield deadlock resolution).
+		if ov.RouteIdx+1 < len(ov.Route) &&
+			network.ClassifyTurn(w.Net, ov.Edge, ov.Route[ov.RouteIdx+1]) == network.TurnLeft {
+			continue
+		}
+		d := oppEdge.Length - ov.S
+		ovV := ov.V
+		if ovV < 0.5 {
+			ovV = 0.5
+		}
+		if d/ovV < leftTurnGapSec {
+			return myDist, true
+		}
+	}
+	return 0, false
+}
+
+// entitledToProceed reports whether v would otherwise proceed through
+// the intersection at the end of its current edge — i.e., neither
+// stopDistanceForRed nor stopDistanceForYield say to stop. Used by
+// leftTurnYieldsToOpposing to layer the left-turn check on top of
+// Phase 1's yield rules without double-stopping.
+//
+// stopDistanceForYield has an idempotent side effect (maybeMarkStopped);
+// calling it twice per tick is safe — the second call is a no-op.
+func (w *World) entitledToProceed(v *Vehicle, byEdge map[network.EdgeID][]int) bool {
+	if _, isRed := w.stopDistanceForRed(v); isRed {
+		return false
+	}
+	if _, mustYield := w.stopDistanceForYield(v, byEdge); mustYield {
+		return false
+	}
+	return true
 }
 
 // Step advances the sim by one tick (DefaultDt seconds).
@@ -558,15 +671,25 @@ func (w *World) Step() {
 		lS, lV, has := info.lS, info.lV, info.has
 
 		// Apply red-light virtual leader if closer.
-		if d, isRed := w.stopDistanceForRed(v); isRed {
-			virtualS := v.S + d
+		dRed, isRed := w.stopDistanceForRed(v)
+		if isRed {
+			virtualS := v.S + dRed
 			if !has || virtualS < lS {
 				lS, lV, has = virtualS, 0, true
 			}
 		}
 		// Apply unsignalized-yield virtual leader if closer.
-		if d, mustYield := w.stopDistanceForYield(v, byEdge); mustYield {
-			virtualS := v.S + d
+		dYield, mustYield := w.stopDistanceForYield(v, byEdge)
+		if mustYield {
+			virtualS := v.S + dYield
+			if !has || virtualS < lS {
+				lS, lV, has = virtualS, 0, true
+			}
+		}
+		// Apply left-turn opposing-traffic virtual leader if closer.
+		dLT, mustYieldLT := w.leftTurnYieldsToOpposing(v, byEdge)
+		if mustYieldLT {
+			virtualS := v.S + dLT
 			if !has || virtualS < lS {
 				lS, lV, has = virtualS, 0, true
 			}
@@ -577,12 +700,10 @@ func (w *World) Step() {
 
 		// Stuck-vehicle guard. Defensive against sim bugs that would
 		// otherwise leave a vehicle wedged forever. Runs only when the
-		// vehicle is below the speed threshold; the two stopDistance
-		// helpers are cheap but skipped for the common moving case.
+		// vehicle is below the speed threshold; reuses the yield-check
+		// results from above to avoid re-calling stopDistance helpers.
 		if !v.Despawned && v.V < stuckSpeedThresh {
-			_, isRed := w.stopDistanceForRed(v)
-			_, mustYield := w.stopDistanceForYield(v, byEdge)
-			if !isRed && !mustYield {
+			if !isRed && !mustYield && !mustYieldLT {
 				v.StuckTime += w.dt
 				if v.StuckTime > stuckTimeoutSec {
 					slog.Warn("stuck vehicle despawned",

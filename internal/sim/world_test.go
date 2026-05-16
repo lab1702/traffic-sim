@@ -1225,6 +1225,87 @@ func TestWorld_StopSign_GapAcceptance(t *testing.T) {
 	}
 }
 
+// TestWorld_LeftTurn_PriorityRoad_YieldsToOpposing: a priority-road
+// vehicle turning left across opposing through-traffic must yield until
+// the gap clears.
+func TestWorld_LeftTurn_PriorityRoad_YieldsToOpposing(t *testing.T) {
+	// 4-way: N-S priority road, with W-E side road (unsignalized).
+	// Vehicle A: north approach, turning left (heading west out).
+	// Vehicle B: south approach (opposing A), going straight (heading north out).
+	// Both approaches are ControlNone (priority road).
+	// Expect A to yield (mustYield via leftTurnYieldsToOpposing).
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 100}},  // N origin (A starts here)
+		{ID: 1, Pos: network.Point{X: 0, Y: -100}}, // S origin (B starts here)
+		{ID: 2, Pos: network.Point{X: 0, Y: 0}},    // center
+		{ID: 3, Pos: network.Point{X: 100, Y: 0}},  // E destination (A turns left here — southbound left = east)
+		{ID: 4, Pos: network.Point{X: 0, Y: -200}}, // S destination (unused)
+		{ID: 5, Pos: network.Point{X: 0, Y: 200}},  // N destination (B continues straight here)
+	}
+	mkEdge := func(id, from, to int) network.Edge {
+		return network.Edge{
+			ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: 100, SpeedLimit: 10,
+			Lanes:    []network.Lane{{Index: 0}},
+			Geometry: []network.Point{nodes[from].Pos, nodes[to].Pos},
+		}
+	}
+	edges := []network.Edge{
+		mkEdge(0, 0, 2), // N->C   (A's approach, vehicle heading south)
+		mkEdge(1, 1, 2), // S->C   (B's approach, opposing A, vehicle heading north)
+		mkEdge(2, 2, 3), // C->E   (A turns left here — southbound left is east)
+		mkEdge(3, 2, 5), // C->N   (B continues straight to here)
+	}
+	xs := []network.Intersection{
+		{
+			ID: 0, NodeID: 2,
+			Incoming:        []network.EdgeID{0, 1},
+			IncomingControl: ctrls(network.ControlNone, network.ControlNone),
+			Opposing:        []int8{1, 0}, // N opposes S
+			Outgoing:        []network.EdgeID{2, 3},
+			HasSignal:       false,
+		},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	// A approaches at V=5 from S=80 (going to turn left).
+	// B pinned at S=98, V=0.5 → ETA = 2/0.5 = 4s, inside leftTurnGapSec=6s.
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0, 2}, Edge: 0, S: 80, V: 5},
+		{ID: 2, Route: []network.EdgeID{1, 3}, Edge: 1, S: 98, V: 0.5},
+	}
+	w.nextID = 3
+
+	for i := 0; i < 300; i++ {
+		// Re-pin B so the imminent-ETA condition persists.
+		for j := range w.Vehicles {
+			if w.Vehicles[j].ID == 2 && !w.Vehicles[j].Despawned {
+				w.Vehicles[j].S = 98
+				w.Vehicles[j].V = 0.5
+			}
+		}
+		w.Step()
+	}
+
+	// A should still be on edge 0 (its approach), not despawned, not stuck.
+	var a *Vehicle
+	for j := range w.Vehicles {
+		if w.Vehicles[j].ID == 1 {
+			a = &w.Vehicles[j]
+		}
+	}
+	if a == nil || a.Despawned {
+		t.Fatal("left-turning vehicle should not be despawned during legitimate yield")
+	}
+	if a.Edge != 0 {
+		t.Errorf("left-turning vehicle should still be on approach edge 0 (yielding), got edge %d", a.Edge)
+	}
+	if a.StuckTime != 0 {
+		t.Errorf("yielding vehicle's StuckTime must be 0, got %.3f", a.StuckTime)
+	}
+}
+
 // TestWorld_SignalOff_TreatedAsAllWayStop: an intersection with
 // HasSignal=true and Mode=ModeOff behaves like an AllWayStop: every
 // approach must stop and dwell before departing.
@@ -1290,5 +1371,586 @@ func TestWorld_SignalOff_TreatedAsAllWayStop(t *testing.T) {
 	}
 	if len(w.Vehicles) > 0 && !w.Vehicles[0].Despawned && w.Vehicles[0].Edge != 4 {
 		t.Errorf("vehicle should have cleared the intersection after dwell, still on edge %d", w.Vehicles[0].Edge)
+	}
+}
+
+// TestWorld_LeftTurn_StuckGuardBypassed: a left turner waiting on
+// perpetual opposing traffic must not be despawned by the 60s
+// stuck-vehicle guard.
+func TestWorld_LeftTurn_StuckGuardBypassed(t *testing.T) {
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 100}},
+		{ID: 1, Pos: network.Point{X: 0, Y: -100}},
+		{ID: 2, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 3, Pos: network.Point{X: 100, Y: 0}},  // E destination (A's left from southbound)
+		{ID: 4, Pos: network.Point{X: 0, Y: -200}}, // unused
+		{ID: 5, Pos: network.Point{X: 0, Y: 200}},  // N destination (B's straight)
+	}
+	mkEdge := func(id, from, to int) network.Edge {
+		return network.Edge{
+			ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: 100, SpeedLimit: 10,
+			Lanes:    []network.Lane{{Index: 0}},
+			Geometry: []network.Point{nodes[from].Pos, nodes[to].Pos},
+		}
+	}
+	edges := []network.Edge{
+		mkEdge(0, 0, 2), // N->C (A's approach)
+		mkEdge(1, 1, 2), // S->C (B's approach)
+		mkEdge(2, 2, 3), // C->E (A's left turn)
+		mkEdge(3, 2, 5), // C->N (B's through)
+	}
+	xs := []network.Intersection{
+		{
+			ID: 0, NodeID: 2,
+			Incoming:        []network.EdgeID{0, 1},
+			IncomingControl: ctrls(network.ControlNone, network.ControlNone),
+			Opposing:        []int8{1, 0},
+			Outgoing:        []network.EdgeID{2, 3},
+			HasSignal:       false,
+		},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0, 2}, Edge: 0, S: 98, V: 0.5}, // A: left, near line
+		{ID: 2, Route: []network.EdgeID{1, 3}, Edge: 1, S: 98, V: 0.5}, // B: straight, pinned imminent
+	}
+	w.nextID = 3
+
+	// Run for 130 sim-seconds (well past stuckTimeoutSec=60).
+	for i := 0; i < 2600; i++ {
+		for j := range w.Vehicles {
+			if w.Vehicles[j].ID == 2 && !w.Vehicles[j].Despawned {
+				w.Vehicles[j].S = 98
+				w.Vehicles[j].V = 0.5
+			}
+		}
+		w.Step()
+	}
+
+	var a *Vehicle
+	for j := range w.Vehicles {
+		if w.Vehicles[j].ID == 1 {
+			a = &w.Vehicles[j]
+		}
+	}
+	if a == nil || a.Despawned {
+		t.Fatal("left turner waiting on perpetual opposing traffic must not be despawned")
+	}
+	if a.StuckTime != 0 {
+		t.Errorf("StuckTime should stay 0 during legitimate left-turn yield, got %.3f", a.StuckTime)
+	}
+}
+
+// TestWorld_LeftTurn_PriorityRoad_NoOpposingTraffic: a priority-road
+// left turner with no opposing vehicle sails through without recording
+// a stop and without StuckTime accumulation.
+func TestWorld_LeftTurn_PriorityRoad_NoOpposingTraffic(t *testing.T) {
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 100}},  // N origin (A starts here)
+		{ID: 1, Pos: network.Point{X: 0, Y: -100}}, // S origin (unused B)
+		{ID: 2, Pos: network.Point{X: 0, Y: 0}},    // center
+		{ID: 3, Pos: network.Point{X: 100, Y: 0}},  // E destination (A's left from southbound)
+		{ID: 4, Pos: network.Point{X: 0, Y: -200}}, // unused
+		{ID: 5, Pos: network.Point{X: 0, Y: 200}},  // unused
+	}
+	mkEdge := func(id, from, to int) network.Edge {
+		return network.Edge{
+			ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: 100, SpeedLimit: 10,
+			Lanes:    []network.Lane{{Index: 0}},
+			Geometry: []network.Point{nodes[from].Pos, nodes[to].Pos},
+		}
+	}
+	edges := []network.Edge{
+		mkEdge(0, 0, 2), // N->C
+		mkEdge(1, 1, 2), // S->C (no vehicle here)
+		mkEdge(2, 2, 3), // C->E (A's left)
+		mkEdge(3, 2, 5), // C->N (unused outbound)
+	}
+	xs := []network.Intersection{
+		{
+			ID: 0, NodeID: 2,
+			Incoming:        []network.EdgeID{0, 1},
+			IncomingControl: ctrls(network.ControlNone, network.ControlNone),
+			Opposing:        []int8{1, 0},
+			Outgoing:        []network.EdgeID{2, 3},
+			HasSignal:       false,
+		},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0, 2}, Edge: 0, S: 50, V: 8}, // A: left, no opposing
+	}
+	w.nextID = 2
+
+	for i := 0; i < 200; i++ {
+		w.Step()
+		if len(w.Vehicles) == 0 || w.Vehicles[0].Despawned {
+			break
+		}
+	}
+
+	// A must have made it to edge 2 (the outbound left-turn edge) or
+	// despawned legitimately.
+	if len(w.Vehicles) > 0 && !w.Vehicles[0].Despawned && w.Vehicles[0].Edge != 2 {
+		t.Errorf("left turner with no opposing traffic should reach edge 2, got edge %d", w.Vehicles[0].Edge)
+	}
+	if len(w.Vehicles) > 0 && w.Vehicles[0].StuckTime != 0 {
+		t.Errorf("StuckTime must remain 0, got %.3f", w.Vehicles[0].StuckTime)
+	}
+}
+
+// TestWorld_LeftTurn_MutualLeftsPass: two opposing left-turners do not
+// yield to each other (left-to-left pass). Both proceed.
+func TestWorld_LeftTurn_MutualLeftsPass(t *testing.T) {
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 100}},  // N origin (A)
+		{ID: 1, Pos: network.Point{X: 0, Y: -100}}, // S origin (B)
+		{ID: 2, Pos: network.Point{X: 0, Y: 0}},    // center
+		{ID: 3, Pos: network.Point{X: 100, Y: 0}},  // E destination (A's left from southbound)
+		{ID: 4, Pos: network.Point{X: -100, Y: 0}}, // W destination (B's left from northbound)
+	}
+	mkEdge := func(id, from, to int) network.Edge {
+		return network.Edge{
+			ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: 100, SpeedLimit: 10,
+			Lanes:    []network.Lane{{Index: 0}},
+			Geometry: []network.Point{nodes[from].Pos, nodes[to].Pos},
+		}
+	}
+	edges := []network.Edge{
+		mkEdge(0, 0, 2), // N->C
+		mkEdge(1, 1, 2), // S->C
+		mkEdge(2, 2, 3), // C->E (A's left)
+		mkEdge(3, 2, 4), // C->W (B's left)
+	}
+	xs := []network.Intersection{
+		{
+			ID: 0, NodeID: 2,
+			Incoming:        []network.EdgeID{0, 1},
+			IncomingControl: ctrls(network.ControlNone, network.ControlNone),
+			Opposing:        []int8{1, 0},
+			Outgoing:        []network.EdgeID{2, 3},
+			HasSignal:       false,
+		},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0, 2}, Edge: 0, S: 50, V: 8}, // A: N->E (left)
+		{ID: 2, Route: []network.EdgeID{1, 3}, Edge: 1, S: 50, V: 8}, // B: S->W (left)
+	}
+	w.nextID = 3
+
+	for i := 0; i < 300; i++ {
+		w.Step()
+	}
+
+	// Both must have reached their respective outbound edges or despawned.
+	aOK, bOK := false, false
+	for j := range w.Vehicles {
+		v := &w.Vehicles[j]
+		if v.ID == 1 && (v.Despawned || v.Edge == 2) {
+			aOK = true
+		}
+		if v.ID == 2 && (v.Despawned || v.Edge == 3) {
+			bOK = true
+		}
+	}
+	if !aOK {
+		t.Error("Vehicle A (left turner) should have made it through; opposing left should not block")
+	}
+	if !bOK {
+		t.Error("Vehicle B (left turner) should have made it through; opposing left should not block")
+	}
+}
+
+// TestWorld_LeftTurn_SignaledGreen_YieldsToOpposing: at a signaled
+// intersection in normal green, a left turner with opposing through
+// traffic must yield (permissive-left semantics).
+func TestWorld_LeftTurn_SignaledGreen_YieldsToOpposing(t *testing.T) {
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 100}},
+		{ID: 1, Pos: network.Point{X: 0, Y: -100}},
+		{ID: 2, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 3, Pos: network.Point{X: 100, Y: 0}},  // E destination (A's left)
+		{ID: 4, Pos: network.Point{X: 0, Y: 200}},  // N destination (B's through)
+	}
+	mkEdge := func(id, from, to int) network.Edge {
+		return network.Edge{
+			ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: 100, SpeedLimit: 10,
+			Lanes:    []network.Lane{{Index: 0}},
+			Geometry: []network.Point{nodes[from].Pos, nodes[to].Pos},
+		}
+	}
+	edges := []network.Edge{
+		mkEdge(0, 0, 2),
+		mkEdge(1, 1, 2),
+		mkEdge(2, 2, 3), // C->E (A's left turn)
+		mkEdge(3, 2, 4), // C->N (B's through)
+	}
+	xs := []network.Intersection{
+		{
+			ID: 0, NodeID: 2,
+			Incoming:        []network.EdgeID{0, 1},
+			IncomingControl: allNone(2), // signaled — not consulted in Normal
+			Opposing:        []int8{1, 0},
+			Outgoing:        []network.EdgeID{2, 3},
+			HasSignal:       true,
+		},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	// Single-phase signal: both N and S approaches always green.
+	w.SignalStates[0] = NewSignalState(SignalConfig{
+		Phases: []SignalPhase{{GreenEdges: []int{0, 1}, GreenDur: 1000, YellowDur: 0}},
+	})
+
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0, 2}, Edge: 0, S: 80, V: 5},
+		{ID: 2, Route: []network.EdgeID{1, 3}, Edge: 1, S: 98, V: 0.5},
+	}
+	w.nextID = 3
+
+	for i := 0; i < 300; i++ {
+		for j := range w.Vehicles {
+			if w.Vehicles[j].ID == 2 && !w.Vehicles[j].Despawned {
+				w.Vehicles[j].S = 98
+				w.Vehicles[j].V = 0.5
+			}
+		}
+		w.Step()
+	}
+
+	var a *Vehicle
+	for j := range w.Vehicles {
+		if w.Vehicles[j].ID == 1 {
+			a = &w.Vehicles[j]
+		}
+	}
+	if a == nil || a.Despawned {
+		t.Fatal("left turner should not be despawned during legitimate yield")
+	}
+	if a.Edge != 0 {
+		t.Errorf("permissive-left turner should still be on approach edge 0, got edge %d", a.Edge)
+	}
+	if a.StuckTime != 0 {
+		t.Errorf("StuckTime must be 0 for legitimate yielder, got %.3f", a.StuckTime)
+	}
+}
+
+// TestWorld_LeftTurn_SignaledRed_NotAffected: at a signaled intersection
+// where the left turner's approach is red, the existing hard-stop owns
+// the decision; the left-turn check must not double-stop (and the
+// vehicle's stuck-guard must not accumulate StuckTime).
+func TestWorld_LeftTurn_SignaledRed_NotAffected(t *testing.T) {
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 100}},
+		{ID: 1, Pos: network.Point{X: 0, Y: -100}},
+		{ID: 2, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 3, Pos: network.Point{X: 100, Y: 0}},  // E destination (A's left)
+		{ID: 4, Pos: network.Point{X: 0, Y: 200}},  // N destination
+	}
+	mkEdge := func(id, from, to int) network.Edge {
+		return network.Edge{
+			ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: 100, SpeedLimit: 10,
+			Lanes:    []network.Lane{{Index: 0}},
+			Geometry: []network.Point{nodes[from].Pos, nodes[to].Pos},
+		}
+	}
+	edges := []network.Edge{
+		mkEdge(0, 0, 2),
+		mkEdge(1, 1, 2),
+		mkEdge(2, 2, 3),
+		mkEdge(3, 2, 4),
+	}
+	xs := []network.Intersection{
+		{
+			ID: 0, NodeID: 2,
+			Incoming:        []network.EdgeID{0, 1},
+			IncomingControl: allNone(2),
+			Opposing:        []int8{1, 0},
+			Outgoing:        []network.EdgeID{2, 3},
+			HasSignal:       true,
+		},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	// Force the signal to all-red.
+	w.SignalStates[0] = NewSignalState(SignalConfig{
+		Phases: []SignalPhase{{GreenEdges: nil, GreenDur: 1000, YellowDur: 0}},
+	})
+
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0, 2}, Edge: 0, S: 50, V: 10}, // left turner, red approach
+	}
+	w.nextID = 2
+
+	for i := 0; i < 500; i++ {
+		w.Step()
+	}
+
+	if len(w.Vehicles) != 1 {
+		t.Fatalf("vehicle should be stopped at red, not despawned, got %d alive", len(w.Vehicles))
+	}
+	v := &w.Vehicles[0]
+	if v.V > 0.1 {
+		t.Errorf("vehicle should be stopped at red, V=%.2f", v.V)
+	}
+	if v.StuckTime != 0 {
+		t.Errorf("vehicle legitimately stopped at red; StuckTime must be 0, got %.3f", v.StuckTime)
+	}
+}
+
+// TestWorld_LeftTurn_AllWayStop_YieldsToOpposing: at an AllWayStop with
+// two opposing approaches, the left turner (after dwell + FIFO clears)
+// must yield to the opposing through.
+func TestWorld_LeftTurn_AllWayStop_YieldsToOpposing(t *testing.T) {
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 100}},
+		{ID: 1, Pos: network.Point{X: 0, Y: -100}},
+		{ID: 2, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 3, Pos: network.Point{X: 100, Y: 0}}, // E destination (A's left)
+		{ID: 4, Pos: network.Point{X: 0, Y: 200}}, // N destination (B's through)
+	}
+	mkEdge := func(id, from, to int) network.Edge {
+		return network.Edge{
+			ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: 100, SpeedLimit: 10,
+			Lanes:    []network.Lane{{Index: 0}},
+			Geometry: []network.Point{nodes[from].Pos, nodes[to].Pos},
+		}
+	}
+	edges := []network.Edge{
+		mkEdge(0, 0, 2),
+		mkEdge(1, 1, 2),
+		mkEdge(2, 2, 3), // C->E (A's left turn)
+		mkEdge(3, 2, 4), // C->N (B's through)
+	}
+	xs := []network.Intersection{
+		{
+			ID: 0, NodeID: 2,
+			Incoming:        []network.EdgeID{0, 1},
+			IncomingControl: ctrls(network.ControlAllWayStop, network.ControlAllWayStop),
+			Opposing:        []int8{1, 0},
+			Outgoing:        []network.EdgeID{2, 3},
+			HasSignal:       false,
+		},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0, 2}, Edge: 0, S: 80, V: 5},   // A: left
+		{ID: 2, Route: []network.EdgeID{1, 3}, Edge: 1, S: 98, V: 0.5}, // B: through, pinned imminent
+	}
+	w.nextID = 3
+
+	for i := 0; i < 500; i++ {
+		for j := range w.Vehicles {
+			if w.Vehicles[j].ID == 2 && !w.Vehicles[j].Despawned {
+				w.Vehicles[j].S = 98
+				w.Vehicles[j].V = 0.5
+			}
+		}
+		w.Step()
+	}
+
+	var a *Vehicle
+	for j := range w.Vehicles {
+		if w.Vehicles[j].ID == 1 {
+			a = &w.Vehicles[j]
+		}
+	}
+	if a == nil || a.Despawned {
+		t.Fatal("AllWayStop left turner should not be despawned during legitimate yield")
+	}
+	if a.Edge != 0 {
+		t.Errorf("AllWayStop left turner should still be on approach edge 0, got edge %d", a.Edge)
+	}
+	if a.StuckTime != 0 {
+		t.Errorf("StuckTime must be 0 for legitimate yielder, got %.3f", a.StuckTime)
+	}
+}
+
+// TestWorld_LeftTurn_AllWayStop_BothLeftsPass: at an AllWayStop, two
+// opposing left turners both proceed simultaneously after dwell.
+func TestWorld_LeftTurn_AllWayStop_BothLeftsPass(t *testing.T) {
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 100}},
+		{ID: 1, Pos: network.Point{X: 0, Y: -100}},
+		{ID: 2, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 3, Pos: network.Point{X: 100, Y: 0}},  // E destination (A's left from southbound)
+		{ID: 4, Pos: network.Point{X: -100, Y: 0}}, // W destination (B's left from northbound)
+	}
+	mkEdge := func(id, from, to int) network.Edge {
+		return network.Edge{
+			ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: 100, SpeedLimit: 10,
+			Lanes:    []network.Lane{{Index: 0}},
+			Geometry: []network.Point{nodes[from].Pos, nodes[to].Pos},
+		}
+	}
+	edges := []network.Edge{
+		mkEdge(0, 0, 2),
+		mkEdge(1, 1, 2),
+		mkEdge(2, 2, 3), // C->E (A's left)
+		mkEdge(3, 2, 4), // C->W (B's left)
+	}
+	xs := []network.Intersection{
+		{
+			ID: 0, NodeID: 2,
+			Incoming:        []network.EdgeID{0, 1},
+			IncomingControl: ctrls(network.ControlAllWayStop, network.ControlAllWayStop),
+			Opposing:        []int8{1, 0},
+			Outgoing:        []network.EdgeID{2, 3},
+			HasSignal:       false,
+		},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0, 2}, Edge: 0, S: 80, V: 5}, // A: left
+		{ID: 2, Route: []network.EdgeID{1, 3}, Edge: 1, S: 80, V: 5}, // B: left
+	}
+	w.nextID = 3
+
+	// Run simulation and track when both vehicles reach their outbound edges.
+	aReachedOutbound, bReachedOutbound := false, false
+	for i := 0; i < 400; i++ {
+		w.Step()
+		for j := range w.Vehicles {
+			v := &w.Vehicles[j]
+			if v.ID == 1 && v.Edge == 2 {
+				aReachedOutbound = true
+			}
+			if v.ID == 2 && v.Edge == 3 {
+				bReachedOutbound = true
+			}
+		}
+	}
+
+	if !aReachedOutbound {
+		t.Error("AllWayStop left turner A should have made it through (mutual lefts pass)")
+	}
+	if !bReachedOutbound {
+		t.Error("AllWayStop left turner B should have made it through (mutual lefts pass)")
+	}
+}
+
+// TestWorld_LeftTurn_AllWayStop_CrossTrafficLeftDoesYield: at a 4-way
+// AllWayStop, a left turner must NOT proceed simultaneously with a
+// cross-traffic left turner — their paths cross. Mutual-left only
+// applies to opposing approaches.
+func TestWorld_LeftTurn_AllWayStop_CrossTrafficLeftDoesYield(t *testing.T) {
+	// 4-way: N, E, S, W approaches all AllWayStop.
+	// A: N approach turning left (heading east).
+	// B: E approach turning left (heading south).
+	// They are cross-traffic, NOT opposing. B paths through the center
+	// going south while A paths through going east — they collide.
+	// A is "lower position" so FIFO normally would let A go; the bug
+	// would also let B go (because both are left-turners). With the fix,
+	// B must yield to A.
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 100}},  // N
+		{ID: 1, Pos: network.Point{X: 100, Y: 0}},  // E
+		{ID: 2, Pos: network.Point{X: 0, Y: -100}}, // S
+		{ID: 3, Pos: network.Point{X: -100, Y: 0}}, // W
+		{ID: 4, Pos: network.Point{X: 0, Y: 0}},    // center
+		{ID: 5, Pos: network.Point{X: 200, Y: 0}},  // A's exit east
+		{ID: 6, Pos: network.Point{X: 0, Y: -200}}, // B's exit south
+	}
+	mkEdge := func(id, from, to int) network.Edge {
+		return network.Edge{
+			ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: 100, SpeedLimit: 10,
+			Lanes:    []network.Lane{{Index: 0}},
+			Geometry: []network.Point{nodes[from].Pos, nodes[to].Pos},
+		}
+	}
+	edges := []network.Edge{
+		mkEdge(0, 0, 4), // N->C  (A's approach)
+		mkEdge(1, 1, 4), // E->C  (B's approach)
+		mkEdge(2, 2, 4), // S->C
+		mkEdge(3, 3, 4), // W->C
+		mkEdge(4, 4, 5), // C->E (A's left turn)
+		mkEdge(5, 4, 6), // C->S (B's left turn)
+	}
+	// We need an Opposing relation that correctly pairs N with S and E with W.
+	// In Incoming order [0:N, 1:E, 2:S, 3:W]:
+	//   Opposing[0] = 2 (N opposes S)
+	//   Opposing[1] = 3 (E opposes W)
+	//   Opposing[2] = 0
+	//   Opposing[3] = 1
+	xs := []network.Intersection{
+		{
+			ID: 0, NodeID: 4,
+			Incoming: []network.EdgeID{0, 1, 2, 3},
+			IncomingControl: ctrls(
+				network.ControlAllWayStop, network.ControlAllWayStop,
+				network.ControlAllWayStop, network.ControlAllWayStop,
+			),
+			Opposing:  []int8{2, 3, 0, 1},
+			Outgoing:  []network.EdgeID{4, 5},
+			HasSignal: false,
+		},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0, 4}, Edge: 0, S: 98, V: 0.5}, // A: N->E left
+		{ID: 2, Route: []network.EdgeID{1, 5}, Edge: 1, S: 98, V: 0.5}, // B: E->S left
+	}
+	w.nextID = 3
+
+	// Stop both vehicles at the line simultaneously, then run.
+	// With identical StoppedSinceSec, FIFO tie-break (lower Incoming
+	// index wins) means A (position 0) goes first, B (position 1) yields.
+	// The mutual-left bug would have let both go simultaneously.
+	//
+	// We detect the bug by checking whether B is on its outbound edge (5)
+	// in the very first tick that A transitions onto its outbound edge (4).
+	// With the bug, both cross in the same tick; with the fix, B stays on
+	// edge 1 while A clears the intersection.
+	aEnteredOutboundTick := -1
+	bEnteredOutboundTick := -1
+	for i := 0; i < 600; i++ {
+		w.Step()
+		for j := range w.Vehicles {
+			v := &w.Vehicles[j]
+			if v.ID == 1 && v.Edge == 4 && aEnteredOutboundTick < 0 {
+				aEnteredOutboundTick = i
+			}
+			if v.ID == 2 && v.Edge == 5 && bEnteredOutboundTick < 0 {
+				bEnteredOutboundTick = i
+			}
+		}
+		if aEnteredOutboundTick >= 0 && bEnteredOutboundTick >= 0 {
+			break // both recorded; no need to run further
+		}
+	}
+
+	// B (cross-traffic left) must NOT enter its outbound edge in the same
+	// tick as A. With the fix, B yields until A has moved clear.
+	if aEnteredOutboundTick < 0 {
+		t.Fatal("vehicle A never reached its outbound edge")
+	}
+	if bEnteredOutboundTick < 0 {
+		t.Fatal("vehicle B never reached its outbound edge")
+	}
+	if bEnteredOutboundTick == aEnteredOutboundTick {
+		t.Errorf("cross-traffic left turner B (tick %d) entered outbound edge simultaneously with A (tick %d); mutual-left must not apply to cross-traffic", bEnteredOutboundTick, aEnteredOutboundTick)
 	}
 }

@@ -192,6 +192,11 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 	}
 	resolveControls(intersections, feat, osmWayOfEdge, osmNodeOf)
 
+	// Resolve opposing approaches for left-turn yield logic. Needs
+	// edge geometry; build a partial *Network containing just edges.
+	partialNet := &network.Network{Edges: edges}
+	resolveOpposing(intersections, partialNet)
+
 	// 6b. Resolve OSM turn restriction relations to BannedTurns on the
 	// intersections (writes through pointers into the slice).
 	report.RestrictionsApplied, report.RestrictionsSkipped =
@@ -413,14 +418,19 @@ func buildIntersections(nodes []network.Node, edges []network.Edge,
 			continue
 		}
 		ctrl := make([]network.Control, len(incE))
-		// Default to ControlNone for every approach. Real per-approach
-		// values are assigned later in resolveControls (called after
-		// sortIncomingByPriority).
+		opp := make([]int8, len(incE))
+		for k := range opp {
+			opp[k] = -1
+		}
+		// Defaults: ControlNone for every approach; Opposing[i] = -1.
+		// Real values are assigned later in resolveControls and
+		// resolveOpposing (both called after sortIncomingByPriority).
 		xs = append(xs, network.Intersection{
 			ID:              network.IntersectionID(len(xs)),
 			NodeID:          n.ID,
 			Incoming:        incE,
 			IncomingControl: ctrl,
+			Opposing:        opp,
 			Outgoing:        outE,
 			HasSignal:       signalNodes[n.ID],
 		})

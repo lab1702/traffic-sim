@@ -232,6 +232,104 @@ func TestNetbuild_HighwayGiveWayOnNode(t *testing.T) {
 	}
 }
 
+// TestNetbuild_Opposing_CoSortsWithIncoming: force a non-trivial
+// priority sort and verify that Opposing indices are correctly
+// remapped to point at the new positions. Uses an asymmetric Opposing
+// pattern to detect when the remap is missing (unlike a symmetric
+// pattern, which produces the same result whether remapped or not).
+func TestNetbuild_Opposing_CoSortsWithIncoming(t *testing.T) {
+	// 4-way: a "service" road (lower priority) meets a "primary" road.
+	// Pre-sort, Incoming order is whatever buildIntersections produces.
+	// Post-sort, the primary approaches must be at positions 0 and 1.
+	// Manually set Opposing on a fixture to verify remapping.
+	xs := []network.Intersection{
+		{
+			ID:       0,
+			NodeID:   0,
+			Incoming: []network.EdgeID{0, 1, 2, 3},
+			Opposing: []int8{2, -1, -1, 0}, // asymmetric pattern; only approaches 0 and 2 are paired
+		},
+	}
+	// osmWayOfEdge[i] = WayID, so we can fake highway priorities via the
+	// way tags. Edges 0, 1 are on a service road; 2, 3 on a primary.
+	feat := &osmload.Features{}
+	feat.Ways = []*osm.Way{
+		{ID: 100, Tags: []osm.Tag{{Key: "highway", Value: "service"}}},
+		{ID: 200, Tags: []osm.Tag{{Key: "highway", Value: "primary"}}},
+	}
+	osmWayOfEdge := []osm.WayID{100, 100, 200, 200}
+
+	sortIncomingByPriority(xs, osmWayOfEdge, feat)
+
+	x := xs[0]
+	// Verify Incoming is now [2, 3, 0, 1] (primary first, then service).
+	wantIncoming := []network.EdgeID{2, 3, 0, 1}
+	for i := range wantIncoming {
+		if x.Incoming[i] != wantIncoming[i] {
+			t.Errorf("Incoming[%d] = %d, want %d", i, x.Incoming[i], wantIncoming[i])
+		}
+	}
+	// Verify Opposing was remapped:
+	//   Pre-sort: Incoming=[0,1,2,3], Opposing=[2,-1,-1,0]
+	//   Post-sort: Incoming=[2,3,0,1]  (sort swaps the primary/service pairs)
+	//   oldToNew = {0:2, 1:3, 2:0, 3:1}.
+	//   New Opposing[newI] = oldToNew[old Opposing[oldI]] (with -1 passthrough):
+	//     - newI=0 was oldI=2; oldOpposing[2]=-1; passes through -> -1.
+	//     - newI=1 was oldI=3; oldOpposing[3]=0;  remapped to oldToNew[0]=2.
+	//     - newI=2 was oldI=0; oldOpposing[0]=2;  remapped to oldToNew[2]=0.
+	//     - newI=3 was oldI=1; oldOpposing[1]=-1; passes through -> -1.
+	wantOpposing := []int8{-1, 2, 0, -1}
+	for i := range wantOpposing {
+		if x.Opposing[i] != wantOpposing[i] {
+			t.Errorf("Opposing[%d] = %d, want %d", i, x.Opposing[i], wantOpposing[i])
+		}
+	}
+}
+
+// TestNetbuild_Opposing_FourWay: a 4-way + intersection. The N and S
+// approaches pair; the E and W approaches pair.
+func TestNetbuild_Opposing_FourWay(t *testing.T) {
+	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
+		1: mkNode(1, 40.0010, -74.0005), // N origin
+		2: mkNode(2, 40.0000, -74.0010), // W origin
+		3: mkNode(3, 40.0000, -74.0005), // center
+		4: mkNode(4, 40.0000, -74.0000), // E origin (approaches center from east)
+		5: mkNode(5, 39.9990, -74.0005), // S origin
+	}}
+	feat.Ways = []*osm.Way{
+		mkWay(10, "residential", false, 1, 3, 5), // N-S road
+		mkWay(20, "residential", false, 2, 3, 4), // W-E road
+	}
+
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(net.Intersections) != 1 {
+		t.Fatalf("want 1 intersection, got %d", len(net.Intersections))
+	}
+	x := net.Intersections[0]
+	if len(x.Opposing) != len(x.Incoming) {
+		t.Fatalf("Opposing length %d != Incoming length %d", len(x.Opposing), len(x.Incoming))
+	}
+	// Every approach must have an opposing approach in a 4-way.
+	for i := range x.Incoming {
+		if x.Opposing[i] < 0 {
+			t.Errorf("approach %d (edge %d) has no opposing", i, x.Incoming[i])
+		}
+	}
+	// Symmetry.
+	for i := range x.Incoming {
+		j := int(x.Opposing[i])
+		if j < 0 {
+			continue
+		}
+		if int(x.Opposing[j]) != i {
+			t.Errorf("non-symmetric: Opposing[%d]=%d but Opposing[%d]=%d", i, j, j, x.Opposing[j])
+		}
+	}
+}
+
 // buildNetToOSM is a position-based reverse map: each network NodeID gets
 // matched to the OSM NodeID whose projected (lat, lon) lands at the same
 // planar position. Computed fresh per call; only used in tests on tiny fixtures.
@@ -275,4 +373,85 @@ func buildNetToOSM(net *network.Network, feat *osmload.Features) map[network.Nod
 		out[network.NodeID(nid)] = best
 	}
 	return out
+}
+
+// TestNetbuild_Opposing_TThrough: T-intersection. The two through-road
+// approaches pair with each other; the stem approach gets -1.
+func TestNetbuild_Opposing_TThrough(t *testing.T) {
+	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
+		1: mkNode(1, 40.0000, -74.0010), // W origin (through)
+		2: mkNode(2, 40.0000, -74.0005), // center
+		3: mkNode(3, 40.0000, -74.0000), // E origin (through)
+		4: mkNode(4, 39.9990, -74.0005), // S origin (stem)
+	}}
+	feat.Ways = []*osm.Way{
+		mkWay(10, "residential", false, 1, 2, 3), // W-E through
+		mkWay(20, "residential", false, 4, 2),    // S stem
+	}
+
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(net.Intersections) != 1 {
+		t.Fatalf("want 1 intersection, got %d", len(net.Intersections))
+	}
+	x := net.Intersections[0]
+	// Three approaches: two through (W-arrival and E-arrival) and one
+	// stem (N-arrival from south, i.e., heading north into the
+	// intersection). The two through ones must pair; the stem must
+	// have Opposing = -1.
+	pairedCount := 0
+	stemCount := 0
+	for i := range x.Incoming {
+		if x.Opposing[i] >= 0 {
+			pairedCount++
+		} else {
+			stemCount++
+		}
+	}
+	if pairedCount != 2 {
+		t.Errorf("want 2 paired approaches, got %d", pairedCount)
+	}
+	if stemCount != 1 {
+		t.Errorf("want 1 unpaired stem approach, got %d", stemCount)
+	}
+}
+
+// TestNetbuild_Opposing_Symmetric: across a mixed-geometry network,
+// Opposing[Opposing[i]] == i whenever Opposing[i] != -1.
+func TestNetbuild_Opposing_Symmetric(t *testing.T) {
+	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
+		// Two adjacent 4-ways sharing a node.
+		1: mkNode(1, 40.0020, -74.0005),
+		2: mkNode(2, 40.0010, -74.0010),
+		3: mkNode(3, 40.0010, -74.0005), // first center
+		4: mkNode(4, 40.0010, -74.0000),
+		5: mkNode(5, 40.0000, -74.0005), // second center
+		6: mkNode(6, 40.0000, -74.0010),
+		7: mkNode(7, 40.0000, -74.0000),
+		8: mkNode(8, 39.9990, -74.0005),
+	}}
+	feat.Ways = []*osm.Way{
+		mkWay(10, "residential", false, 1, 3, 5, 8), // N-S spine
+		mkWay(20, "residential", false, 2, 3, 4),    // first E-W
+		mkWay(30, "residential", false, 6, 5, 7),    // second E-W
+	}
+
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	for xi, x := range net.Intersections {
+		for i := range x.Incoming {
+			j := int(x.Opposing[i])
+			if j < 0 {
+				continue
+			}
+			back := int(x.Opposing[j])
+			if back != i {
+				t.Errorf("intersection %d: Opposing[%d]=%d but Opposing[%d]=%d (not symmetric)", xi, i, j, j, back)
+			}
+		}
+	}
 }
