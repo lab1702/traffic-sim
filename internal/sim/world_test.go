@@ -1711,3 +1711,140 @@ func TestWorld_LeftTurn_SignaledRed_NotAffected(t *testing.T) {
 		t.Errorf("vehicle legitimately stopped at red; StuckTime must be 0, got %.3f", v.StuckTime)
 	}
 }
+
+// TestWorld_LeftTurn_AllWayStop_YieldsToOpposing: at an AllWayStop with
+// two opposing approaches, the left turner (after dwell + FIFO clears)
+// must yield to the opposing through.
+func TestWorld_LeftTurn_AllWayStop_YieldsToOpposing(t *testing.T) {
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 100}},
+		{ID: 1, Pos: network.Point{X: 0, Y: -100}},
+		{ID: 2, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 3, Pos: network.Point{X: 100, Y: 0}}, // E destination (A's left)
+		{ID: 4, Pos: network.Point{X: 0, Y: 200}}, // N destination (B's through)
+	}
+	mkEdge := func(id, from, to int) network.Edge {
+		return network.Edge{
+			ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: 100, SpeedLimit: 10,
+			Lanes:    []network.Lane{{Index: 0}},
+			Geometry: []network.Point{nodes[from].Pos, nodes[to].Pos},
+		}
+	}
+	edges := []network.Edge{
+		mkEdge(0, 0, 2),
+		mkEdge(1, 1, 2),
+		mkEdge(2, 2, 3), // C->E (A's left turn)
+		mkEdge(3, 2, 4), // C->N (B's through)
+	}
+	xs := []network.Intersection{
+		{
+			ID: 0, NodeID: 2,
+			Incoming:        []network.EdgeID{0, 1},
+			IncomingControl: ctrls(network.ControlAllWayStop, network.ControlAllWayStop),
+			Opposing:        []int8{1, 0},
+			Outgoing:        []network.EdgeID{2, 3},
+			HasSignal:       false,
+		},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0, 2}, Edge: 0, S: 80, V: 5},   // A: left
+		{ID: 2, Route: []network.EdgeID{1, 3}, Edge: 1, S: 98, V: 0.5}, // B: through, pinned imminent
+	}
+	w.nextID = 3
+
+	for i := 0; i < 500; i++ {
+		for j := range w.Vehicles {
+			if w.Vehicles[j].ID == 2 && !w.Vehicles[j].Despawned {
+				w.Vehicles[j].S = 98
+				w.Vehicles[j].V = 0.5
+			}
+		}
+		w.Step()
+	}
+
+	var a *Vehicle
+	for j := range w.Vehicles {
+		if w.Vehicles[j].ID == 1 {
+			a = &w.Vehicles[j]
+		}
+	}
+	if a == nil || a.Despawned {
+		t.Fatal("AllWayStop left turner should not be despawned during legitimate yield")
+	}
+	if a.Edge != 0 {
+		t.Errorf("AllWayStop left turner should still be on approach edge 0, got edge %d", a.Edge)
+	}
+	if a.StuckTime != 0 {
+		t.Errorf("StuckTime must be 0 for legitimate yielder, got %.3f", a.StuckTime)
+	}
+}
+
+// TestWorld_LeftTurn_AllWayStop_BothLeftsPass: at an AllWayStop, two
+// opposing left turners both proceed simultaneously after dwell.
+func TestWorld_LeftTurn_AllWayStop_BothLeftsPass(t *testing.T) {
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 100}},
+		{ID: 1, Pos: network.Point{X: 0, Y: -100}},
+		{ID: 2, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 3, Pos: network.Point{X: 100, Y: 0}},  // E destination (A's left from southbound)
+		{ID: 4, Pos: network.Point{X: -100, Y: 0}}, // W destination (B's left from northbound)
+	}
+	mkEdge := func(id, from, to int) network.Edge {
+		return network.Edge{
+			ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: 100, SpeedLimit: 10,
+			Lanes:    []network.Lane{{Index: 0}},
+			Geometry: []network.Point{nodes[from].Pos, nodes[to].Pos},
+		}
+	}
+	edges := []network.Edge{
+		mkEdge(0, 0, 2),
+		mkEdge(1, 1, 2),
+		mkEdge(2, 2, 3), // C->E (A's left)
+		mkEdge(3, 2, 4), // C->W (B's left)
+	}
+	xs := []network.Intersection{
+		{
+			ID: 0, NodeID: 2,
+			Incoming:        []network.EdgeID{0, 1},
+			IncomingControl: ctrls(network.ControlAllWayStop, network.ControlAllWayStop),
+			Opposing:        []int8{1, 0},
+			Outgoing:        []network.EdgeID{2, 3},
+			HasSignal:       false,
+		},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0, 2}, Edge: 0, S: 80, V: 5}, // A: left
+		{ID: 2, Route: []network.EdgeID{1, 3}, Edge: 1, S: 80, V: 5}, // B: left
+	}
+	w.nextID = 3
+
+	// Run simulation and track when both vehicles reach their outbound edges.
+	aReachedOutbound, bReachedOutbound := false, false
+	for i := 0; i < 400; i++ {
+		w.Step()
+		for j := range w.Vehicles {
+			v := &w.Vehicles[j]
+			if v.ID == 1 && v.Edge == 2 {
+				aReachedOutbound = true
+			}
+			if v.ID == 2 && v.Edge == 3 {
+				bReachedOutbound = true
+			}
+		}
+	}
+
+	if !aReachedOutbound {
+		t.Error("AllWayStop left turner A should have made it through (mutual lefts pass)")
+	}
+	if !bReachedOutbound {
+		t.Error("AllWayStop left turner B should have made it through (mutual lefts pass)")
+	}
+}

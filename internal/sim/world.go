@@ -394,10 +394,21 @@ func (w *World) yieldGapCheck(v *Vehicle, x *network.Intersection, myPos int,
 // its mandatory-stop dwell, it scans every other approach for a lead
 // vehicle that came to a complete stop earlier than v. If one exists, we
 // yield. Otherwise we proceed. Ties (same StoppedSinceSec) are broken by
-// lower Incoming index winning.
+// lower Incoming index winning. Exception: if both v and the lead are
+// making left turns from opposing approaches, both proceed simultaneously
+// (mutual-left pass).
 func (w *World) allWayStopFIFO(v *Vehicle, x *network.Intersection, myPos int,
 	myDist float64, byEdge map[network.EdgeID][]int,
 ) (float64, bool) {
+	// Check if v is making a left turn.
+	vIsLeftTurn := false
+	if v.RouteIdx+1 < len(v.Route) {
+		nextEdge := v.Route[v.RouteIdx+1]
+		if network.ClassifyTurn(w.Net, v.Edge, nextEdge) == network.TurnLeft {
+			vIsLeftTurn = true
+		}
+	}
+
 	for j := range x.Incoming {
 		if j == myPos {
 			continue
@@ -426,6 +437,22 @@ func (w *World) allWayStopFIFO(v *Vehicle, x *network.Intersection, myPos int,
 		if lead.StoppedSinceSec == 0 {
 			continue // not yet stopped; hasn't earned a FIFO slot
 		}
+
+		// Check if the opposing lead is also making a left turn.
+		oppIsLeftTurn := false
+		if lead.RouteIdx+1 < len(lead.Route) {
+			nextEdge := lead.Route[lead.RouteIdx+1]
+			if network.ClassifyTurn(w.Net, lead.Edge, nextEdge) == network.TurnLeft {
+				oppIsLeftTurn = true
+			}
+		}
+
+		// Mutual-left pass: if both are turning left from opposing approaches,
+		// both proceed simultaneously.
+		if vIsLeftTurn && oppIsLeftTurn {
+			continue // don't yield to opposing left-turner
+		}
+
 		if lead.StoppedSinceSec < v.StoppedSinceSec {
 			return myDist, true // they stopped first; we yield
 		}
