@@ -54,9 +54,12 @@ type Vehicle struct {
 
 	// WaitTime accumulates sim-seconds during which the vehicle is
 	// effectively stopped (V < stuckSpeedThresh) AND yielding via
-	// gap-acceptance (mustYield or mustYieldLT). Resets to 0 the moment
-	// either condition stops being true. Drives the impatience curve
-	// in effectiveGap; does NOT apply to red lights.
+	// gap-acceptance (mustYield or mustYieldLT). Monotonic within an
+	// approach edge — the ONLY reset point is the edge transition in
+	// stepIDM. This is intentional: once impatience accepts the gap,
+	// WaitTime stays high so effectiveGap stays low, committing the
+	// vehicle to crossing. Resetting on movement would cause a
+	// flip-flop oscillation at the line. Does NOT apply to red lights.
 	WaitTime float64
 
 	// LastLCDir records the direction of the most recent lane change in

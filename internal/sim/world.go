@@ -382,11 +382,12 @@ func (w *World) maybeMarkStopped(v *Vehicle, myDist float64) {
 // Applies the per-driver GapFactor multiplier and shrinks linearly
 // with WaitTime, floored at minAcceptedGap.
 //
-// A zero GapFactor on a hand-built test vehicle is treated as 1.0 so
-// existing fixtures don't have to be updated.
+// A zero or negative GapFactor is treated as 1.0 — covers hand-built
+// test vehicles (default zero value) and protects against any future
+// construction path that fails to sample a valid factor.
 func effectiveGap(v *Vehicle, baseGap float64) float64 {
 	factor := v.GapFactor
-	if factor == 0 {
+	if factor <= 0 {
 		factor = 1.0
 	}
 	g := baseGap*factor - impatienceDecayRate*v.WaitTime
