@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/lab1702/traffic-sim/internal/network"
+	"github.com/lab1702/traffic-sim/internal/osmload"
 	"github.com/paulmach/osm"
 )
 
@@ -29,6 +30,8 @@ func applyOSMRestrictions(
 	edges []network.Edge,
 	osmWayOfEdge []osm.WayID,
 	osmToNet map[osm.NodeID]network.NodeID,
+	feat *osmload.Features,
+	osmNodeOf func(network.NodeID) (osm.NodeID, bool),
 	restrictions []*osm.Relation,
 ) (applied, skipped int) {
 	if len(restrictions) == 0 {
@@ -52,8 +55,15 @@ func applyOSMRestrictions(
 		xAtNode[intersections[i].NodeID] = &intersections[i]
 	}
 
+	// Way table for direction-aware from/to edge disambiguation when a
+	// way passes through the via node (multiple candidate edges).
+	wayByID := make(map[osm.WayID]*osm.Way, len(feat.Ways))
+	for _, w := range feat.Ways {
+		wayByID[w.ID] = w
+	}
+
 	for _, r := range restrictions {
-		if applyOne(r, edges, wayToEdges, osmToNet, xAtNode) {
+		if applyOne(r, edges, wayToEdges, osmToNet, xAtNode, wayByID, osmNodeOf) {
 			applied++
 		} else {
 			skipped++
@@ -70,6 +80,8 @@ func applyOne(
 	wayToEdges map[osm.WayID][]network.EdgeID,
 	osmToNet map[osm.NodeID]network.NodeID,
 	xAtNode map[network.NodeID]*network.Intersection,
+	wayByID map[osm.WayID]*osm.Way,
+	osmNodeOf func(network.NodeID) (osm.NodeID, bool),
 ) bool {
 	// 1. Extract restriction tag value. Conditional/role-restricted variants
 	// (restriction:hgv=*, restriction:conditional=*) are ignored — we only
@@ -125,12 +137,16 @@ func applyOne(
 	}
 
 	// 4. Find the from edge: belongs to fromWay AND ends at viaNet.
-	fromEdge, ok := pickEdgeAt(wayToEdges[fromWay], edges, viaNet, true /*ends-at*/)
+	//    For through-ways (way passes through via), multiple candidates match;
+	//    prefer the one in the way's forward direction.
+	fromEdge, ok := pickEdgeAt(wayToEdges[fromWay], edges, viaNet, true /*ends-at*/,
+		wayByID[fromWay], viaNode, osmNodeOf)
 	if !ok {
 		return false
 	}
 	// 5. Find the to edge: belongs to toWay AND starts at viaNet.
-	toEdge, ok := pickEdgeAt(wayToEdges[toWay], edges, viaNet, false /*starts-at*/)
+	toEdge, ok := pickEdgeAt(wayToEdges[toWay], edges, viaNet, false /*starts-at*/,
+		wayByID[toWay], viaNode, osmNodeOf)
 	if !ok {
 		return false
 	}
@@ -169,24 +185,95 @@ func applyOne(
 	}
 }
 
-// pickEdgeAt returns the first edge in `candidates` whose To (if endsAt
-// is true) or From (if false) equals `node`. Returns (0, false) if none
-// match — meaning the relation's from/to way doesn't actually touch the
-// via node in our graph (often happens when the way was pruned).
-func pickEdgeAt(candidates []network.EdgeID, edges []network.Edge, node network.NodeID, endsAt bool) (network.EdgeID, bool) {
+// pickEdgeAt returns the edge in `candidates` whose To (if endsAt is true)
+// or From (if false) equals `node`. Returns (0, false) if no candidate
+// touches the via node — usually because the way was pruned.
+//
+// For through-ways (the way passes through the via node), more than one
+// candidate matches: a 3-node way [A, X, B] yields four directed edges,
+// two of which "end at X" (forward A→X, reverse B→X) and two of which
+// "start at X" (forward X→B, reverse X→A). The OSM convention is to
+// interpret the from/to way in the way's forward direction (low → high
+// node index). When `way` is non-nil and the via node is locatable
+// inside it, prefer:
+//
+//   - endsAt:  the edge whose From-OSM-node has a lower way-index than via
+//     (i.e., the forward-direction segment entering via).
+//   - !endsAt: the edge whose To-OSM-node has a higher way-index than via
+//     (i.e., the forward-direction segment leaving via).
+//
+// Falls back to the first slice-order match if disambiguation isn't
+// possible (way unknown, via not found in way, edge endpoints missing).
+func pickEdgeAt(
+	candidates []network.EdgeID, edges []network.Edge, node network.NodeID, endsAt bool,
+	way *osm.Way, viaOSM osm.NodeID, osmNodeOf func(network.NodeID) (osm.NodeID, bool),
+) (network.EdgeID, bool) {
+	var matches []network.EdgeID
 	for _, eid := range candidates {
 		if int(eid) >= len(edges) {
 			continue
 		}
 		e := &edges[eid]
 		if endsAt && e.To == node {
-			return eid, true
+			matches = append(matches, eid)
 		}
 		if !endsAt && e.From == node {
+			matches = append(matches, eid)
+		}
+	}
+	if len(matches) == 0 {
+		return 0, false
+	}
+	if len(matches) == 1 || way == nil {
+		return matches[0], true
+	}
+
+	// Locate via in the way's node sequence.
+	viaIdx := -1
+	for i, n := range way.Nodes {
+		if n.ID == viaOSM {
+			viaIdx = i
+			break
+		}
+	}
+	if viaIdx < 0 {
+		return matches[0], true
+	}
+
+	// idxInWay returns the position of a network node's OSM id within the
+	// way, or -1 if not found / unresolvable.
+	idxInWay := func(nid network.NodeID) int {
+		o, ok := osmNodeOf(nid)
+		if !ok {
+			return -1
+		}
+		for i, n := range way.Nodes {
+			if n.ID == o {
+				return i
+			}
+		}
+		return -1
+	}
+
+	for _, eid := range matches {
+		var probe network.NodeID
+		if endsAt {
+			probe = edges[eid].From
+		} else {
+			probe = edges[eid].To
+		}
+		idx := idxInWay(probe)
+		if idx < 0 {
+			continue
+		}
+		if endsAt && idx < viaIdx {
+			return eid, true
+		}
+		if !endsAt && idx > viaIdx {
 			return eid, true
 		}
 	}
-	return 0, false
+	return matches[0], true
 }
 
 func containsEdge(slice []network.EdgeID, target network.EdgeID) bool {

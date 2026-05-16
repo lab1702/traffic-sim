@@ -330,3 +330,55 @@ func TestBuild_AppliesNoLeftTurnRestriction(t *testing.T) {
 			cat, network.TurnAngle(net, tr.From, tr.To))
 	}
 }
+
+// TestBuild_ThroughWayRestriction_DirectionAware loads a fixture where the
+// from-way of a turn restriction passes *through* the via node. Multiple
+// edges end at the via (forward and reverse direction); applyOSMRestrictions
+// must pick the forward-direction edge so the restriction matches the OSM
+// convention. This guards against pickEdgeAt returning whichever candidate
+// happens to appear first in slice order.
+//
+// Regression: see review #4 (2026-05-15).
+func TestBuild_ThroughWayRestriction_DirectionAware(t *testing.T) {
+	feat, err := osmload.Load("../osmload/testdata/with_through_restriction.osm")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	net, rpt, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if rpt.RestrictionsApplied != 1 {
+		t.Fatalf("RestrictionsApplied: want 1, got %d (skipped=%d)", rpt.RestrictionsApplied, rpt.RestrictionsSkipped)
+	}
+	if len(net.Intersections) == 0 {
+		t.Fatal("no intersections after build")
+	}
+
+	// Find the via intersection — it's the only one with BannedTurns.
+	var via *network.Intersection
+	for i := range net.Intersections {
+		if len(net.Intersections[i].BannedTurns) > 0 {
+			via = &net.Intersections[i]
+			break
+		}
+	}
+	if via == nil {
+		t.Fatal("no intersection has BannedTurns")
+	}
+	if got := len(via.BannedTurns); got != 1 {
+		t.Fatalf("via should have exactly 1 BannedTurn, got %d", got)
+	}
+
+	// The fixture's geometry is set up so that the *forward-direction*
+	// from-edge yields a left turn onto the to way (westbound vehicle
+	// turning south). If pickEdgeAt picked the reverse-direction edge
+	// instead (eastbound), the same turn would classify as TurnRight.
+	tr := via.BannedTurns[0]
+	cat := network.ClassifyTurn(net, tr.From, tr.To)
+	if cat != network.TurnLeft {
+		t.Errorf("banned turn should classify as TurnLeft (forward-direction from-edge); got %v (angle=%.3f rad). "+
+			"This usually means pickEdgeAt chose the reverse-direction from-edge.",
+			cat, network.TurnAngle(net, tr.From, tr.To))
+	}
+}

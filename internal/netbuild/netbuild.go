@@ -200,7 +200,8 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 	// 6b. Resolve OSM turn restriction relations to BannedTurns on the
 	// intersections (writes through pointers into the slice).
 	report.RestrictionsApplied, report.RestrictionsSkipped =
-		applyOSMRestrictions(intersections, edges, osmWayOfEdge, osmToNet, feat.Restrictions)
+		applyOSMRestrictions(intersections, edges, osmWayOfEdge, osmToNet,
+			feat, osmNodeOf, feat.Restrictions)
 
 	// 6c. Populate Lane.AllowedTurns per the turn-aware-lane-choice design.
 	// Done after restrictions so BannedTurns is authoritative.
@@ -535,6 +536,16 @@ func keepLargestComponent(nodes []network.Node, edges []network.Edge,
 		x.NodeID = newNode
 		x.Incoming = inc[newNode]
 		x.Outgoing = out[newNode]
+		// Resize IncomingControl and Opposing to match the new Incoming
+		// length. Pruning can drop incoming edges from surviving
+		// intersections (e.g. an isolated spur), and the downstream
+		// sort/resolve passes rely on len(IncomingControl) == len(Incoming).
+		// Reset to defaults (ControlNone / -1); real values are filled later.
+		x.IncomingControl = make([]network.Control, len(x.Incoming))
+		x.Opposing = make([]int8, len(x.Incoming))
+		for k := range x.Opposing {
+			x.Opposing[k] = -1
+		}
 		newXs = append(newXs, x)
 	}
 	dropped := len(size) - 1
