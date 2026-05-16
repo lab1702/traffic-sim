@@ -73,3 +73,20 @@ func TestLoad_UnknownExtension(t *testing.T) {
 		t.Errorf("error should mention filename or be about extension, got: %v", err)
 	}
 }
+
+func TestLoad_RetainsSignNodes(t *testing.T) {
+	f, err := Load("testdata/sign_nodes.osm")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	// Nodes 1-3 referenced by the kept way; nodes 10-13 retained only
+	// because of sign tags; node 99 not referenced and not signed.
+	for _, id := range []osm.NodeID{10, 11, 12, 13} {
+		if _, ok := f.Nodes[id]; !ok {
+			t.Errorf("node %d should be retained (carries sign tag), missing", id)
+		}
+	}
+	if _, ok := f.Nodes[99]; ok {
+		t.Errorf("node 99 should be dropped (unreferenced, untagged)")
+	}
+}

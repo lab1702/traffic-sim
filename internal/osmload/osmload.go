@@ -91,7 +91,7 @@ func collect(s scanner) (*Features, error) {
 		}
 	}
 	for _, n := range allNodes {
-		if want[n.ID] || hasTag(n.Tags, "highway", "traffic_signals") {
+		if want[n.ID] || isControlNode(n.Tags) {
 			feat.Nodes[n.ID] = n
 		}
 	}
@@ -135,6 +135,22 @@ func isTurnRestriction(r *osm.Relation) bool {
 func hasTag(tags osm.Tags, key, value string) bool {
 	for _, t := range tags {
 		if t.Key == key && t.Value == value {
+			return true
+		}
+	}
+	return false
+}
+
+// isControlNode reports whether a node carries any tag that affects
+// intersection right-of-way: traffic signal, stop sign, yield sign, or
+// the way-scoped stop=all / stop=minor attribute (which is on the
+// intersection node in OSM convention).
+func isControlNode(tags osm.Tags) bool {
+	for _, t := range tags {
+		if t.Key == "highway" && (t.Value == "traffic_signals" || t.Value == "stop" || t.Value == "give_way") {
+			return true
+		}
+		if t.Key == "stop" && (t.Value == "all" || t.Value == "minor") {
 			return true
 		}
 	}

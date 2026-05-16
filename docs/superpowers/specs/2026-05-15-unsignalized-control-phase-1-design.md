@@ -147,9 +147,10 @@ stopDwellSec = 0.5
 
 // stopLineTolMeters is the maximum distance from the stop line at
 // which a slow-moving vehicle (V < stuckSpeedThresh) is considered
-// to have arrived at the line. Beyond this, the vehicle is "slow
-// upstream" but not yet stopped.
-stopLineTolMeters = 2.0
+// to have arrived at the line. IDM's equilibrium gap at v≈0 is
+// S0 (2m) plus the vehicle length (5m), so the front bumper rests
+// about 7m from the end of the edge; 8m gives a 1m margin.
+stopLineTolMeters = 8.0
 ```
 
 `stuckSpeedThresh`, `gapThresholdSec`, and `stuckTimeoutSec` stay as-is.

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6">
+  <node id="1" lat="40.0000" lon="-74.0000"/>
+  <node id="2" lat="40.0010" lon="-74.0000"/>
+  <node id="3" lat="40.0020" lon="-74.0000"/>
+  <node id="10" lat="40.0030" lon="-74.0000">
+    <tag k="highway" v="stop"/>
+  </node>
+  <node id="11" lat="40.0040" lon="-74.0000">
+    <tag k="highway" v="give_way"/>
+  </node>
+  <node id="12" lat="40.0050" lon="-74.0000">
+    <tag k="stop" v="all"/>
+  </node>
+  <node id="13" lat="40.0060" lon="-74.0000">
+    <tag k="stop" v="minor"/>
+  </node>
+  <node id="99" lat="40.0500" lon="-74.0500"/>
+  <way id="100">
+    <nd ref="1"/>
+    <nd ref="2"/>
+    <nd ref="3"/>
+    <tag k="highway" v="residential"/>
+  </way>
+</osm>
