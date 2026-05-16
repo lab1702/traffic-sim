@@ -645,3 +645,83 @@ func TestNetbuild_DirectionMissingStillLenient(t *testing.T) {
 		}
 	}
 }
+
+// TestNetbuild_InteriorNodeGiveWay: same shape as InteriorNodeStop but
+// the interior tag is highway=give_way → ControlYield.
+func TestNetbuild_InteriorNodeGiveWay(t *testing.T) {
+	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
+		1: mkNode(1, 40.0000, -74.0010),
+		2: mkNode(2, 40.0010, -74.0005),
+		3: mkNode(3, 40.0000, -74.0000),
+		4: mkNode(4, 39.9990, -74.0005),
+		5: mkNode(5, 40.0000, -74.0005),
+		6: mkNode(6, 40.0000, -74.0008, "highway", "give_way"),
+	}}
+	feat.Ways = []*osm.Way{
+		mkWay(10, "primary", false, 1, 6, 5, 3),
+		mkWay(20, "service", false, 2, 5, 4),
+	}
+
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	x := net.Intersections[0]
+
+	var sawPrimaryYield bool
+	for i, eid := range x.Incoming {
+		hw := highwayOfEdge(net, eid, feat)
+		c := x.IncomingControl[i]
+		if hw == "primary" && c == network.ControlYield {
+			sawPrimaryYield = true
+		}
+	}
+	if !sawPrimaryYield {
+		t.Error("primary approach with interior give_way-tagged node should be ControlYield")
+	}
+}
+
+// TestNetbuild_InteriorNodeOverridesIntersectionNode: intersection node
+// has highway=give_way (which would set Yield on all approaches via
+// Section 1) AND one approach has an interior highway=stop. The
+// approach with the interior sign gets Stop (interior wins); other
+// approaches get Yield.
+func TestNetbuild_InteriorNodeOverridesIntersectionNode(t *testing.T) {
+	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
+		1: mkNode(1, 40.0000, -74.0010),
+		2: mkNode(2, 40.0010, -74.0005),
+		3: mkNode(3, 40.0000, -74.0000),
+		4: mkNode(4, 39.9990, -74.0005),
+		5: mkNode(5, 40.0000, -74.0005, "highway", "give_way"),  // intersection give_way
+		6: mkNode(6, 40.0000, -74.0008, "highway", "stop"),      // interior on W approach
+	}}
+	feat.Ways = []*osm.Way{
+		mkWay(10, "primary", false, 1, 6, 5, 3),
+		mkWay(20, "service", false, 2, 5, 4),
+	}
+
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	x := net.Intersections[0]
+
+	// W approach (primary, interior stop) -> Stop (interior wins).
+	// E approach (primary, no interior) -> Yield (from intersection-node tag).
+	// Service approaches -> Yield (from intersection-node tag).
+	stopCount, yieldCount := 0, 0
+	for i := range x.Incoming {
+		switch x.IncomingControl[i] {
+		case network.ControlStop:
+			stopCount++
+		case network.ControlYield:
+			yieldCount++
+		}
+	}
+	if stopCount != 1 {
+		t.Errorf("expected exactly 1 Stop (interior wins on W primary), got %d", stopCount)
+	}
+	if yieldCount < 1 {
+		t.Errorf("expected >=1 Yield from intersection-node tag, got %d", yieldCount)
+	}
+}
