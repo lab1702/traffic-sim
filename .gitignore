@@ -4,6 +4,8 @@
 *.out
 /bin/
 /dist/
+/trafficsim
+/tracereplay
 
 # Go test/coverage
 coverage.out
