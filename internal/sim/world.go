@@ -436,6 +436,24 @@ func (w *World) allWayStopFIFO(v *Vehicle, x *network.Intersection, myPos int,
 	return 0, false
 }
 
+// entitledToProceed reports whether v would otherwise proceed through
+// the intersection at the end of its current edge — i.e., neither
+// stopDistanceForRed nor stopDistanceForYield say to stop. Used by
+// leftTurnYieldsToOpposing to layer the left-turn check on top of
+// Phase 1's yield rules without double-stopping.
+//
+// stopDistanceForYield has an idempotent side effect (maybeMarkStopped);
+// calling it twice per tick is safe — the second call is a no-op.
+func (w *World) entitledToProceed(v *Vehicle, byEdge map[network.EdgeID][]int) bool {
+	if _, isRed := w.stopDistanceForRed(v); isRed {
+		return false
+	}
+	if _, mustYield := w.stopDistanceForYield(v, byEdge); mustYield {
+		return false
+	}
+	return true
+}
+
 // Step advances the sim by one tick (DefaultDt seconds).
 func (w *World) Step() {
 	// 0a. Drain any pending UI control events. Non-blocking; if the
