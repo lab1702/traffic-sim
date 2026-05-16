@@ -1570,3 +1570,144 @@ func TestWorld_LeftTurn_MutualLeftsPass(t *testing.T) {
 		t.Error("Vehicle B (left turner) should have made it through; opposing left should not block")
 	}
 }
+
+// TestWorld_LeftTurn_SignaledGreen_YieldsToOpposing: at a signaled
+// intersection in normal green, a left turner with opposing through
+// traffic must yield (permissive-left semantics).
+func TestWorld_LeftTurn_SignaledGreen_YieldsToOpposing(t *testing.T) {
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 100}},
+		{ID: 1, Pos: network.Point{X: 0, Y: -100}},
+		{ID: 2, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 3, Pos: network.Point{X: 100, Y: 0}},  // E destination (A's left)
+		{ID: 4, Pos: network.Point{X: 0, Y: 200}},  // N destination (B's through)
+	}
+	mkEdge := func(id, from, to int) network.Edge {
+		return network.Edge{
+			ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: 100, SpeedLimit: 10,
+			Lanes:    []network.Lane{{Index: 0}},
+			Geometry: []network.Point{nodes[from].Pos, nodes[to].Pos},
+		}
+	}
+	edges := []network.Edge{
+		mkEdge(0, 0, 2),
+		mkEdge(1, 1, 2),
+		mkEdge(2, 2, 3), // C->E (A's left turn)
+		mkEdge(3, 2, 4), // C->N (B's through)
+	}
+	xs := []network.Intersection{
+		{
+			ID: 0, NodeID: 2,
+			Incoming:        []network.EdgeID{0, 1},
+			IncomingControl: allNone(2), // signaled — not consulted in Normal
+			Opposing:        []int8{1, 0},
+			Outgoing:        []network.EdgeID{2, 3},
+			HasSignal:       true,
+		},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	// Single-phase signal: both N and S approaches always green.
+	w.SignalStates[0] = NewSignalState(SignalConfig{
+		Phases: []SignalPhase{{GreenEdges: []int{0, 1}, GreenDur: 1000, YellowDur: 0}},
+	})
+
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0, 2}, Edge: 0, S: 80, V: 5},
+		{ID: 2, Route: []network.EdgeID{1, 3}, Edge: 1, S: 98, V: 0.5},
+	}
+	w.nextID = 3
+
+	for i := 0; i < 300; i++ {
+		for j := range w.Vehicles {
+			if w.Vehicles[j].ID == 2 && !w.Vehicles[j].Despawned {
+				w.Vehicles[j].S = 98
+				w.Vehicles[j].V = 0.5
+			}
+		}
+		w.Step()
+	}
+
+	var a *Vehicle
+	for j := range w.Vehicles {
+		if w.Vehicles[j].ID == 1 {
+			a = &w.Vehicles[j]
+		}
+	}
+	if a == nil || a.Despawned {
+		t.Fatal("left turner should not be despawned during legitimate yield")
+	}
+	if a.Edge != 0 {
+		t.Errorf("permissive-left turner should still be on approach edge 0, got edge %d", a.Edge)
+	}
+	if a.StuckTime != 0 {
+		t.Errorf("StuckTime must be 0 for legitimate yielder, got %.3f", a.StuckTime)
+	}
+}
+
+// TestWorld_LeftTurn_SignaledRed_NotAffected: at a signaled intersection
+// where the left turner's approach is red, the existing hard-stop owns
+// the decision; the left-turn check must not double-stop (and the
+// vehicle's stuck-guard must not accumulate StuckTime).
+func TestWorld_LeftTurn_SignaledRed_NotAffected(t *testing.T) {
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 100}},
+		{ID: 1, Pos: network.Point{X: 0, Y: -100}},
+		{ID: 2, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 3, Pos: network.Point{X: 100, Y: 0}},  // E destination (A's left)
+		{ID: 4, Pos: network.Point{X: 0, Y: 200}},  // N destination
+	}
+	mkEdge := func(id, from, to int) network.Edge {
+		return network.Edge{
+			ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: 100, SpeedLimit: 10,
+			Lanes:    []network.Lane{{Index: 0}},
+			Geometry: []network.Point{nodes[from].Pos, nodes[to].Pos},
+		}
+	}
+	edges := []network.Edge{
+		mkEdge(0, 0, 2),
+		mkEdge(1, 1, 2),
+		mkEdge(2, 2, 3),
+		mkEdge(3, 2, 4),
+	}
+	xs := []network.Intersection{
+		{
+			ID: 0, NodeID: 2,
+			Incoming:        []network.EdgeID{0, 1},
+			IncomingControl: allNone(2),
+			Opposing:        []int8{1, 0},
+			Outgoing:        []network.EdgeID{2, 3},
+			HasSignal:       true,
+		},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	// Force the signal to all-red.
+	w.SignalStates[0] = NewSignalState(SignalConfig{
+		Phases: []SignalPhase{{GreenEdges: nil, GreenDur: 1000, YellowDur: 0}},
+	})
+
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0, 2}, Edge: 0, S: 50, V: 10}, // left turner, red approach
+	}
+	w.nextID = 2
+
+	for i := 0; i < 500; i++ {
+		w.Step()
+	}
+
+	if len(w.Vehicles) != 1 {
+		t.Fatalf("vehicle should be stopped at red, not despawned, got %d alive", len(w.Vehicles))
+	}
+	v := &w.Vehicles[0]
+	if v.V > 0.1 {
+		t.Errorf("vehicle should be stopped at red, V=%.2f", v.V)
+	}
+	if v.StuckTime != 0 {
+		t.Errorf("vehicle legitimately stopped at red; StuckTime must be 0, got %.3f", v.StuckTime)
+	}
+}
