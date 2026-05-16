@@ -106,12 +106,14 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 		dir := onewayDirection(w)
 		hwType := highwayType(w)
 		def := defaultsFor(hwType)
+		class := classOf(hwType)
 		// Forward and reverse may have different `maxspeed:forward`/`backward`
 		// tags. Resolve both up-front; fall back to the highway-type default.
 		// Same for lane counts.
 		speedFwd := parseSpeedForDirection(w, true, def.SpeedLimit)
 		speedBwd := parseSpeedForDirection(w, false, def.SpeedLimit)
 		lanesFwd, lanesBwd := parseLanesPerDirection(w, def.LanesPerDir)
+		width := wayWidthMeters(w, dir, lanesFwd, lanesBwd)
 
 		for _, seg := range segs {
 			if len(seg) < 2 {
@@ -151,7 +153,8 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 			case onewayForward:
 				edges = append(edges, network.Edge{
 					ID: network.EdgeID(len(edges)), From: fromID, To: toID,
-					Lanes: makeLanes(lanesFwd), Length: length, SpeedLimit: speedFwd, Geometry: geom,
+					Lanes: makeLanes(lanesFwd), Length: length, SpeedLimit: speedFwd,
+					Width: width, Class: class, Geometry: geom,
 				})
 				osmWayOfEdge = append(osmWayOfEdge, w.ID)
 				edgeIsForward = append(edgeIsForward, true)
@@ -163,7 +166,8 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 				revGeom := reverseGeom(geom)
 				edges = append(edges, network.Edge{
 					ID: network.EdgeID(len(edges)), From: toID, To: fromID,
-					Lanes: makeLanes(lanesBwd), Length: length, SpeedLimit: speedBwd, Geometry: revGeom,
+					Lanes: makeLanes(lanesBwd), Length: length, SpeedLimit: speedBwd,
+					Width: width, Class: class, Geometry: revGeom,
 				})
 				osmWayOfEdge = append(osmWayOfEdge, w.ID)
 				// Tag as the way's "forward" for turn-lane purposes (the
@@ -175,14 +179,16 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 			case onewayTwoWay:
 				edges = append(edges, network.Edge{
 					ID: network.EdgeID(len(edges)), From: fromID, To: toID,
-					Lanes: makeLanes(lanesFwd), Length: length, SpeedLimit: speedFwd, Geometry: geom,
+					Lanes: makeLanes(lanesFwd), Length: length, SpeedLimit: speedFwd,
+					Width: width, Class: class, Geometry: geom,
 				})
 				osmWayOfEdge = append(osmWayOfEdge, w.ID)
 				edgeIsForward = append(edgeIsForward, true)
 				revGeom := reverseGeom(geom)
 				edges = append(edges, network.Edge{
 					ID: network.EdgeID(len(edges)), From: toID, To: fromID,
-					Lanes: makeLanes(lanesBwd), Length: length, SpeedLimit: speedBwd, Geometry: revGeom,
+					Lanes: makeLanes(lanesBwd), Length: length, SpeedLimit: speedBwd,
+					Width: width, Class: class, Geometry: revGeom,
 				})
 				osmWayOfEdge = append(osmWayOfEdge, w.ID)
 				edgeIsForward = append(edgeIsForward, false)

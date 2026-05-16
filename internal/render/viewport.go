@@ -5,6 +5,7 @@ package render
 import (
 	"image/color"
 	"math"
+	"sort"
 	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
@@ -29,10 +30,41 @@ const (
 const vehicleLength = 5.0
 
 // laneWidth is how wide each lane is drawn in world meters. Used to
-// offset vehicles laterally so the lane they occupy is visible. Chosen
-// so a 1-lane two-way edge places vehicles 0.5*laneWidth = 1.8 m right
-// of the road centerline, matching the prior single-offset behavior.
-const laneWidth = 3.6
+// offset vehicles laterally so the lane they occupy is visible. Kept in
+// sync with network.LaneWidthMeters so netbuild's width estimate and the
+// renderer's lane offsets share the same assumption.
+const laneWidth = network.LaneWidthMeters
+
+// minRoadStrokePx is the minimum band thickness in pixels. Below this,
+// road geometry vanishes at low zoom; the floor keeps the network legible
+// as an outline when zoomed all the way out.
+const minRoadStrokePx = 1.5
+
+// roadColorByClass picks the band color for each OSM tier. Palette is
+// tuned for the dark map background ({20,20,24}): arterials keep a hint
+// of warm hue so the hierarchy is still legible, but every tier is dim
+// enough that vehicles (bright green/red) and turn signals (bright
+// yellow) own the foreground. Link variants collapse to their parent
+// class upstream, so ramps share the mainline's color.
+var roadColorByClass = map[network.RoadClass]color.RGBA{
+	network.ClassMotorway:     {110, 64, 26, 255}, // dark amber
+	network.ClassTrunk:        {100, 50, 38, 255}, // dark red-orange
+	network.ClassPrimary:      {95, 78, 38, 255},  // dark gold
+	network.ClassSecondary:    {80, 74, 46, 255},  // muted amber
+	network.ClassTertiary:     {64, 66, 56, 255},  // dim olive
+	network.ClassResidential:  {52, 54, 60, 255},  // dark cool gray
+	network.ClassUnclassified: {47, 49, 54, 255},  // dim gray
+	network.ClassLivingStreet: {44, 48, 53, 255},  // dark slate
+	network.ClassService:      {38, 40, 46, 255},  // barely above bg
+	network.ClassUnknown:      {42, 44, 50, 255},  // fallback
+}
+
+func roadColor(c network.RoadClass) color.RGBA {
+	if rc, ok := roadColorByClass[c]; ok {
+		return rc
+	}
+	return roadColorByClass[network.ClassUnknown]
+}
 
 // Thresholds for coloring vehicles by motion state. accelDeadband
 // classifies |A| below this as "steady speed" (not accel/decel).
@@ -85,6 +117,12 @@ type Viewport struct {
 	// decide whether to offset vehicles to the right of the centerline.
 	edgeHasReverse []bool
 
+	// edgeDrawOrder lists edge indices in the order they should be
+	// painted: low-priority classes (service, residential) first, then
+	// arterials on top so they remain visible where they cross local
+	// streets. Computed once at construction since Edge.Class is immutable.
+	edgeDrawOrder []int
+
 	// Pan/zoom state.
 	camX, camY float64 // world meters at screen center
 	zoom       float64 // pixels per meter
@@ -122,8 +160,23 @@ func NewViewport(net *network.Network, buf *snapshot.Buffer, w, h int) *Viewport
 	return &Viewport{
 		Net: net, Buf: buf, Width: w, Height: h,
 		edgeHasReverse: computeReverseEdgeMap(net),
+		edgeDrawOrder:  computeEdgeDrawOrder(net),
 		camX:           cx, camY: cy, zoom: z,
 	}
+}
+
+// computeEdgeDrawOrder returns edge indices sorted by ascending class
+// priority (low priority first) so arterials paint over local streets.
+// sort.SliceStable preserves source order within each class.
+func computeEdgeDrawOrder(net *network.Network) []int {
+	order := make([]int, len(net.Edges))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(a, b int) bool {
+		return net.Edges[order[a]].Class.Priority() < net.Edges[order[b]].Class.Priority()
+	})
+	return order
 }
 
 // computeReverseEdgeMap returns a parallel slice where entry i is true
@@ -274,16 +327,11 @@ func (v *Viewport) Draw(screen *ebiten.Image) {
 	bg := color.RGBA{20, 20, 24, 255}
 	screen.Fill(bg)
 
-	// Draw edges as polylines.
-	roadColor := color.RGBA{120, 120, 130, 255}
-	for i := range v.Net.Edges {
-		g := v.Net.Edges[i].Geometry
-		for j := 1; j < len(g); j++ {
-			x1, y1 := v.toScreen(g[j-1].X, g[j-1].Y)
-			x2, y2 := v.toScreen(g[j].X, g[j].Y)
-			vector.StrokeLine(screen, x1, y1, x2, y2, 1.5, roadColor, true)
-		}
-	}
+	// Draw edges as shaded bands sized by Edge.Width (OSM `width=*` tag
+	// when present, lane-count estimate otherwise). For two-way roads
+	// both directions carry the same Width and overlay each other on the
+	// shared centerline, painting a single band of the road's full width.
+	v.drawRoadBands(screen)
 
 	snap := v.Buf.Read()
 
@@ -419,6 +467,51 @@ func (v *Viewport) Draw(screen *ebiten.Image) {
 	if v.hasSelection {
 		// HUD lines start at y=8; selection panel starts just below them.
 		DrawSelectionPanel(screen, v.Net, snap, v.selectedID, 8+hudLineCount*hudLineHeight+8)
+	}
+}
+
+// drawRoadBands strokes each edge's polyline at a thickness derived from
+// Edge.Width (meters → pixels via the current zoom). Uses vector.Path with
+// round joins/caps so corners and dead-ends look clean. Single-segment
+// edges fall through to vector.StrokeLine since vector.Path is overkill
+// there.
+func (v *Viewport) drawRoadBands(screen *ebiten.Image) {
+	strokeOpts := &vector.StrokeOptions{
+		LineCap:  vector.LineCapRound,
+		LineJoin: vector.LineJoinRound,
+	}
+	drawOpts := &vector.DrawPathOptions{AntiAlias: true}
+	// ColorScale must be re-applied per edge since each class has its own
+	// color. Reset() between edges keeps successive ScaleWithColor calls
+	// from compounding into a multiplied tint.
+	for _, ei := range v.edgeDrawOrder {
+		e := &v.Net.Edges[ei]
+		g := e.Geometry
+		if len(g) < 2 {
+			continue
+		}
+		w := float32(e.Width * v.zoom)
+		if w < minRoadStrokePx {
+			w = minRoadStrokePx
+		}
+		clr := roadColor(e.Class)
+		if len(g) == 2 {
+			x1, y1 := v.toScreen(g[0].X, g[0].Y)
+			x2, y2 := v.toScreen(g[1].X, g[1].Y)
+			vector.StrokeLine(screen, x1, y1, x2, y2, w, clr, true)
+			continue
+		}
+		path := &vector.Path{}
+		x, y := v.toScreen(g[0].X, g[0].Y)
+		path.MoveTo(x, y)
+		for j := 1; j < len(g); j++ {
+			x, y = v.toScreen(g[j].X, g[j].Y)
+			path.LineTo(x, y)
+		}
+		strokeOpts.Width = w
+		drawOpts.ColorScale.Reset()
+		drawOpts.ColorScale.ScaleWithColor(clr)
+		vector.StrokePath(screen, path, strokeOpts, drawOpts)
 	}
 }
 

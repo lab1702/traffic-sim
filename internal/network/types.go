@@ -2,6 +2,57 @@
 // Sim and renderer both read these types without locks.
 package network
 
+// LaneWidthMeters is the assumed per-lane width when an OSM way has no
+// explicit `width=*` tag. Used both by netbuild (to estimate Edge.Width)
+// and by the renderer (to offset vehicles laterally within their lane).
+const LaneWidthMeters = 3.6
+
+// RoadClass names the OSM `highway=*` tier each edge belongs to. The
+// renderer maps classes to colors and to draw order (higher tiers render
+// on top). Link variants (motorway_link, trunk_link, …) collapse onto
+// their parent tier so a flyover ramp shares its mainline's color.
+type RoadClass uint8
+
+const (
+	ClassUnknown RoadClass = iota
+	ClassMotorway
+	ClassTrunk
+	ClassPrimary
+	ClassSecondary
+	ClassTertiary
+	ClassResidential
+	ClassUnclassified
+	ClassService
+	ClassLivingStreet
+)
+
+// Priority returns a draw-order weight: higher tiers draw last (on top).
+// Used by the renderer to keep arterials visible where they cross local
+// streets, mirroring the convention in standard OSM stylesheets.
+func (c RoadClass) Priority() int {
+	switch c {
+	case ClassMotorway:
+		return 9
+	case ClassTrunk:
+		return 8
+	case ClassPrimary:
+		return 7
+	case ClassSecondary:
+		return 6
+	case ClassTertiary:
+		return 5
+	case ClassResidential:
+		return 4
+	case ClassUnclassified:
+		return 3
+	case ClassLivingStreet:
+		return 2
+	case ClassService:
+		return 1
+	}
+	return 0
+}
+
 type (
 	NodeID         uint32
 	EdgeID         uint32
@@ -29,12 +80,20 @@ type Lane struct {
 
 // Edge is a directed road segment between two nodes. Two-way streets produce two Edges.
 // SpeedLimit is in m/s; Geometry includes both endpoints.
+//
+// Width is the total physical width of the road in meters, taken from the
+// OSM `width=*` tag when present or estimated from lane count otherwise.
+// For two-way roads, both directions' edges carry the same total width so
+// the renderer can paint a single band over the shared centerline. Width
+// is for rendering only; the simulation does not consult it.
 type Edge struct {
 	ID         EdgeID
 	From, To   NodeID
 	Lanes      []Lane
 	Length     float64 // meters
 	SpeedLimit float64 // m/s
+	Width      float64 // meters (total road width)
+	Class      RoadClass
 	Geometry   []Point // polyline including endpoints
 }
 
