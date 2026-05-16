@@ -28,6 +28,10 @@ func (w *Writer) writeHeader() error {
 }
 
 // Write encodes and writes a single event.
+//
+// Write does NOT buffer or own the underlying io.Writer. Callers wanting
+// crash-resilient output should wrap their *os.File in bufio.NewWriter
+// and Flush/Sync themselves on shutdown.
 func (w *Writer) Write(tick uint64, simTime float64, e Event) error {
 	if !w.headerWritten {
 		if err := w.writeHeader(); err != nil {
@@ -59,7 +63,9 @@ func (w *Writer) Write(tick uint64, simTime float64, e Event) error {
 	return err
 }
 
-// Close flushes the header if no events were written (empty trace).
+// Close ensures the file header has been written even if no events were
+// emitted. Does NOT close the underlying io.Writer — that responsibility
+// belongs to the caller (who also owns Flush/Sync on a bufio wrapper).
 func (w *Writer) Close() error {
 	if !w.headerWritten {
 		return w.writeHeader()
@@ -133,6 +139,15 @@ func encodePayload(b *bytes.Buffer, e Event) error {
 			return err
 		}
 		return binary.Write(b, le, ev.Mode)
+	case *TraceDropped:
+		return binary.Write(b, le, ev.Count)
+	case *UnknownEvent:
+		// Round-trip support: a tool that reads → filters → rewrites a
+		// trace shouldn't lose unknown-kind events. The reader preserved
+		// the raw payload; we just write it back. e.Kind() returns
+		// ev.KindVal, so the wire-format kind byte is correct.
+		_, err := b.Write(ev.Payload)
+		return err
 	default:
 		return fmt.Errorf("unknown event kind: %T", e)
 	}

@@ -46,6 +46,14 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 		}
 	}
 
+	// A node is treated as a real intersection if it is shared by ≥2
+	// distinct ways OR it carries the `highway=traffic_signals` tag.
+	//
+	// Note: nodes tagged `highway=stop` or `highway=give_way` on a SINGLE
+	// way are NOT promoted here — they live as interior shaping nodes and
+	// are honored by applyInteriorNodeSign, which walks each approach to
+	// find the closest interior sign. Promoting them would split the way
+	// and bypass that walking logic.
 	isIntersection := func(id osm.NodeID) bool {
 		if usageCount[id] >= 2 {
 			return true
@@ -95,14 +103,15 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 	report := Report{}
 	for _, w := range feat.Ways {
 		segs := splitAtIntersections(w, isIntersection)
-		oneway := isOneway(w)
+		dir := onewayDirection(w)
 		hwType := highwayType(w)
 		def := defaultsFor(hwType)
 		// Forward and reverse may have different `maxspeed:forward`/`backward`
 		// tags. Resolve both up-front; fall back to the highway-type default.
+		// Same for lane counts.
 		speedFwd := parseSpeedForDirection(w, true, def.SpeedLimit)
 		speedBwd := parseSpeedForDirection(w, false, def.SpeedLimit)
-		lanesPerDir := parseLanes(w, def.LanesPerDir)
+		lanesFwd, lanesBwd := parseLanesPerDirection(w, def.LanesPerDir)
 
 		for _, seg := range segs {
 			if len(seg) < 2 {
@@ -138,17 +147,42 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 				continue
 			}
 			segChains = append(segChains, chain)
-			edges = append(edges, network.Edge{
-				ID: network.EdgeID(len(edges)), From: fromID, To: toID,
-				Lanes: makeLanes(lanesPerDir), Length: length, SpeedLimit: speedFwd, Geometry: geom,
-			})
-			osmWayOfEdge = append(osmWayOfEdge, w.ID)
-			edgeIsForward = append(edgeIsForward, true)
-			if !oneway {
+			switch dir {
+			case onewayForward:
+				edges = append(edges, network.Edge{
+					ID: network.EdgeID(len(edges)), From: fromID, To: toID,
+					Lanes: makeLanes(lanesFwd), Length: length, SpeedLimit: speedFwd, Geometry: geom,
+				})
+				osmWayOfEdge = append(osmWayOfEdge, w.ID)
+				edgeIsForward = append(edgeIsForward, true)
+			case onewayReverse:
+				// oneway=-1 / reverse: the way's tagged direction is opposite
+				// to its node order. Emit exactly one edge, but flipped, and
+				// use the `backward` direction speed/lanes since that's the
+				// actual direction of traffic flow.
 				revGeom := reverseGeom(geom)
 				edges = append(edges, network.Edge{
 					ID: network.EdgeID(len(edges)), From: toID, To: fromID,
-					Lanes: makeLanes(lanesPerDir), Length: length, SpeedLimit: speedBwd, Geometry: revGeom,
+					Lanes: makeLanes(lanesBwd), Length: length, SpeedLimit: speedBwd, Geometry: revGeom,
+				})
+				osmWayOfEdge = append(osmWayOfEdge, w.ID)
+				// Tag as the way's "forward" for turn-lane purposes (the
+				// reversed-traffic direction is what the way's natural
+				// `turn:lanes` tag describes, since OSM tags follow the
+				// physical traffic flow, not the node order). Empirically
+				// uncommon; treating it as forward is conservative.
+				edgeIsForward = append(edgeIsForward, true)
+			case onewayTwoWay:
+				edges = append(edges, network.Edge{
+					ID: network.EdgeID(len(edges)), From: fromID, To: toID,
+					Lanes: makeLanes(lanesFwd), Length: length, SpeedLimit: speedFwd, Geometry: geom,
+				})
+				osmWayOfEdge = append(osmWayOfEdge, w.ID)
+				edgeIsForward = append(edgeIsForward, true)
+				revGeom := reverseGeom(geom)
+				edges = append(edges, network.Edge{
+					ID: network.EdgeID(len(edges)), From: toID, To: fromID,
+					Lanes: makeLanes(lanesBwd), Length: length, SpeedLimit: speedBwd, Geometry: revGeom,
 				})
 				osmWayOfEdge = append(osmWayOfEdge, w.ID)
 				edgeIsForward = append(edgeIsForward, false)
@@ -245,41 +279,95 @@ func highwayType(w *osm.Way) string {
 	return ""
 }
 
-func isOneway(w *osm.Way) bool {
+// onewayDir describes a way's directionality. onewayTwoWay produces two
+// edges; onewayForward/Reverse produce exactly one (with reverse flipping
+// node order so the edge always flows in the direction of traffic).
+type onewayDir uint8
+
+const (
+	onewayTwoWay onewayDir = iota
+	onewayForward
+	onewayReverse
+)
+
+// onewayDirection inspects the OSM way's tags and returns its directionality.
+// Recognizes the full OSM convention including `oneway=-1` and `oneway=reverse`
+// (way is one-way but traffic flows opposite to node order), plus the
+// motorway implicit-oneway rule.
+func onewayDirection(w *osm.Way) onewayDir {
 	for _, t := range w.Tags {
 		if t.Key == "oneway" {
 			switch t.Value {
 			case "yes", "true", "1":
-				return true
+				return onewayForward
+			case "-1", "reverse":
+				return onewayReverse
+			case "no", "false", "0":
+				return onewayTwoWay
 			}
 		}
-		// Motorways are implicitly oneway in OSM convention.
+	}
+	for _, t := range w.Tags {
 		if t.Key == "highway" && t.Value == "motorway" {
-			return true
+			return onewayForward
 		}
 	}
-	return false
+	return onewayTwoWay
 }
 
-func parseLanes(w *osm.Way, fallback uint8) uint8 {
+// parseLanesPerDirection returns (forwardLanes, backwardLanes). It honors
+// the OSM convention:
+//
+//   - `lanes:forward` / `lanes:backward` are direction-specific overrides.
+//   - `lanes` is total across both directions (halved for two-way).
+//
+// For one-way ways the irrelevant-direction count is the same as the
+// relevant one (callers ignore it). Falls back to `fallback` for either
+// direction whose tag is missing.
+func parseLanesPerDirection(w *osm.Way, fallback uint8) (uint8, uint8) {
+	dir := onewayDirection(w)
+	var fwdSpecific, bwdSpecific uint8
+	var hasFwd, hasBwd bool
+	var totalLanes int
+	var hasTotal bool
 	for _, t := range w.Tags {
-		if t.Key == "lanes" {
-			n, err := strconv.Atoi(t.Value)
-			if err == nil && n > 0 && n < 16 {
-				// "lanes" in OSM is total both directions; we'll halve for
-				// non-oneway. parseSpeed/parseLanes callers handle that.
-				if isOneway(w) {
-					return uint8(n)
-				}
-				half := n / 2
-				if half < 1 {
-					half = 1
-				}
-				return uint8(half)
+		switch t.Key {
+		case "lanes":
+			if n, err := strconv.Atoi(t.Value); err == nil && n > 0 && n < 16 {
+				totalLanes = n
+				hasTotal = true
+			}
+		case "lanes:forward":
+			if n, err := strconv.Atoi(t.Value); err == nil && n > 0 && n < 16 {
+				fwdSpecific = uint8(n)
+				hasFwd = true
+			}
+		case "lanes:backward":
+			if n, err := strconv.Atoi(t.Value); err == nil && n > 0 && n < 16 {
+				bwdSpecific = uint8(n)
+				hasBwd = true
 			}
 		}
 	}
-	return fallback
+	fwd, bwd := fallback, fallback
+	if hasTotal {
+		if dir == onewayTwoWay {
+			half := totalLanes / 2
+			if half < 1 {
+				half = 1
+			}
+			fwd, bwd = uint8(half), uint8(half)
+		} else {
+			fwd, bwd = uint8(totalLanes), uint8(totalLanes)
+		}
+	}
+	if hasFwd {
+		fwd = fwdSpecific
+	}
+	if hasBwd {
+		bwd = bwdSpecific
+	}
+	return fwd, bwd
 }
 
 func makeLanes(n uint8) []network.Lane {

@@ -57,8 +57,8 @@ func tryLaneChange(v *Vehicle, vi int, laneVehicles map[uint8][]int, vs []Vehicl
 			return
 		}
 		other := laneVehicles[uint8(nl)]
-		frontS, hasFront := nextAheadS(other, vs, v.S)
-		rearS, hasRear := nextBehindS(other, vs, v.S)
+		frontS, hasFront := nextAheadS(other, vs, v.Edge, v.S)
+		rearS, hasRear := nextBehindS(other, vs, v.Edge, v.S)
 		if hasFront && frontS-v.S-VehicleLength < safetyGapFront {
 			return
 		}
@@ -84,11 +84,20 @@ func tryLaneChange(v *Vehicle, vi int, laneVehicles map[uint8][]int, vs []Vehicl
 	if myPos < 0 {
 		return
 	}
+	// Find the next live, same-edge leader ahead in this lane. The
+	// laneVehicles bucket was built at start-of-tick; by now an earlier
+	// vehicle may have despawned or crossed onto the next edge (its S
+	// reset to near 0), which would otherwise show as a wildly negative
+	// gap and force a spurious lane change.
 	var leaderV float64 = edge.SpeedLimit
 	var leaderS float64 = edge.Length + 1e6
-	if myPos+1 < len(same) {
-		ld := &vs[same[myPos+1]]
+	for j := myPos + 1; j < len(same); j++ {
+		ld := &vs[same[j]]
+		if ld.Despawned || ld.Edge != v.Edge {
+			continue
+		}
 		leaderV, leaderS = ld.V, ld.S
+		break
 	}
 	leaderGap := leaderS - v.S - VehicleLength
 	if leaderGap > laneChangeCheckGap || edge.SpeedLimit-leaderV < vDiffThreshold {
@@ -104,8 +113,8 @@ func tryLaneChange(v *Vehicle, vi int, laneVehicles map[uint8][]int, vs []Vehicl
 			continue
 		}
 		other := laneVehicles[uint8(nl)]
-		frontS, hasFront := nextAheadS(other, vs, v.S)
-		rearS, hasRear := nextBehindS(other, vs, v.S)
+		frontS, hasFront := nextAheadS(other, vs, v.Edge, v.S)
+		rearS, hasRear := nextBehindS(other, vs, v.Edge, v.S)
 		if hasFront && frontS-v.S-VehicleLength < safetyGapFront {
 			continue
 		}
@@ -165,12 +174,20 @@ func nearestCompatibleLane(lanes []network.Lane, fromLane uint8, nextE network.E
 	return bestIdx, dl, true
 }
 
-// nextAheadS returns the S of the closest vehicle on the lane with S > egoS.
-func nextAheadS(idxs []int, vs []Vehicle, egoS float64) (float64, bool) {
+// nextAheadS returns the S of the closest live vehicle on the lane (on
+// the same edge as ego) with S > egoS. Despawned vehicles and vehicles
+// that have transitioned onto the next edge earlier this tick are
+// skipped — both would otherwise produce stale S values that could
+// trigger spurious lane changes.
+func nextAheadS(idxs []int, vs []Vehicle, egoEdge network.EdgeID, egoS float64) (float64, bool) {
 	var best float64
 	found := false
 	for _, i := range idxs {
-		s := vs[i].S
+		v := &vs[i]
+		if v.Despawned || v.Edge != egoEdge {
+			continue
+		}
+		s := v.S
 		if s <= egoS {
 			continue
 		}
@@ -181,12 +198,17 @@ func nextAheadS(idxs []int, vs []Vehicle, egoS float64) (float64, bool) {
 	return best, found
 }
 
-// nextBehindS returns the S of the closest vehicle on the lane with S < egoS.
-func nextBehindS(idxs []int, vs []Vehicle, egoS float64) (float64, bool) {
+// nextBehindS returns the S of the closest live vehicle on the lane (on
+// the same edge as ego) with S < egoS. Same filtering as nextAheadS.
+func nextBehindS(idxs []int, vs []Vehicle, egoEdge network.EdgeID, egoS float64) (float64, bool) {
 	var best float64
 	found := false
 	for _, i := range idxs {
-		s := vs[i].S
+		v := &vs[i]
+		if v.Despawned || v.Edge != egoEdge {
+			continue
+		}
+		s := v.S
 		if s >= egoS {
 			continue
 		}

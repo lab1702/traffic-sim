@@ -13,28 +13,25 @@ import (
 	"github.com/lab1702/traffic-sim/internal/trace"
 )
 
-// signalLightOffset mirrors the constant in internal/sim/world.go: each
-// per-approach signal indicator is drawn this many meters back from the
-// stop line so individual approach colors are legible.
-const signalLightOffset = 4.0
-
-// player advances trace events at real wall-clock speed (1x), reconstructing
-// vehicle positions by simple kinematic extrapolation between events.
-// Phase 8 keeps this simple: vehicles teleport at spawn and disappear at
-// despawn; positions between are interpolated linearly along their route
-// at the edge's speed limit. Phase 9 can extend this with state snapshots
-// for faithful replay.
+// player advances trace events at wall-clock speed * speedMul,
+// reconstructing vehicle positions by simple kinematic extrapolation
+// between events. Phase 8 keeps this simple: vehicles teleport at spawn
+// and disappear at despawn; positions between are interpolated linearly
+// along their route at the edge's speed limit. Phase 9 can extend this
+// with state snapshots for faithful replay.
 //
 // Signals: one entry per (intersection, incoming approach). Colors are
 // recomputed when a SignalPhase event fires for that intersection by
 // looking up the approach's membership in the rebuilt default plan
 // (using the same heading-based grouping the sim uses). YAML overrides
-// will not be reflected accurately — the trace doesn't carry the
-// override schedule. The sim itself renders signals correctly.
+// in the original run will not be reflected accurately — the trace
+// doesn't carry the override schedule. The live sim renders signals
+// correctly.
 type player struct {
 	net          *network.Network
 	r            *trace.Reader
 	buf          *snapshot.Buffer
+	speedMul     float64
 	vehicles     map[uint32]*replayVehicle
 	signals      []approachLight
 	signalStates map[uint32]*sim.SignalState
@@ -56,7 +53,10 @@ type approachLight struct {
 	view           snapshot.SignalView
 }
 
-func newPlayer(net *network.Network, r *trace.Reader, buf *snapshot.Buffer) *player {
+func newPlayer(net *network.Network, r *trace.Reader, buf *snapshot.Buffer, speedMul float64) *player {
+	if speedMul <= 0 {
+		speedMul = 1.0
+	}
 	var lights []approachLight
 	states := make(map[uint32]*sim.SignalState)
 	for i := range net.Intersections {
@@ -69,7 +69,7 @@ func newPlayer(net *network.Network, r *trace.Reader, buf *snapshot.Buffer) *pla
 		states[uint32(x.ID)] = sim.NewSignalState(sim.DefaultSignalConfig(x.Incoming, net))
 		for j, eid := range x.Incoming {
 			e := &net.Edges[eid]
-			s := e.Length - signalLightOffset
+			s := e.Length - sim.SignalLightOffset
 			if s < 0 {
 				s = 0
 			}
@@ -89,6 +89,7 @@ func newPlayer(net *network.Network, r *trace.Reader, buf *snapshot.Buffer) *pla
 		net:          net,
 		r:            r,
 		buf:          buf,
+		speedMul:     speedMul,
 		vehicles:     make(map[uint32]*replayVehicle),
 		signals:      lights,
 		signalStates: states,
@@ -100,13 +101,20 @@ func (p *player) run() {
 	for {
 		hdr, ev, err := p.r.Next()
 		if err != nil {
-			if !errors.Is(err, io.EOF) {
+			switch {
+			case errors.Is(err, io.EOF):
+				// clean end of stream
+			case errors.Is(err, io.ErrUnexpectedEOF):
+				slog.Warn("tracereplay: trace file is truncated (process killed mid-write?); replay ended early",
+					"sim_time", hdr.SimTime)
+			default:
 				slog.Error("tracereplay: read error", "err", err)
 			}
 			return
 		}
-		// Real-time pacing: sleep until simTime matches elapsed wall time.
-		want := time.Duration(hdr.SimTime * float64(time.Second))
+		// Wall-clock pacing scaled by speedMul. At speed=2 a 60-second
+		// trace plays back in 30 seconds.
+		want := time.Duration(hdr.SimTime * float64(time.Second) / p.speedMul)
 		elapsed := time.Since(start)
 		if want > elapsed {
 			time.Sleep(want - elapsed)
@@ -119,16 +127,9 @@ func (p *player) run() {
 func (p *player) apply(hdr trace.Header, ev trace.Event) {
 	switch e := ev.(type) {
 	case *trace.SimStart:
-		// NetHash == 0 means the writer didn't compute a fingerprint
-		// (older trafficsim). Skip the check rather than panic on every
-		// legacy trace.
-		if e.NetHash == 0 {
-			return
-		}
-		got := network.Hash(p.net)
-		if got != e.NetHash {
+		if mismatch, traceHash, loadedHash := netHashMismatch(p.net, e.NetHash); mismatch {
 			slog.Warn("tracereplay: network fingerprint mismatch — replay positions may be wrong",
-				"trace_nethash", e.NetHash, "loaded_nethash", got,
+				"trace_nethash", traceHash, "loaded_nethash", loadedHash,
 				"hint", "the OSM file passed to -osm should be the same one used by the original run")
 		}
 	case *trace.VehicleSpawn:
@@ -159,7 +160,27 @@ func (p *player) apply(hdr trace.Header, ev trace.Event) {
 		}
 		st.Mode = sim.SignalMode(e.Mode)
 		p.refreshSignalColors(e.IntersectionID)
+	case *trace.TraceDropped:
+		// Marker emitted by the writer when its backpressure channel
+		// overflowed. The trace is missing events between the previous
+		// surviving event and this point — replay positions, vehicle
+		// counts, and signal states from here on may be wrong.
+		slog.Warn("tracereplay: trace is incomplete — writer dropped events during recording",
+			"dropped_count", e.Count, "at_sim_time", hdr.SimTime,
+			"hint", "re-run with a faster disk or a smaller --spawn-rate to avoid backpressure")
 	}
+}
+
+// netHashMismatch returns (true, traceHash, loadedHash) when the trace
+// recorded a non-zero NetHash that differs from the loaded network's
+// hash. Zero traceHash means the writer didn't compute a fingerprint
+// (older trafficsim), so the check is skipped — returns (false, ...).
+func netHashMismatch(net *network.Network, traceHash uint64) (bool, uint64, uint64) {
+	if traceHash == 0 {
+		return false, traceHash, 0
+	}
+	loaded := network.Hash(net)
+	return loaded != traceHash, traceHash, loaded
 }
 
 func (p *player) refreshSignalColors(intersectionID uint32) {
@@ -198,7 +219,11 @@ func (p *player) publish(simTime float64) {
 		v.s = s
 		x, y, hd := network.PositionOnEdge(p.net, v.curEdge, v.s)
 		views = append(views, snapshot.VehicleView{
-			ID: id, EdgeID: uint32(v.curEdge), X: x, Y: y, Heading: hd, Speed: edge.SpeedLimit,
+			ID: id, EdgeID: uint32(v.curEdge), X: x, Y: y, Heading: hd,
+			Speed: edge.SpeedLimit,
+			// Accel left at 0: in replay the renderer's motion-state
+			// coloring will treat every vehicle as steady-state. There's
+			// no acceleration to extract from the trace today.
 		})
 	}
 	sigViews := make([]snapshot.SignalView, len(p.signals))

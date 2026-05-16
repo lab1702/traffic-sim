@@ -1,12 +1,31 @@
 // Package snapshot provides a single-producer/single-consumer pointer
 // swap of read-only Snapshot values. Writer always writes a new value
 // then atomically updates the pointer; readers always see a complete value.
+//
+// CONTRACT: a Snapshot value passed to Publish becomes immutable to the
+// producer. In particular, the producer MUST allocate fresh Vehicles and
+// Signals slices each tick rather than truncating-and-reappending into
+// reused backing arrays; otherwise a concurrent Read() would observe
+// torn slice contents. The atomic pointer swap protects the slice
+// HEADER, not the elements behind it.
 package snapshot
 
 import (
 	"sync/atomic"
 
 	"github.com/lab1702/traffic-sim/internal/network"
+)
+
+// Signal-mode numeric values used in SignalView.Mode. Kept here (and not
+// in sim/) so renderer and replayer can switch on them without pulling
+// in sim. The values match sim.SignalMode exactly; the two constant
+// blocks are intentionally redundant — adding a new mode requires
+// touching both, and the snapshot test guards the match.
+const (
+	ModeNormal uint8 = 0
+	ModeFlashA uint8 = 1
+	ModeFlashB uint8 = 2
+	ModeOff    uint8 = 3
 )
 
 type Snapshot struct {
@@ -54,7 +73,9 @@ func New() *Buffer {
 	return b
 }
 
-// Publish swaps in a new snapshot. Caller must not mutate s after.
+// Publish swaps in a new snapshot. The caller MUST treat s as immutable
+// from this point on, including the backing arrays of s.Vehicles and
+// s.Signals — see the package-level CONTRACT comment.
 func (b *Buffer) Publish(s Snapshot) {
 	b.front.Store(&s)
 }

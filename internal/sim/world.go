@@ -33,8 +33,7 @@ type World struct {
 	SimTime float64
 	dt      float64
 
-	nextID   VehicleID
-	maxRetry int // spawn retries per tick before giving up
+	nextID VehicleID
 
 	// SignalStates is indexed by IntersectionID; nil entries mean no signal.
 	SignalStates []*SignalState
@@ -71,10 +70,11 @@ type World struct {
 const (
 	DefaultDt = 0.05 // 50 ms == 20 Hz
 
-	// signalLightOffset is how far back from the stop line each per-approach
+	// SignalLightOffset is how far back from the stop line each per-approach
 	// signal indicator is drawn, in meters. Far enough to read distinct
 	// colors at zoom, close enough to read as "this is that intersection's".
-	signalLightOffset = 4.0
+	// Exported so tracereplay and the renderer can place identical lights.
+	SignalLightOffset = 4.0
 
 	// Per-vehicle speed preference: Vehicle.SpeedFactor is sampled at
 	// spawn from Normal(1.0, speedFactorStdDev) and clamped to
@@ -120,6 +120,14 @@ func NewWorld(net *network.Network, spawner Spawner, overrides map[network.Inter
 	xByNode := make(map[network.NodeID]*network.Intersection, len(net.Intersections))
 	for i := range net.Intersections {
 		x := &net.Intersections[i]
+		if existing, dup := xByNode[x.NodeID]; dup {
+			// netbuild guarantees one intersection per NodeID, but if that
+			// invariant breaks (e.g., a future refactor introduces a split),
+			// silently shadowing the older entry would make one intersection
+			// invisible to the sim. Warn loudly and keep the lower-ID entry.
+			slog.Warn("NewWorld: duplicate NodeID across intersections; shadowing one is a sim correctness bug",
+				"node_id", x.NodeID, "kept_id", existing.ID, "dropped_id", x.ID)
+		}
 		xByNode[x.NodeID] = x
 		if x.HasSignal {
 			if cfg, ok := overrides[x.ID]; ok {
@@ -134,7 +142,6 @@ func NewWorld(net *network.Network, spawner Spawner, overrides map[network.Inter
 		Router:       NewRouter(net),
 		Spawner:      spawner,
 		dt:           DefaultDt,
-		maxRetry:     4,
 		SignalStates: sigs,
 		xByNodeID:    xByNode,
 		SnapshotBuf:  snapshot.New(),
@@ -341,9 +348,11 @@ func effectiveControl(w *World, x *network.Intersection, myPos int) network.Cont
 			}
 			return network.ControlStop // blinking red is a stop sign
 		default:
-			// Unknown future signal mode — fall back to no control rather
-			// than silently changing semantics.
-			return network.ControlNone
+			// Unknown future signal mode — fail SAFE (treat as AllWayStop)
+			// rather than fail OPEN (no control). applyControl already
+			// validates incoming Mode values, so reaching this branch
+			// implies a future code path forgot to extend the switch.
+			return network.ControlAllWayStop
 		}
 	}
 	if myPos < len(x.IncomingControl) {
@@ -876,7 +885,9 @@ func (w *World) trySpawn(r SpawnRequest) {
 	})
 }
 
-// applyControl mutates sim state in response to a UI command.
+// applyControl mutates sim state in response to a UI command. Validates
+// the requested SignalMode against the known set; unknown values are
+// logged and ignored rather than silently setting an undefined mode.
 func (w *World) applyControl(ev ControlEvent) {
 	id := int(ev.IntersectionID)
 	if id < 0 || id >= len(w.SignalStates) {
@@ -884,6 +895,14 @@ func (w *World) applyControl(ev ControlEvent) {
 	}
 	st := w.SignalStates[id]
 	if st == nil {
+		return
+	}
+	switch ev.Mode {
+	case ModeNormal, ModeFlashA, ModeFlashB, ModeOff:
+		// valid
+	default:
+		slog.Warn("applyControl: unknown SignalMode; ignoring",
+			"intersection_id", id, "mode", uint8(ev.Mode))
 		return
 	}
 	st.Mode = ev.Mode
@@ -938,7 +957,7 @@ func (w *World) publishSnapshot() {
 		for j, eid := range x.Incoming {
 			green := st.GreenFor(j)
 			e := &w.Net.Edges[eid]
-			s := e.Length - signalLightOffset
+			s := e.Length - SignalLightOffset
 			if s < 0 {
 				s = 0
 			}

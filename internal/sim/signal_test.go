@@ -2,9 +2,33 @@ package sim
 
 import (
 	"testing"
+	"time"
 
 	"github.com/lab1702/traffic-sim/internal/network"
+	"github.com/lab1702/traffic-sim/internal/snapshot"
 )
+
+// TestSignalMode_MatchesSnapshotConstants prevents drift between the sim
+// package's SignalMode iota and the renderer-visible snapshot.Mode*
+// constants. Renderer and tracereplay key off snapshot.Mode* without
+// importing sim; adding a new mode requires updating both.
+func TestSignalMode_MatchesSnapshotConstants(t *testing.T) {
+	cases := []struct {
+		name string
+		sim  SignalMode
+		snap uint8
+	}{
+		{"normal", ModeNormal, snapshot.ModeNormal},
+		{"flash_a", ModeFlashA, snapshot.ModeFlashA},
+		{"flash_b", ModeFlashB, snapshot.ModeFlashB},
+		{"off", ModeOff, snapshot.ModeOff},
+	}
+	for _, c := range cases {
+		if uint8(c.sim) != c.snap {
+			t.Errorf("%s: sim=%d snapshot=%d (must match)", c.name, c.sim, c.snap)
+		}
+	}
+}
 
 func TestSignalCycle_AdvancesPhases(t *testing.T) {
 	// 2 phases, 30s green each, 3s yellow each => 66s total cycle.
@@ -29,13 +53,52 @@ func TestSignalCycle_AdvancesPhases(t *testing.T) {
 	if s.PhaseIdx != 1 || s.IsYellow {
 		t.Errorf("t=34 should be phase 1 green, got phase=%d yellow=%v", s.PhaseIdx, s.IsYellow)
 	}
-	// Wrap-around: advance past full cycle.
+	// Wrap-around: advance another 60s. Going into this call the state
+	// is (PhaseIdx=1, IsYellow=false, Elapsed=1) — already 1s into
+	// phase 1 green. So +60s consumes:
+	//   29s remaining in phase 1 green  (Elapsed 30 → flips to yellow, 0)
+	//    3s phase 1 yellow              (Elapsed 3  → flips to phase 0, 0)
+	//   28s into phase 0 green          (still green, Elapsed=28)
 	s.Advance(60.0)
-	if s.PhaseIdx == 1 && !s.IsYellow {
-		// any state is fine; we just want no panic and a sensible index
+	if s.PhaseIdx != 0 {
+		t.Errorf("after wrap-around: PhaseIdx = %d, want 0", s.PhaseIdx)
 	}
-	if s.PhaseIdx >= len(cfg.Phases) {
-		t.Errorf("PhaseIdx out of range: %d", s.PhaseIdx)
+	if s.IsYellow {
+		t.Errorf("after wrap-around: should be in green phase, got yellow")
+	}
+	if got := s.Elapsed; got < 27.9 || got > 28.1 {
+		t.Errorf("after wrap-around: Elapsed = %v, want ~28.0", got)
+	}
+}
+
+// TestSignal_DegeneratePhase_DoesNotInfiniteLoop documents the defensive
+// guard in Advance: a phase with both GreenDur=0 and YellowDur=0 would
+// otherwise spin forever subtracting 0 from Elapsed. Config-layer
+// validation rejects such inputs, but Advance must not hang if a hand-
+// constructed SignalConfig sneaks one in (e.g., in a test or a future
+// programmatic config generator).
+func TestSignal_DegeneratePhase_DoesNotInfiniteLoop(t *testing.T) {
+	cfg := SignalConfig{
+		Phases: []SignalPhase{
+			{GreenEdges: []int{0}, GreenDur: 0, YellowDur: 0},
+			{GreenEdges: []int{1}, GreenDur: 5, YellowDur: 1},
+		},
+	}
+	s := NewSignalState(cfg)
+	done := make(chan struct{})
+	go func() {
+		s.Advance(1.0)
+		close(done)
+	}()
+	select {
+	case <-done:
+		// Good: returned. The degenerate phase should have been
+		// skipped, landing the state machine in the second phase.
+		if s.PhaseIdx != 1 {
+			t.Errorf("after Advance past degenerate phase: PhaseIdx = %d, want 1", s.PhaseIdx)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Advance hung on a degenerate phase (infinite loop)")
 	}
 }
 

@@ -33,32 +33,54 @@ go build ./cmd/trafficsim/
 go build ./cmd/tracereplay/
 ```
 
+This drops `trafficsim` and `tracereplay` (`.exe` on Windows) into the
+current directory. Either prefix with `./` to run them, or `go install
+./...` to put them on `PATH`. Examples below assume one of those.
+
 ## Run
 
 Load and inspect a graph:
 ```
-trafficsim load extract.osm.pbf
+./trafficsim load extract.osm.pbf
 ```
 
 Run with the viewer:
 ```
-trafficsim run extract.osm.pbf --spawn-rate 20 --trace run.trace
+./trafficsim run --spawn-rate 20 --trace run.trace extract.osm.pbf
 ```
+
+> Flags must appear BEFORE the OSM path — the Go flag parser stops at
+> the first non-flag argument.
 
 Run headless (research mode):
 ```
-trafficsim run extract.osm.pbf --headless --duration 5m --spawn-rate 20 --trace run.trace
+./trafficsim run --headless --duration 5m --spawn-rate 20 --trace run.trace extract.osm.pbf
 ```
+
+> Ctrl+C (SIGINT/SIGTERM) triggers an orderly shutdown: the trace is
+> flushed with a final `SimEnd` event before the process exits.
 
 Replay a trace:
 ```
-tracereplay -osm extract.osm.pbf -trace run.trace
+./tracereplay -osm extract.osm.pbf -trace run.trace
+./tracereplay -speed 4 -osm extract.osm.pbf -trace run.trace   # 4x playback
 ```
 
 Signal overrides (per intersection):
 ```
-trafficsim run extract.osm.pbf --signals configs/signals.example.yaml
+./trafficsim run --signals configs/signals.example.yaml extract.osm.pbf
 ```
+
+The YAML schema is documented inline in `configs/signals.example.yaml`.
+A missing or invalid signals file causes `trafficsim` to exit with a
+clear error rather than silently producing zero overrides.
+
+### Notes for Windows
+
+- Built binaries end in `.exe`. The commands above work in PowerShell
+  exactly as shown (`./trafficsim.exe` is also accepted).
+- `go install ./...` places binaries in `%USERPROFILE%\go\bin` by default.
+- Paths with spaces must be double-quoted.
 
 ## Determinism
 
