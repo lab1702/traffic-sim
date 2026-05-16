@@ -738,14 +738,16 @@ func (w *World) Step() {
 		v0 := w.computeDesiredSpeed(v)
 		stepIDM(v, v0, lS, lV, has, w.Net, DefaultIDM(), w.dt)
 
-		// Update WaitTime: accumulates while the vehicle is effectively
-		// stopped AND yielding via gap-acceptance. Resets the moment
-		// either condition stops being true. Drives the impatience curve
-		// in effectiveGap; does NOT apply to red lights.
+		// Accumulate WaitTime while the vehicle is effectively stopped
+		// AND yielding via gap-acceptance. WaitTime is only reset on
+		// edge transition (see stepIDM); within an approach edge it is
+		// monotonic. This lets impatience commit the vehicle to a
+		// crossing once the gap is accepted: WaitTime stays high after
+		// the vehicle starts moving, so effectiveGap stays below ETA
+		// and mustYield stays false. Edge-transition reset gives each
+		// new approach a fresh WaitTime=0. Does NOT apply to red lights.
 		if v.V < stuckSpeedThresh && (mustYield || mustYieldLT) {
 			v.WaitTime += w.dt
-		} else {
-			v.WaitTime = 0
 		}
 
 		// Stuck-vehicle guard. Defensive against sim bugs that would
