@@ -211,6 +211,11 @@ func comfortableStopDistance(v float64) float64 {
 
 const gapThresholdSec = 3.0
 
+// leftTurnGapSec is the minimum oncoming-traffic ETA a left turner
+// accepts before crossing. Larger than gapThresholdSec because the
+// left-turn maneuver takes longer to execute. Literature: 6–8s.
+const leftTurnGapSec = 6.0
+
 const (
 	// stuckSpeedThresh is the speed (m/s) below which a vehicle is
 	// considered "not moving". Used for two purposes:
