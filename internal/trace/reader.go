@@ -158,5 +158,9 @@ func decodePayload(k Kind, p []byte) (Event, error) {
 		}
 		return e, nil
 	}
-	return nil, fmt.Errorf("unknown event kind: %d", k)
+	// Forward compatibility: a trace produced by a newer writer can contain
+	// kinds this reader doesn't recognize. The wire format's length-prefixed
+	// payload (already consumed by Next) lets us return the raw bytes
+	// without breaking the stream. Callers may inspect or ignore.
+	return &UnknownEvent{KindVal: k, Payload: append([]byte(nil), p...)}, nil
 }

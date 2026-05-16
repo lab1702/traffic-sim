@@ -118,6 +118,19 @@ func (p *player) run() {
 
 func (p *player) apply(hdr trace.Header, ev trace.Event) {
 	switch e := ev.(type) {
+	case *trace.SimStart:
+		// NetHash == 0 means the writer didn't compute a fingerprint
+		// (older trafficsim). Skip the check rather than panic on every
+		// legacy trace.
+		if e.NetHash == 0 {
+			return
+		}
+		got := network.Hash(p.net)
+		if got != e.NetHash {
+			slog.Warn("tracereplay: network fingerprint mismatch — replay positions may be wrong",
+				"trace_nethash", e.NetHash, "loaded_nethash", got,
+				"hint", "the OSM file passed to -osm should be the same one used by the original run")
+		}
 	case *trace.VehicleSpawn:
 		if len(e.Route) == 0 {
 			return

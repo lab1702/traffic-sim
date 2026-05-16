@@ -289,12 +289,12 @@ func runRun(args []string) {
 				}
 			}
 		}
-		// Emit start event with the seed.
-		// TODO: compute and emit a real NetHash so tracereplay can validate the OSM matches.
+		// Emit start event with the seed and a network fingerprint so
+		// tracereplay can warn if the OSM doesn't match the original run.
 		w.EmitTrace(0, 0, &trace.SimStart{
 			SeedLo:  *seed,
 			SeedHi:  *seed ^ 0x9E3779B97F4A7C15, // matches RandomOD's PCG seed pair
-			NetHash: 0,
+			NetHash: network.Hash(net),
 		})
 		defer func() {
 			w.EmitTrace(w.Tick, w.SimTime, &trace.SimEnd{Reason: "exit"})

@@ -100,3 +100,15 @@ type SignalModeChange struct {
 }
 
 func (*SignalModeChange) Kind() Kind { return KindSignalModeChange }
+
+// UnknownEvent is returned by Reader.Next when a trace contains an event
+// kind this reader doesn't recognize. The wire format's per-event `length`
+// field lets the reader skip over the payload without parsing it, so older
+// binaries can still read traces produced by newer ones that introduce
+// new kinds. Callers should typically ignore UnknownEvent values.
+type UnknownEvent struct {
+	KindVal Kind
+	Payload []byte
+}
+
+func (e *UnknownEvent) Kind() Kind { return e.KindVal }
