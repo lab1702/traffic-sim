@@ -71,8 +71,13 @@ type Intersection struct {
 	// right-of-way rule for approach Incoming[i]. The two slices have
 	// equal length. Populated by netbuild after sortIncomingByPriority.
 	IncomingControl []Control
-	Outgoing        []EdgeID
-	HasSignal       bool
+	// Opposing is parallel to Incoming: Opposing[i] is the position of
+	// approach i's opposing approach (the same road's other direction),
+	// or -1 if none. Populated by netbuild after sortIncomingByPriority.
+	// Symmetric: Opposing[Opposing[i]] == i whenever Opposing[i] != -1.
+	Opposing []int8
+	Outgoing []EdgeID
+	HasSignal bool
 	// BannedTurns lists (from, to) edge transitions that are forbidden
 	// at this intersection. Populated at load time from config (or, in
 	// future, from OSM `restriction` relations) and read-only thereafter.
