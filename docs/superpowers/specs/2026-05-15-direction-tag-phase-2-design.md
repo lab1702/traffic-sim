@@ -22,7 +22,7 @@ Both pieces close gaps acknowledged in Phase 1's spec under "Out of scope (defer
 | Resolution order | `applyInteriorNodeSign` runs LAST — interior tags win over intersection-node tags for the same approach (interior tags represent the physical stop-line position). |
 | Ambiguity at multi-way intersections | `direction=forward` on a node where multiple ways meet applies to all approaches whose direction-on-their-way matches. Stricter than the existing lenient behavior; may over-apply in rare cases where the tag refers to one specific way. |
 | Closest-to-X tie-break | When multiple sign-tagged interior nodes exist on the same approach (rare), the one closest to X wins. |
-| AllWayStop preservation | All new rules skip approaches already promoted to `ControlAllWayStop`. Strictest-wins semantics from Phase 1 preserved. |
+| AllWayStop preservation | Non-directional `applyNodeLevelSign` and `applyInteriorNodeSign` skip approaches already promoted to `ControlAllWayStop` (strictest-wins). The directional branch (`direction=forward`/`backward`) does NOT skip — an explicit directional tag from the mapper overrides class-inferred AllWayStop for the matching approach. Phase 1's strictest-wins still applies to non-directional rules. |
 
 ## Resolution order
 

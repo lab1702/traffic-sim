@@ -441,13 +441,24 @@ func TestNetbuild_Opposing_TThrough(t *testing.T) {
 	}
 }
 
-// TestNetbuild_DirectionForward: a 4-way crossing where the intersection
-// node carries `highway=stop direction=forward`. Both approaches whose
-// direction-on-their-way is forward get ControlStop. This is the spec's
-// "over-apply at multi-way intersections" case — applying to ALL
-// forward-direction approaches is intentionally stricter than the
-// previous lenient (apply-to-all) behavior, even though it may apply
-// the sign more broadly than originally intended.
+// TestNetbuild_DirectionForward: a 4-way crossing of two equal-class
+// primaries carries `highway=stop direction=forward` on the intersection
+// node. Two behaviors compose here:
+//
+//   1. Spec's "over-apply at multi-way intersections": a directional
+//      tag applies to ALL approaches whose direction-on-their-way is
+//      forward, across every way passing through the node. That's two
+//      forward approaches (one per way).
+//
+//   2. Directional-tag override of class-inferred AllWayStop: equal
+//      classes produce AllWayStop via class fallback. The directional
+//      branch of applyNodeLevelSign deliberately does NOT skip
+//      AllWayStop (unlike the non-directional branch), because an
+//      explicit mapper-set direction tag conveys more specific intent
+//      than class inference. So both forward approaches transition
+//      from AllWayStop to Stop.
+//
+// Expected result: stopCount == 2.
 func TestNetbuild_DirectionForward(t *testing.T) {
 	// Layout (planar approximation):
 	//   N is at lat 40.0010, S at 39.9990 → "lower index first" way
@@ -526,10 +537,10 @@ func TestNetbuild_Opposing_Symmetric(t *testing.T) {
 	}
 }
 
-// TestNetbuild_DirectionBackward: same fixture as DirectionForward but
-// direction=backward. The backward-direction approaches on each way
-// get ControlStop. (Two approaches at a 4-way crossing of two
-// equal-class ways: backward on N-S way and backward on E-W way.)
+// TestNetbuild_DirectionBackward: same fixture and same composed
+// behaviors as TestNetbuild_DirectionForward, but with `direction=backward`.
+// The two backward-direction approaches (one per way) transition from
+// AllWayStop (from class fallback) to Stop (from the directional tag).
 func TestNetbuild_DirectionBackward(t *testing.T) {
 	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
 		1: mkNode(1, 39.9990, -74.0005),
