@@ -1,5 +1,7 @@
 # traffic-sim
 
+![traffic-sim screenshot](trafficsim.png)
+
 Go-based traffic simulator that reads OpenStreetMap files and runs a
 city-scale microsimulation. Vehicles use the Intelligent Driver Model
 (IDM) for car-following, change lanes when beneficial, and obey
