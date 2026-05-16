@@ -821,6 +821,13 @@ func (w *World) trySpawn(r SpawnRequest) {
 		factor = speedFactorMax
 	}
 
+	gapFactor := 1.0 + w.rng.NormFloat64()*gapFactorStdDev
+	if gapFactor < gapFactorMin {
+		gapFactor = gapFactorMin
+	} else if gapFactor > gapFactorMax {
+		gapFactor = gapFactorMax
+	}
+
 	// Spawn at this driver's cruising speed (factor * edge limit) so they
 	// don't immediately decelerate. IDM regulates from there.
 	v := Vehicle{
@@ -831,6 +838,7 @@ func (w *World) trySpawn(r SpawnRequest) {
 		S:           0,
 		V:           w.Net.Edges[route[0]].SpeedLimit * factor,
 		SpeedFactor: factor,
+		GapFactor:   gapFactor,
 	}
 	w.nextID++
 	w.Vehicles = append(w.Vehicles, v)

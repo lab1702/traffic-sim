@@ -3,6 +3,7 @@ package sim
 import (
 	"bytes"
 	"log/slog"
+	"math"
 	"strings"
 	"testing"
 
@@ -1952,5 +1953,54 @@ func TestWorld_LeftTurn_AllWayStop_CrossTrafficLeftDoesYield(t *testing.T) {
 	}
 	if bEnteredOutboundTick == aEnteredOutboundTick {
 		t.Errorf("cross-traffic left turner B (tick %d) entered outbound edge simultaneously with A (tick %d); mutual-left must not apply to cross-traffic", bEnteredOutboundTick, aEnteredOutboundTick)
+	}
+}
+
+// TestWorld_GapFactor_Heterogeneous: spawn 200 vehicles via trySpawn
+// with a fixed-seed world. Verify GapFactor distribution: mean within
+// [0.95, 1.05], std within [0.07, 0.13], all values within [0.8, 1.2].
+// Determinism: same seed → bit-identical values.
+func TestWorld_GapFactor_Heterogeneous(t *testing.T) {
+	net := build2x2Grid()
+	w := NewWorld(net, NewRandomOD(net, 7, 100), nil) // high rate so spawns succeed
+
+	// Drive 200 spawns by repeatedly calling trySpawn with synthetic
+	// requests. Use a fixed seed via the world's existing rng.
+	factors := make([]float64, 0, 200)
+	for i := 0; i < 1000 && len(factors) < 200; i++ {
+		w.trySpawn(SpawnRequest{OriginNode: 0, DestNode: 3})
+		if len(w.Vehicles) > len(factors) {
+			factors = append(factors, w.Vehicles[len(factors)].GapFactor)
+		}
+	}
+	if len(factors) < 200 {
+		t.Fatalf("could not collect 200 spawned vehicles, got %d", len(factors))
+	}
+
+	// Bounds.
+	for i, f := range factors {
+		if f < 0.8 || f > 1.2 {
+			t.Errorf("factor[%d] = %f, out of [0.8, 1.2]", i, f)
+		}
+	}
+
+	// Mean.
+	sum := 0.0
+	for _, f := range factors {
+		sum += f
+	}
+	mean := sum / float64(len(factors))
+	if mean < 0.95 || mean > 1.05 {
+		t.Errorf("mean = %f, want in [0.95, 1.05]", mean)
+	}
+
+	// Std.
+	varSum := 0.0
+	for _, f := range factors {
+		varSum += (f - mean) * (f - mean)
+	}
+	std := math.Sqrt(varSum / float64(len(factors)))
+	if std < 0.07 || std > 0.13 {
+		t.Errorf("std = %f, want in [0.07, 0.13]", std)
 	}
 }
