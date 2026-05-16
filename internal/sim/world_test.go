@@ -1123,18 +1123,26 @@ func TestWorld_AllWayStop_StoppedSinceClears(t *testing.T) {
 	}
 	w.nextID = 2
 
+	sawOutbound := false
 	for i := 0; i < 500; i++ {
 		w.Step()
 		if len(w.Vehicles) == 0 || w.Vehicles[0].Despawned {
 			break
 		}
-		if w.Vehicles[0].Edge == 1 && w.Vehicles[0].StoppedSinceSec != 0 {
-			t.Fatalf("StoppedSinceSec should be 0 after edge transition, got %.3f", w.Vehicles[0].StoppedSinceSec)
+		if w.Vehicles[0].Edge == 1 {
+			sawOutbound = true
+			if w.Vehicles[0].StoppedSinceSec != 0 {
+				t.Fatalf("StoppedSinceSec should be 0 after edge transition, got %.3f", w.Vehicles[0].StoppedSinceSec)
+			}
 		}
 	}
 
-	// Vehicle either cleared (compacted to outbound) or completed route.
-	// Either way is fine — the test target is the in-loop invariant above.
+	// Guard against the degenerate "vehicle deadlocked at the line" pass
+	// mode: the in-loop invariant only fires once Edge advances. Require
+	// either an observed outbound transition or a clean despawn.
+	if !sawOutbound && len(w.Vehicles) > 0 && !w.Vehicles[0].Despawned {
+		t.Errorf("vehicle never crossed the AllWayStop; in-loop invariant was not exercised")
+	}
 }
 
 // TestWorld_StopSign_GapAcceptance: Stop-controlled vehicle + priority
