@@ -2387,3 +2387,48 @@ func TestWorld_Impatience_ResetsOnEdgeTransition(t *testing.T) {
 
 	t.Fatal("yield vehicle never crossed; cannot verify edge-transition reset")
 }
+
+// TestWorld_Impatience_NotAppliedToRedLight: vehicle stopped at a red
+// light for 60s. WaitTime must remain 0 throughout — red lights are
+// hard stops, not gap-acceptance yields.
+func TestWorld_Impatience_NotAppliedToRedLight(t *testing.T) {
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 1, Pos: network.Point{X: 200, Y: 0}},
+	}
+	edges := []network.Edge{
+		{ID: 0, From: 0, To: 1, Length: 200, SpeedLimit: 10,
+			Lanes: []network.Lane{{Index: 0}}},
+	}
+	xs := []network.Intersection{
+		{ID: 0, NodeID: 1, Incoming: []network.EdgeID{0}, HasSignal: true},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	// Permanent all-red phase.
+	w.SignalStates[0] = NewSignalState(SignalConfig{
+		Phases: []SignalPhase{{GreenEdges: nil, GreenDur: 10000, YellowDur: 0}},
+	})
+
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0}, Edge: 0, S: 50, V: 10},
+	}
+	w.nextID = 2
+
+	// Run 1200 ticks = 60 sim-seconds.
+	for i := 0; i < 1200; i++ {
+		w.Step()
+	}
+
+	if len(w.Vehicles) != 1 {
+		t.Fatalf("vehicle should be stopped at red, got %d alive", len(w.Vehicles))
+	}
+	v := &w.Vehicles[0]
+	if v.V > 0.1 {
+		t.Errorf("vehicle should be stopped at red, V=%.2f", v.V)
+	}
+	if v.WaitTime != 0 {
+		t.Errorf("WaitTime should remain 0 at red light (not a gap-acceptance yield), got %.3f", v.WaitTime)
+	}
+}
