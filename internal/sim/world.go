@@ -738,6 +738,16 @@ func (w *World) Step() {
 		v0 := w.computeDesiredSpeed(v)
 		stepIDM(v, v0, lS, lV, has, w.Net, DefaultIDM(), w.dt)
 
+		// Update WaitTime: accumulates while the vehicle is effectively
+		// stopped AND yielding via gap-acceptance. Resets the moment
+		// either condition stops being true. Drives the impatience curve
+		// in effectiveGap; does NOT apply to red lights.
+		if v.V < stuckSpeedThresh && (mustYield || mustYieldLT) {
+			v.WaitTime += w.dt
+		} else {
+			v.WaitTime = 0
+		}
+
 		// Stuck-vehicle guard. Defensive against sim bugs that would
 		// otherwise leave a vehicle wedged forever. Runs only when the
 		// vehicle is below the speed threshold; reuses the yield-check
