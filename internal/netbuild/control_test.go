@@ -419,12 +419,12 @@ func TestNetbuild_Opposing_TThrough(t *testing.T) {
 }
 
 // TestNetbuild_DirectionForward: a 4-way crossing where the intersection
-// node carries `highway=stop direction=forward`. Only the approach
-// traversing the way in the forward direction (lower-to-higher index
-// in the way's node sequence) should get ControlStop. The opposing
-// approach on the same way AND the approaches on the crossing way
-// should NOT be stopped (they may have other Controls from class
-// fallback, just not from this tag).
+// node carries `highway=stop direction=forward`. Both approaches whose
+// direction-on-their-way is forward get ControlStop. This is the spec's
+// "over-apply at multi-way intersections" case — applying to ALL
+// forward-direction approaches is intentionally stricter than the
+// previous lenient (apply-to-all) behavior, even though it may apply
+// the sign more broadly than originally intended.
 func TestNetbuild_DirectionForward(t *testing.T) {
 	// Layout (planar approximation):
 	//   N is at lat 40.0010, S at 39.9990 → "lower index first" way
@@ -451,19 +451,14 @@ func TestNetbuild_DirectionForward(t *testing.T) {
 	}
 	x := net.Intersections[0]
 
-	// Exactly one approach should be ControlStop — the one whose
-	// underlying way edge goes from a node with lower way-index to
-	// the X node. The other three approaches should NOT be Stop from
-	// this tag. (They may be ControlAllWayStop or ControlNone from
-	// equal-class fallback.)
 	stopCount := 0
 	for i := range x.Incoming {
 		if x.IncomingControl[i] == network.ControlStop {
 			stopCount++
 		}
 	}
-	if stopCount != 1 {
-		t.Errorf("direction=forward should mark exactly 1 approach as Stop, got %d", stopCount)
+	if stopCount != 2 {
+		t.Errorf("direction=forward at multi-way intersection should mark BOTH forward-direction approaches as Stop, got %d", stopCount)
 		for i := range x.Incoming {
 			t.Logf("  Incoming[%d] edge=%d control=%v", i, x.Incoming[i], x.IncomingControl[i])
 		}

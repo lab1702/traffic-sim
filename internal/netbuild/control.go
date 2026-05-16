@@ -158,17 +158,7 @@ func applyNodeLevelSign(
 		return
 	}
 
-	// direction= is set: find the canonical way for this sign (lowest WayID
-	// that contains xOSMID and has at least one matching approach). Apply
-	// the sign only to approaches on that one way.
-	canonicalWayID := canonicalSignWay(x.Incoming, xOSMID, direction, wayByID, osmWayOfEdge, edgeFromOSM)
-	if canonicalWayID == 0 {
-		return
-	}
 	for j, eid := range x.Incoming {
-		if int(eid) >= len(osmWayOfEdge) || osmWayOfEdge[eid] != canonicalWayID {
-			continue
-		}
 		approachDir := approachDirectionOnWay(eid, xOSMID, wayByID, osmWayOfEdge, edgeFromOSM)
 		if approachDir == direction {
 			x.IncomingControl[j] = target
@@ -218,38 +208,6 @@ func approachDirectionOnWay(
 		return "backward"
 	}
 	return ""
-}
-
-// canonicalSignWay returns the WayID of the way that should be treated as
-// the "owner" of a directional sign at intersection node xOSMID. When the
-// node is shared by several ways and multiple ways have a matching approach
-// in the given direction, we pick the lowest WayID that has at least one
-// matching approach — a deterministic tie-breaking rule that mirrors how
-// OSM editors list ways (and ensures stable behaviour as the map grows).
-// Returns 0 if no way has a matching approach.
-func canonicalSignWay(
-	incoming []network.EdgeID,
-	xOSMID osm.NodeID,
-	direction string,
-	wayByID map[osm.WayID]*osm.Way,
-	osmWayOfEdge []osm.WayID,
-	edgeFromOSM func(network.EdgeID) (osm.NodeID, bool),
-) osm.WayID {
-	var best osm.WayID
-	for _, eid := range incoming {
-		if int(eid) >= len(osmWayOfEdge) {
-			continue
-		}
-		wid := osmWayOfEdge[eid]
-		if best != 0 && wid >= best {
-			continue // already have a better (lower) candidate
-		}
-		d := approachDirectionOnWay(eid, xOSMID, wayByID, osmWayOfEdge, edgeFromOSM)
-		if d == direction {
-			best = wid
-		}
-	}
-	return best
 }
 
 // applyStopAllOrMinor overrides class-fallback with explicit OSM tags
