@@ -286,6 +286,50 @@ func TestNetbuild_Opposing_CoSortsWithIncoming(t *testing.T) {
 	}
 }
 
+// TestNetbuild_Opposing_FourWay: a 4-way + intersection. The N and S
+// approaches pair; the E and W approaches pair.
+func TestNetbuild_Opposing_FourWay(t *testing.T) {
+	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
+		1: mkNode(1, 40.0010, -74.0005), // N origin
+		2: mkNode(2, 40.0000, -74.0010), // W origin
+		3: mkNode(3, 40.0000, -74.0005), // center
+		4: mkNode(4, 40.0000, -74.0000), // E origin (approaches center from east)
+		5: mkNode(5, 39.9990, -74.0005), // S origin
+	}}
+	feat.Ways = []*osm.Way{
+		mkWay(10, "residential", false, 1, 3, 5), // N-S road
+		mkWay(20, "residential", false, 2, 3, 4), // W-E road
+	}
+
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(net.Intersections) != 1 {
+		t.Fatalf("want 1 intersection, got %d", len(net.Intersections))
+	}
+	x := net.Intersections[0]
+	if len(x.Opposing) != len(x.Incoming) {
+		t.Fatalf("Opposing length %d != Incoming length %d", len(x.Opposing), len(x.Incoming))
+	}
+	// Every approach must have an opposing approach in a 4-way.
+	for i := range x.Incoming {
+		if x.Opposing[i] < 0 {
+			t.Errorf("approach %d (edge %d) has no opposing", i, x.Incoming[i])
+		}
+	}
+	// Symmetry.
+	for i := range x.Incoming {
+		j := int(x.Opposing[i])
+		if j < 0 {
+			continue
+		}
+		if int(x.Opposing[j]) != i {
+			t.Errorf("non-symmetric: Opposing[%d]=%d but Opposing[%d]=%d", i, j, j, x.Opposing[j])
+		}
+	}
+}
+
 // buildNetToOSM is a position-based reverse map: each network NodeID gets
 // matched to the OSM NodeID whose projected (lat, lon) lands at the same
 // planar position. Computed fresh per call; only used in tests on tiny fixtures.
