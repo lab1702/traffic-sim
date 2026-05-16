@@ -234,7 +234,9 @@ func TestNetbuild_HighwayGiveWayOnNode(t *testing.T) {
 
 // TestNetbuild_Opposing_CoSortsWithIncoming: force a non-trivial
 // priority sort and verify that Opposing indices are correctly
-// remapped to point at the new positions.
+// remapped to point at the new positions. Uses an asymmetric Opposing
+// pattern to detect when the remap is missing (unlike a symmetric
+// pattern, which produces the same result whether remapped or not).
 func TestNetbuild_Opposing_CoSortsWithIncoming(t *testing.T) {
 	// 4-way: a "service" road (lower priority) meets a "primary" road.
 	// Pre-sort, Incoming order is whatever buildIntersections produces.
@@ -245,7 +247,7 @@ func TestNetbuild_Opposing_CoSortsWithIncoming(t *testing.T) {
 			ID:       0,
 			NodeID:   0,
 			Incoming: []network.EdgeID{0, 1, 2, 3},
-			Opposing: []int8{1, 0, 3, 2}, // pre-sort opposition
+			Opposing: []int8{2, -1, -1, 0}, // asymmetric pattern; only approaches 0 and 2 are paired
 		},
 	}
 	// osmWayOfEdge[i] = WayID, so we can fake highway priorities via the
@@ -268,15 +270,15 @@ func TestNetbuild_Opposing_CoSortsWithIncoming(t *testing.T) {
 		}
 	}
 	// Verify Opposing was remapped:
-	//   Pre-sort: Incoming=[0,1,2,3], Opposing=[1,0,3,2]
-	//   Post-sort: Incoming=[2,3,0,1]  (old positions 2,3,0,1 -> new 0,1,2,3)
-	//   So oldToNew = {0:2, 1:3, 2:0, 3:1}.
-	//   New Opposing[new_i] = oldToNew[old Opposing[old_i]].
-	//   - newI=0 was oldI=2; oldOpposing[2]=3; remapped to oldToNew[3]=1.
-	//   - newI=1 was oldI=3; oldOpposing[3]=2; remapped to oldToNew[2]=0.
-	//   - newI=2 was oldI=0; oldOpposing[0]=1; remapped to oldToNew[1]=3.
-	//   - newI=3 was oldI=1; oldOpposing[1]=0; remapped to oldToNew[0]=2.
-	wantOpposing := []int8{1, 0, 3, 2}
+	//   Pre-sort: Incoming=[0,1,2,3], Opposing=[2,-1,-1,0]
+	//   Post-sort: Incoming=[2,3,0,1]  (sort swaps the primary/service pairs)
+	//   oldToNew = {0:2, 1:3, 2:0, 3:1}.
+	//   New Opposing[newI] = oldToNew[old Opposing[oldI]] (with -1 passthrough):
+	//     - newI=0 was oldI=2; oldOpposing[2]=-1; passes through -> -1.
+	//     - newI=1 was oldI=3; oldOpposing[3]=0;  remapped to oldToNew[0]=2.
+	//     - newI=2 was oldI=0; oldOpposing[0]=2;  remapped to oldToNew[2]=0.
+	//     - newI=3 was oldI=1; oldOpposing[1]=-1; passes through -> -1.
+	wantOpposing := []int8{-1, 2, 0, -1}
 	for i := range wantOpposing {
 		if x.Opposing[i] != wantOpposing[i] {
 			t.Errorf("Opposing[%d] = %d, want %d", i, x.Opposing[i], wantOpposing[i])
