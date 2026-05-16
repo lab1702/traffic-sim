@@ -2,6 +2,7 @@ package sim
 
 import (
 	"log/slog"
+	"math"
 	"math/rand/v2"
 
 	"github.com/lab1702/traffic-sim/internal/network"
@@ -384,12 +385,50 @@ func (w *World) yieldGapCheck(v *Vehicle, x *network.Intersection, myPos int,
 	return 0, false
 }
 
-// allWayStopFIFO is filled in by Task 8. For now, return (myDist, true)
-// so that AllWayStop approaches always wait — safe but pessimistic.
+// allWayStopFIFO arbitrates an AllWayStop approach. After v has completed
+// its mandatory-stop dwell, it scans every other approach for a lead
+// vehicle that came to a complete stop earlier than v. If one exists, we
+// yield. Otherwise we proceed. Ties (same StoppedSinceSec) are broken by
+// lower Incoming index winning.
 func (w *World) allWayStopFIFO(v *Vehicle, x *network.Intersection, myPos int,
 	myDist float64, byEdge map[network.EdgeID][]int,
 ) (float64, bool) {
-	return myDist, true
+	for j := range x.Incoming {
+		if j == myPos {
+			continue
+		}
+		others := byEdge[x.Incoming[j]]
+		if len(others) == 0 {
+			continue
+		}
+		// Find the lead vehicle on approach j — the one closest to the
+		// stop line of edge x.Incoming[j].
+		otherEdge := &w.Net.Edges[x.Incoming[j]]
+		leadIdx := -1
+		leadDist := math.Inf(1)
+		for _, oi := range others {
+			ov := &w.Vehicles[oi]
+			d := otherEdge.Length - ov.S
+			if d < leadDist {
+				leadDist = d
+				leadIdx = oi
+			}
+		}
+		if leadIdx < 0 {
+			continue
+		}
+		lead := &w.Vehicles[leadIdx]
+		if lead.StoppedSinceSec == 0 {
+			continue // not yet stopped; hasn't earned a FIFO slot
+		}
+		if lead.StoppedSinceSec < v.StoppedSinceSec {
+			return myDist, true // they stopped first; we yield
+		}
+		if lead.StoppedSinceSec == v.StoppedSinceSec && j < myPos {
+			return myDist, true // tie-break: lower Incoming index wins
+		}
+	}
+	return 0, false
 }
 
 // Step advances the sim by one tick (DefaultDt seconds).

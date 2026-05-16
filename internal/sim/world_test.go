@@ -935,6 +935,208 @@ func TestWorld_YieldSign_NoMandatoryStop(t *testing.T) {
 	}
 }
 
+// TestWorld_AllWayStop_FIFO: three vehicles arriving on three approaches
+// at staggered times depart in arrival order.
+func TestWorld_AllWayStop_FIFO(t *testing.T) {
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: -100, Y: 0}},   // W origin
+		{ID: 1, Pos: network.Point{X: 100, Y: 0}},    // E origin
+		{ID: 2, Pos: network.Point{X: 0, Y: -100}},   // S origin
+		{ID: 3, Pos: network.Point{X: 0, Y: 0}},      // center
+		{ID: 4, Pos: network.Point{X: 0, Y: 100}},    // N dest (outbound)
+	}
+	mkEdge := func(id, from, to int) network.Edge {
+		return network.Edge{
+			ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: 100, SpeedLimit: 10,
+			Lanes:    []network.Lane{{Index: 0}},
+			Geometry: []network.Point{nodes[from].Pos, nodes[to].Pos},
+		}
+	}
+	edges := []network.Edge{
+		mkEdge(0, 0, 3), // W->C
+		mkEdge(1, 1, 3), // E->C
+		mkEdge(2, 2, 3), // S->C
+		mkEdge(3, 3, 4), // C->N (outbound for all)
+	}
+	xs := []network.Intersection{
+		{
+			ID: 0, NodeID: 3,
+			Incoming: []network.EdgeID{0, 1, 2},
+			IncomingControl: ctrls(
+				network.ControlAllWayStop,
+				network.ControlAllWayStop,
+				network.ControlAllWayStop,
+			),
+			Outgoing:  []network.EdgeID{3},
+			HasSignal: false,
+		},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	// Three vehicles, each placed so they arrive at the line at different
+	// times: ID 1 first (closest), then 2, then 3.
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0, 3}, Edge: 0, S: 99.5, V: 1},
+		{ID: 2, Route: []network.EdgeID{1, 3}, Edge: 1, S: 80, V: 1},
+		{ID: 3, Route: []network.EdgeID{2, 3}, Edge: 2, S: 60, V: 1},
+	}
+	w.nextID = 4
+
+	departureOrder := make([]VehicleID, 0, 3)
+	for i := 0; i < 600 && len(departureOrder) < 3; i++ {
+		w.Step()
+		for j := range w.Vehicles {
+			v := &w.Vehicles[j]
+			if v.Despawned {
+				continue
+			}
+			if v.Edge == 3 {
+				// First tick where vehicle is on the outbound edge.
+				already := false
+				for _, id := range departureOrder {
+					if id == v.ID {
+						already = true
+						break
+					}
+				}
+				if !already {
+					departureOrder = append(departureOrder, v.ID)
+				}
+			}
+		}
+	}
+
+	if len(departureOrder) != 3 {
+		t.Fatalf("expected 3 departures, got %d: %v", len(departureOrder), departureOrder)
+	}
+	want := []VehicleID{1, 2, 3}
+	for i := range want {
+		if departureOrder[i] != want[i] {
+			t.Errorf("departure order mismatch: got %v want %v", departureOrder, want)
+			break
+		}
+	}
+}
+
+// TestWorld_AllWayStop_TickTie: two vehicles register their mandatory
+// stop in the same tick on different approaches. Lower Incoming index
+// wins the tie-break.
+func TestWorld_AllWayStop_TickTie(t *testing.T) {
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: -100, Y: 0}},
+		{ID: 1, Pos: network.Point{X: 100, Y: 0}},
+		{ID: 2, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 3, Pos: network.Point{X: 0, Y: 100}},
+	}
+	mkEdge := func(id, from, to int) network.Edge {
+		return network.Edge{
+			ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: 100, SpeedLimit: 10,
+			Lanes:    []network.Lane{{Index: 0}},
+			Geometry: []network.Point{nodes[from].Pos, nodes[to].Pos},
+		}
+	}
+	edges := []network.Edge{
+		mkEdge(0, 0, 2), // W->C  Incoming[0]
+		mkEdge(1, 1, 2), // E->C  Incoming[1]
+		mkEdge(2, 2, 3), // C->N outbound
+	}
+	xs := []network.Intersection{
+		{
+			ID: 0, NodeID: 2,
+			Incoming: []network.EdgeID{0, 1},
+			IncomingControl: ctrls(
+				network.ControlAllWayStop,
+				network.ControlAllWayStop,
+			),
+			Outgoing:  []network.EdgeID{2},
+			HasSignal: false,
+		},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	// Symmetric start: both vehicles equidistant from line, same speed.
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0, 2}, Edge: 0, S: 99, V: 0.05},
+		{ID: 2, Route: []network.EdgeID{1, 2}, Edge: 1, S: 99, V: 0.05},
+	}
+	w.nextID = 3
+
+	firstDepart := VehicleID(0)
+	for i := 0; i < 400 && firstDepart == 0; i++ {
+		w.Step()
+		for j := range w.Vehicles {
+			v := &w.Vehicles[j]
+			if !v.Despawned && v.Edge == 2 {
+				firstDepart = v.ID
+				break
+			}
+		}
+	}
+
+	// Both vehicles are placed identically; the lower Incoming index
+	// approach (Incoming[0], W->C, Vehicle ID=1) should depart first
+	// regardless of microscopic float ordering.
+	if firstDepart != 1 {
+		t.Errorf("tie-break should favor lower Incoming index (Vehicle 1), got Vehicle %d first", firstDepart)
+	}
+}
+
+// TestWorld_AllWayStop_StoppedSinceClears: after crossing an
+// AllWayStop, a vehicle's StoppedSinceSec must be zeroed so it doesn't
+// bleed into FIFO calculations at the next intersection.
+func TestWorld_AllWayStop_StoppedSinceClears(t *testing.T) {
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: -100, Y: 0}},
+		{ID: 1, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 2, Pos: network.Point{X: 100, Y: 0}},
+	}
+	mkEdge := func(id, from, to int) network.Edge {
+		return network.Edge{
+			ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: 100, SpeedLimit: 10,
+			Lanes:    []network.Lane{{Index: 0}},
+			Geometry: []network.Point{nodes[from].Pos, nodes[to].Pos},
+		}
+	}
+	edges := []network.Edge{
+		mkEdge(0, 0, 1), // approach
+		mkEdge(1, 1, 2), // outbound (post-intersection)
+	}
+	xs := []network.Intersection{
+		{
+			ID: 0, NodeID: 1,
+			Incoming:        []network.EdgeID{0},
+			IncomingControl: ctrls(network.ControlAllWayStop),
+			Outgoing:        []network.EdgeID{1},
+			HasSignal:       false,
+		},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0, 1}, Edge: 0, S: 80, V: 8},
+	}
+	w.nextID = 2
+
+	for i := 0; i < 500; i++ {
+		w.Step()
+		if len(w.Vehicles) == 0 || w.Vehicles[0].Despawned {
+			break
+		}
+		if w.Vehicles[0].Edge == 1 && w.Vehicles[0].StoppedSinceSec != 0 {
+			t.Fatalf("StoppedSinceSec should be 0 after edge transition, got %.3f", w.Vehicles[0].StoppedSinceSec)
+		}
+	}
+
+	// Vehicle either cleared (compacted to outbound) or completed route.
+	// Either way is fine — the test target is the in-loop invariant above.
+}
+
 // TestWorld_StopSign_GapAcceptance: Stop-controlled vehicle + priority
 // cross-traffic with short ETA. Must stop, dwell, then continue to wait
 // for the gap to clear.
