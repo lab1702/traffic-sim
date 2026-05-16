@@ -2249,3 +2249,141 @@ func TestWorld_Impatience_FloorPreventsCollision(t *testing.T) {
 		t.Errorf("WaitTime should reflect substantial wait, got %.3f", a.WaitTime)
 	}
 }
+
+// TestWorld_Impatience_MonotonicWithinApproach: WaitTime is monotonic
+// within an approach — it accumulates while slow-and-yielding and is
+// preserved through brief windows of movement-but-on-same-edge. This
+// is the post-bugfix semantic: edge-transition is the ONLY in-Step
+// reset point. Verifies WaitTime does not reset mid-approach.
+func TestWorld_Impatience_MonotonicWithinApproach(t *testing.T) {
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: -100, Y: 0}},
+		{ID: 1, Pos: network.Point{X: 0, Y: -100}},
+		{ID: 2, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 3, Pos: network.Point{X: 100, Y: 0}},
+	}
+	mkEdge := func(id, from, to int) network.Edge {
+		return network.Edge{
+			ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: 100, SpeedLimit: 10,
+			Lanes:    []network.Lane{{Index: 0}},
+			Geometry: []network.Point{nodes[from].Pos, nodes[to].Pos},
+		}
+	}
+	edges := []network.Edge{
+		mkEdge(0, 0, 2),
+		mkEdge(1, 1, 2),
+		mkEdge(2, 2, 3),
+	}
+	xs := []network.Intersection{
+		{
+			ID: 0, NodeID: 2,
+			Incoming:        []network.EdgeID{0, 1},
+			IncomingControl: ctrls(network.ControlNone, network.ControlYield),
+			Outgoing:        []network.EdgeID{2},
+			HasSignal:       false,
+		},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0, 2}, Edge: 0, S: 98, V: 0.8}, // priority, ETA=2.5s
+		{ID: 2, Route: []network.EdgeID{1, 2}, Edge: 1, S: 99, V: 0.5},
+	}
+	w.nextID = 3
+
+	prevWait := 0.0
+	for i := 0; i < 300; i++ {
+		for j := range w.Vehicles {
+			if w.Vehicles[j].ID == 1 && !w.Vehicles[j].Despawned {
+				w.Vehicles[j].S = 98
+				w.Vehicles[j].V = 0.8
+			}
+		}
+		w.Step()
+		// Check the yield vehicle's WaitTime monotonicity while it's on
+		// the approach edge (edge 1). Once it transitions to edge 2,
+		// WaitTime resets — that's the only allowed decrement.
+		for j := range w.Vehicles {
+			v := &w.Vehicles[j]
+			if v.ID != 2 || v.Despawned {
+				continue
+			}
+			if v.Edge == 1 && v.WaitTime < prevWait-1e-9 {
+				t.Errorf("WaitTime decreased on approach edge: %.3f -> %.3f (tick %d)",
+					prevWait, v.WaitTime, i)
+				return
+			}
+			if v.Edge == 1 {
+				prevWait = v.WaitTime
+			}
+		}
+	}
+}
+
+// TestWorld_Impatience_ResetsOnEdgeTransition: vehicle yields at
+// intersection A, accumulates WaitTime, eventually crosses. WaitTime
+// must be 0 the moment the vehicle reaches the outbound edge.
+func TestWorld_Impatience_ResetsOnEdgeTransition(t *testing.T) {
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: -100, Y: 0}},
+		{ID: 1, Pos: network.Point{X: 0, Y: -100}},
+		{ID: 2, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 3, Pos: network.Point{X: 100, Y: 0}},
+	}
+	mkEdge := func(id, from, to int) network.Edge {
+		return network.Edge{
+			ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: 100, SpeedLimit: 10,
+			Lanes:    []network.Lane{{Index: 0}},
+			Geometry: []network.Point{nodes[from].Pos, nodes[to].Pos},
+		}
+	}
+	edges := []network.Edge{
+		mkEdge(0, 0, 2),
+		mkEdge(1, 1, 2),
+		mkEdge(2, 2, 3),
+	}
+	xs := []network.Intersection{
+		{
+			ID: 0, NodeID: 2,
+			Incoming:        []network.EdgeID{0, 1},
+			IncomingControl: ctrls(network.ControlNone, network.ControlYield),
+			Outgoing:        []network.EdgeID{2},
+			HasSignal:       false,
+		},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0, 2}, Edge: 0, S: 98, V: 0.8}, // priority, ETA=2.5s
+		{ID: 2, Route: []network.EdgeID{1, 2}, Edge: 1, S: 99, V: 0.5},
+	}
+	w.nextID = 3
+
+	// Pin priority; once yield vehicle accumulates WaitTime past ~5s,
+	// impatience will drive it across. Once it transitions to edge 2,
+	// WaitTime must be 0.
+	for i := 0; i < 600; i++ {
+		for j := range w.Vehicles {
+			if w.Vehicles[j].ID == 1 && !w.Vehicles[j].Despawned {
+				w.Vehicles[j].S = 98
+				w.Vehicles[j].V = 0.8
+			}
+		}
+		w.Step()
+		for j := range w.Vehicles {
+			v := &w.Vehicles[j]
+			if v.ID == 2 && !v.Despawned && v.Edge == 2 {
+				if v.WaitTime != 0 {
+					t.Fatalf("WaitTime should be 0 after edge transition, got %.3f", v.WaitTime)
+				}
+				return
+			}
+		}
+	}
+
+	t.Fatal("yield vehicle never crossed; cannot verify edge-transition reset")
+}
