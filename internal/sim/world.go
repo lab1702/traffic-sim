@@ -285,8 +285,8 @@ func (w *World) stopDistanceForYield(v *Vehicle, byEdge map[network.EdgeID][]int
 		return w.yieldGapCheck(v, x, myPos, myDist, byEdge)
 
 	case network.ControlAllWayStop:
-		// FIFO arbitration arrives in Task 8. For now, hold at the line
-		// after dwell so that AllWayStop approaches are at least safe.
+		// After dwell, yield to any approach whose lead vehicle stopped
+		// at the line earlier (FIFO). Tie-break by lower Incoming index.
 		if !w.hasDwelled(v) {
 			w.maybeMarkStopped(v, myDist)
 			return myDist, true
