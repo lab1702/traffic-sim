@@ -601,25 +601,81 @@ func TestNetbuild_InteriorNodeStop(t *testing.T) {
 	}
 	x := net.Intersections[0]
 
-	// W primary approach (with interior stop) -> Stop.
-	// E primary approach (no interior) -> None (class fallback).
-	// Service approaches (lower class) -> Stop (class fallback).
-	var sawPrimaryStop, sawPrimaryNone bool
+	// Identify each approach by its geometric direction relative to the
+	// intersection and by the highway class of its source way. The interior
+	// stop tag is on the W primary approach specifically — the E primary
+	// must stay ControlNone, and service approaches get class-fallback Stop.
+	wantApproach(t, net, feat, x, "primary", "W", network.ControlStop)
+	wantApproach(t, net, feat, x, "primary", "E", network.ControlNone)
+	wantApproach(t, net, feat, x, "service", "N", network.ControlStop)
+	wantApproach(t, net, feat, x, "service", "S", network.ControlStop)
+}
+
+// approachDir returns "N"/"S"/"E"/"W" for the approach edge based on which
+// cardinal direction its From-node lies from the intersection's node.
+// Used by tightened tests to identify a specific approach rather than just
+// "some approach with this highway class".
+func approachDir(net *network.Network, eid network.EdgeID, intersectionNode network.NodeID) string {
+	if int(eid) >= len(net.Edges) {
+		return ""
+	}
+	e := &net.Edges[eid]
+	var from, via network.Point
+	for i := range net.Nodes {
+		if net.Nodes[i].ID == e.From {
+			from = net.Nodes[i].Pos
+		}
+		if net.Nodes[i].ID == intersectionNode {
+			via = net.Nodes[i].Pos
+		}
+	}
+	dx := from.X - via.X
+	dy := from.Y - via.Y
+	if absf(dx) > absf(dy) {
+		if dx < 0 {
+			return "W"
+		}
+		return "E"
+	}
+	if dy < 0 {
+		return "S"
+	}
+	return "N"
+}
+
+func absf(x float64) float64 {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
+// wantApproach asserts that exactly one incoming approach matches
+// (highway class, geometric direction) and has the expected Control.
+// Used by interior-node and intersection-node sign tests to verify
+// per-approach correctness, not just "some approach got Stop".
+func wantApproach(t *testing.T, net *network.Network, feat *osmload.Features,
+	x network.Intersection, hwClass, dir string, want network.Control,
+) {
+	t.Helper()
+	matches := 0
 	for i, eid := range x.Incoming {
-		hw := highwayOfEdge(net, eid, feat)
-		c := x.IncomingControl[i]
-		if hw == "primary" && c == network.ControlStop {
-			sawPrimaryStop = true
+		if highwayOfEdge(net, eid, feat) != hwClass {
+			continue
 		}
-		if hw == "primary" && c == network.ControlNone {
-			sawPrimaryNone = true
+		if approachDir(net, eid, x.NodeID) != dir {
+			continue
+		}
+		matches++
+		if got := x.IncomingControl[i]; got != want {
+			t.Errorf("approach (hw=%s, dir=%s, edge=%d): want %v, got %v", hwClass, dir, eid, want, got)
 		}
 	}
-	if !sawPrimaryStop {
-		t.Error("primary approach with interior stop-tagged node should be ControlStop")
+	if matches == 0 {
+		t.Errorf("no incoming approach matches (hw=%s, dir=%s) — fixture or test geometry mismatch", hwClass, dir)
 	}
-	if !sawPrimaryNone {
-		t.Error("the other primary approach (no interior tag) should remain ControlNone")
+	if matches > 1 {
+		t.Errorf("ambiguous: %d incoming approaches match (hw=%s, dir=%s)", matches, hwClass, dir)
 	}
 }
 
@@ -679,17 +735,12 @@ func TestNetbuild_InteriorNodeGiveWay(t *testing.T) {
 	}
 	x := net.Intersections[0]
 
-	var sawPrimaryYield bool
-	for i, eid := range x.Incoming {
-		hw := highwayOfEdge(net, eid, feat)
-		c := x.IncomingControl[i]
-		if hw == "primary" && c == network.ControlYield {
-			sawPrimaryYield = true
-		}
-	}
-	if !sawPrimaryYield {
-		t.Error("primary approach with interior give_way-tagged node should be ControlYield")
-	}
+	// Interior give_way is on the W primary approach. E primary stays None
+	// (no sign on its segment); service approaches get class-fallback Stop.
+	wantApproach(t, net, feat, x, "primary", "W", network.ControlYield)
+	wantApproach(t, net, feat, x, "primary", "E", network.ControlNone)
+	wantApproach(t, net, feat, x, "service", "N", network.ControlStop)
+	wantApproach(t, net, feat, x, "service", "S", network.ControlStop)
 }
 
 // TestNetbuild_InteriorNodeOverridesIntersectionNode: intersection node
@@ -717,24 +768,13 @@ func TestNetbuild_InteriorNodeOverridesIntersectionNode(t *testing.T) {
 	}
 	x := net.Intersections[0]
 
-	// W approach (primary, interior stop) -> Stop (interior wins).
-	// E approach (primary, no interior) -> Yield (from intersection-node tag).
-	// Service approaches -> Yield (from intersection-node tag).
-	stopCount, yieldCount := 0, 0
-	for i := range x.Incoming {
-		switch x.IncomingControl[i] {
-		case network.ControlStop:
-			stopCount++
-		case network.ControlYield:
-			yieldCount++
-		}
-	}
-	if stopCount != 1 {
-		t.Errorf("expected exactly 1 Stop (interior wins on W primary), got %d", stopCount)
-	}
-	if yieldCount < 1 {
-		t.Errorf("expected >=1 Yield from intersection-node tag, got %d", yieldCount)
-	}
+	// W primary has the interior highway=stop → Stop (interior wins over the
+	// intersection-node give_way). Every other approach gets Yield from the
+	// intersection-node tag.
+	wantApproach(t, net, feat, x, "primary", "W", network.ControlStop)
+	wantApproach(t, net, feat, x, "primary", "E", network.ControlYield)
+	wantApproach(t, net, feat, x, "service", "N", network.ControlYield)
+	wantApproach(t, net, feat, x, "service", "S", network.ControlYield)
 }
 
 // TestNetbuild_InteriorNodeDoesNotDowngradeAllWayStop: stop=all on the
