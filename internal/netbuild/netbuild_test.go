@@ -106,6 +106,79 @@ func TestBuild_OnewayProducesSingleEdge(t *testing.T) {
 	}
 }
 
+// TestBuild_OnewayReverse_FlipsDirection: `oneway=-1` (also `reverse`)
+// means the way is one-way but traffic flows opposite to the node
+// order. Build must emit one edge with From/To flipped, not two edges
+// and not a wrong-direction edge.
+func TestBuild_OnewayReverse_FlipsDirection(t *testing.T) {
+	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
+		1: mkNode(1, 40.0, -74.0),
+		2: mkNode(2, 40.0001, -74.0),
+	}}
+	w := mkWay(100, "primary", false, 1, 2)
+	w.Tags = append(w.Tags, osm.Tag{Key: "oneway", Value: "-1"})
+	feat.Ways = []*osm.Way{w}
+
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(net.Edges) != 1 {
+		t.Fatalf("oneway=-1 should produce 1 edge, got %d", len(net.Edges))
+	}
+	e := net.Edges[0]
+	// Forward of way is 1→2; reverse direction means edge should be 2→1.
+	if int(e.From) != 1 || int(e.To) != 0 {
+		// The reverse-direction edge runs from the way's last node
+		// (node 2 → osm netID 1) to the way's first node (node 1 →
+		// osm netID 0), since osmToNet assigns netIDs in iteration
+		// order over the way's nodes.
+		t.Errorf("oneway=-1: want edge From=1 To=0 (geometry reversed); got From=%d To=%d", e.From, e.To)
+	}
+}
+
+// TestBuild_LanesPerDirection_HonorsForwardBackward: when a two-way
+// street tags asymmetric lane counts (e.g. lanes:forward=2, lanes:backward=1
+// for a road with a bus lane in one direction only), each edge must get
+// its respective count, not the halved total.
+func TestBuild_LanesPerDirection_HonorsForwardBackward(t *testing.T) {
+	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
+		1: mkNode(1, 40.0, -74.0),
+		2: mkNode(2, 40.0001, -74.0),
+	}}
+	w := mkWay(100, "primary", false, 1, 2)
+	w.Tags = append(w.Tags,
+		osm.Tag{Key: "lanes", Value: "3"},
+		osm.Tag{Key: "lanes:forward", Value: "2"},
+		osm.Tag{Key: "lanes:backward", Value: "1"},
+	)
+	feat.Ways = []*osm.Way{w}
+
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(net.Edges) != 2 {
+		t.Fatalf("two-way should produce 2 edges, got %d", len(net.Edges))
+	}
+	// Forward edge (1→2) gets 2 lanes; reverse edge (2→1) gets 1.
+	var fwdLanes, bwdLanes int
+	for _, e := range net.Edges {
+		switch {
+		case int(e.From) == 0 && int(e.To) == 1:
+			fwdLanes = len(e.Lanes)
+		case int(e.From) == 1 && int(e.To) == 0:
+			bwdLanes = len(e.Lanes)
+		}
+	}
+	if fwdLanes != 2 {
+		t.Errorf("forward edge: want 2 lanes (from lanes:forward), got %d", fwdLanes)
+	}
+	if bwdLanes != 1 {
+		t.Errorf("backward edge: want 1 lane (from lanes:backward), got %d", bwdLanes)
+	}
+}
+
 func TestBuild_RespectsMaxspeedKmh(t *testing.T) {
 	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
 		1: mkNode(1, 40.0, -74.0),

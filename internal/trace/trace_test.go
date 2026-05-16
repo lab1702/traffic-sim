@@ -3,6 +3,8 @@ package trace
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
+	"io"
 	"reflect"
 	"testing"
 )
@@ -18,6 +20,7 @@ func TestRoundTrip_AllEventKinds(t *testing.T) {
 		&SignalPhase{IntersectionID: 5, PhaseIdx: 1, IsYellow: false},
 		&MetricsTick{TotalVehicles: 42, AvgSpeed: 7.5, CongestionIdx: 0.2},
 		&SignalModeChange{IntersectionID: 5, Mode: 2}, // ModeFlashB
+		&TraceDropped{Count: 17},
 		&SimEnd{Reason: "duration"},
 	}
 	for i, e := range in {
@@ -121,5 +124,85 @@ func TestReader_UnknownKindIsSkippable(t *testing.T) {
 	}
 	if dsp.VehicleID != 9 {
 		t.Errorf("third event VehicleID = %d, want 9", dsp.VehicleID)
+	}
+}
+
+// TestUnknownEvent_RoundTripsOnWrite covers the read→filter→rewrite case
+// for tools that transform traces: an UnknownEvent obtained from Reader
+// must be writable back through Writer without loss, preserving both
+// the kind byte and the raw payload.
+func TestUnknownEvent_RoundTripsOnWrite(t *testing.T) {
+	src := &UnknownEvent{KindVal: Kind(200), Payload: []byte{0x11, 0x22, 0x33, 0x44}}
+
+	var buf bytes.Buffer
+	w := NewWriter(&buf)
+	if err := w.Write(7, 1.25, src); err != nil {
+		t.Fatalf("write UnknownEvent: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	r := NewReader(&buf)
+	hdr, ev, err := r.Next()
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if hdr.Tick != 7 || hdr.SimTime != 1.25 {
+		t.Errorf("header lost: got %+v", hdr)
+	}
+	got, ok := ev.(*UnknownEvent)
+	if !ok {
+		t.Fatalf("readback type: got %T, want *UnknownEvent", ev)
+	}
+	if got.KindVal != src.KindVal {
+		t.Errorf("KindVal: got %d, want %d", got.KindVal, src.KindVal)
+	}
+	if !bytes.Equal(got.Payload, src.Payload) {
+		t.Errorf("Payload: got %x, want %x", got.Payload, src.Payload)
+	}
+}
+
+// TestReader_TruncatedHeader returns io.EOF when the stream ends cleanly
+// at an event boundary. This is the normal end-of-file path; the player
+// surfaces it as "trace ended".
+func TestReader_TruncatedHeader(t *testing.T) {
+	var buf bytes.Buffer
+	w := NewWriter(&buf)
+	if err := w.Write(1, 0.1, &VehicleDespawn{VehicleID: 1}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	r := NewReader(&buf)
+	if _, _, err := r.Next(); err != nil {
+		t.Fatalf("first read: %v", err)
+	}
+	_, _, err := r.Next()
+	if !errors.Is(err, io.EOF) {
+		t.Errorf("want io.EOF at clean end-of-stream, got %v", err)
+	}
+}
+
+// TestReader_TruncatedPayload returns io.ErrUnexpectedEOF when the
+// stream ends mid-event. This is the "process killed during write" path;
+// the player surfaces it as a clearer "trace truncated" warning.
+func TestReader_TruncatedPayload(t *testing.T) {
+	var buf bytes.Buffer
+	w := NewWriter(&buf)
+	if err := w.Write(1, 0.1, &VehicleSpawn{
+		VehicleID: 1, OriginNode: 0, DestNode: 1, Route: []uint32{0, 1, 2},
+	}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	// Lop off the last 6 bytes — mid-Route payload.
+	data := buf.Bytes()
+	truncated := bytes.NewReader(data[:len(data)-6])
+
+	r := NewReader(truncated)
+	_, _, err := r.Next()
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Errorf("want io.ErrUnexpectedEOF on truncated payload, got %v", err)
 	}
 }

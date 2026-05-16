@@ -17,13 +17,17 @@ package trace
 type Kind uint8
 
 const (
-	KindSimStart        Kind = 1
-	KindVehicleSpawn    Kind = 2
-	KindVehicleDespawn  Kind = 3
-	KindSignalPhase     Kind = 4
-	KindMetricsTick     Kind = 5
-	KindSimEnd          Kind = 6
+	KindSimStart         Kind = 1
+	KindVehicleSpawn     Kind = 2
+	KindVehicleDespawn   Kind = 3
+	KindSignalPhase      Kind = 4
+	KindMetricsTick      Kind = 5
+	KindSimEnd           Kind = 6
 	KindSignalModeChange Kind = 7
+	// KindTraceDropped records that the writer's backpressure channel
+	// overflowed and N events were dropped before this point in the
+	// stream. Lets replayers warn that the trace is incomplete.
+	KindTraceDropped Kind = 8
 )
 
 // Event is implemented by every concrete event type.
@@ -100,6 +104,17 @@ type SignalModeChange struct {
 }
 
 func (*SignalModeChange) Kind() Kind { return KindSignalModeChange }
+
+// TraceDropped marks that the writer's bounded backpressure channel
+// overflowed and Count events were dropped between the previous event in
+// the stream and the next one. The (tick, simTime) header points to the
+// next surviving event, not the dropped ones. Replayers should warn the
+// user that the trace is missing data.
+type TraceDropped struct {
+	Count uint32
+}
+
+func (*TraceDropped) Kind() Kind { return KindTraceDropped }
 
 // UnknownEvent is returned by Reader.Next when a trace contains an event
 // kind this reader doesn't recognize. The wire format's per-event `length`

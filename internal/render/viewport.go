@@ -15,13 +15,13 @@ import (
 	"github.com/lab1702/traffic-sim/internal/snapshot"
 )
 
-// SignalView.Mode constants — duplicated here to avoid importing sim.
-// These must match the values of sim.SignalMode.
+// Renderer reads SignalView.Mode using the shared snapshot constants
+// (which are kept in sync with sim.SignalMode by a sim-package test).
 const (
-	modeNormal  = 0
-	modeFlashA  = 1
-	modeFlashB  = 2
-	modeOff     = 3
+	modeNormal = snapshot.ModeNormal
+	modeFlashA = snapshot.ModeFlashA
+	modeFlashB = snapshot.ModeFlashB
+	modeOff    = snapshot.ModeOff
 )
 
 // vehicleLength is the bumper-to-bumper length used to draw vehicles.

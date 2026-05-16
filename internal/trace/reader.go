@@ -157,6 +157,12 @@ func decodePayload(k Kind, p []byte) (Event, error) {
 			return nil, err
 		}
 		return e, nil
+	case KindTraceDropped:
+		e := &TraceDropped{}
+		if err := binary.Read(rd, le, &e.Count); err != nil {
+			return nil, err
+		}
+		return e, nil
 	}
 	// Forward compatibility: a trace produced by a newer writer can contain
 	// kinds this reader doesn't recognize. The wire format's length-prefixed

@@ -1,6 +1,8 @@
 package osmload
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -88,5 +90,32 @@ func TestLoad_RetainsSignNodes(t *testing.T) {
 	}
 	if _, ok := f.Nodes[99]; ok {
 		t.Errorf("node 99 should be dropped (unreferenced, untagged)")
+	}
+}
+
+// TestLoad_EmptyOSM exercises the "valid file with no features" path.
+// Load should succeed with empty slices/maps; netbuild is the one that
+// later errors with "no drivable ways in input".
+func TestLoad_EmptyOSM(t *testing.T) {
+	tmp := filepath.Join(t.TempDir(), "empty.osm")
+	body := `<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6" generator="test">
+</osm>
+`
+	if err := os.WriteFile(tmp, []byte(body), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	f, err := Load(tmp)
+	if err != nil {
+		t.Fatalf("Load empty: %v", err)
+	}
+	if len(f.Nodes) != 0 {
+		t.Errorf("empty .osm should yield 0 nodes, got %d", len(f.Nodes))
+	}
+	if len(f.Ways) != 0 {
+		t.Errorf("empty .osm should yield 0 ways, got %d", len(f.Ways))
+	}
+	if len(f.Restrictions) != 0 {
+		t.Errorf("empty .osm should yield 0 restrictions, got %d", len(f.Restrictions))
 	}
 }

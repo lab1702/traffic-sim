@@ -24,6 +24,7 @@ var defaults = map[string]highwayDefaults{
 	"primary_link":   {13.4, 1},
 	"secondary_link": {11.2, 1},
 	"tertiary_link":  {11.2, 1},
+	"road":           {11.2, 1}, // OSM placeholder; treat as unclassified
 }
 
 func defaultsFor(highway string) highwayDefaults {

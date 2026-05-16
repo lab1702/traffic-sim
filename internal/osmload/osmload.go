@@ -109,12 +109,16 @@ func isHighway(w *osm.Way) bool {
 
 // drivableHighway returns true for highway= values that carry motor traffic.
 // Excludes footways, cycleways, paths, steps, etc.
+//
+// "road" is OSM's "I know there's a road here but haven't classified it"
+// placeholder; common in partially-mapped regions and treated like
+// unclassified.
 func drivableHighway(v string) bool {
 	switch v {
 	case "motorway", "trunk", "primary", "secondary", "tertiary",
 		"unclassified", "residential", "service", "living_street",
 		"motorway_link", "trunk_link", "primary_link",
-		"secondary_link", "tertiary_link":
+		"secondary_link", "tertiary_link", "road":
 		return true
 	}
 	return false

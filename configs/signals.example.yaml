@@ -1,10 +1,23 @@
-# Per-intersection signal overrides. IntersectionID values come from the
-# graph build; you can list them with `trafficsim load <file>` (TODO: that
-# subcommand currently prints summary stats only; a future task can add
-# `--list-intersections`).
+# ============================================================================
+# EXAMPLE FILE — REPLACE THE intersection_id VALUES BEFORE USING.
+#
+# IDs in this file (42, 7, 8, 100, 101) are placeholders and will not
+# match any real OSM extract. trafficsim will log a warning and skip any
+# override whose intersection_id is out of range or targets an
+# unsignalled intersection.
+#
+# To find real intersection IDs for your OSM file, look in the graph
+# build log or load the file in the viewer and click on intersections
+# (the HUD shows the selected ID).
+#
+# Schema validation rejects: negative durations, both green_dur and
+# yellow_dur being zero on the same phase (would not progress), unknown
+# mode strings, unknown ban categories.
+# ============================================================================
+
 signals:
   # Example 1: custom phase plan, normal cycling mode.
-  - intersection_id: 42
+  - intersection_id: 42                # <- REPLACE with a real intersection_id
     phases:
       - green_edges: [0, 2]
         green_dur: 45
@@ -28,10 +41,10 @@ signals:
   # Modes can also be toggled at runtime in the live viewer:
   # click a signal, then press N (normal), Y (this axis yellow),
   # R (other axis yellow), O (off).
-  - intersection_id: 7
+  - intersection_id: 7                 # <- REPLACE
     mode: flash_a
 
-  - intersection_id: 8
+  - intersection_id: 8                 # <- REPLACE
     mode: off
 
 # Turn restrictions. Each entry forbids a category of turn at one
@@ -47,9 +60,8 @@ signals:
 # automatically find a Michigan-left path through any nearby U-turn
 # pockets that exist in the OSM data.
 turn_restrictions:
-  - intersection_id: 100
+  - intersection_id: 100               # <- REPLACE
     ban: [left_turn, u_turn]
 
-  - intersection_id: 101
+  - intersection_id: 101               # <- REPLACE
     ban: [u_turn]
-

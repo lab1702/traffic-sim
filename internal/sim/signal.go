@@ -107,11 +107,26 @@ func (s *SignalState) Advance(dt float64) {
 		return
 	}
 	s.Elapsed += dt
-	for {
+	// Defensive guard: a phase with neither green nor yellow time is a
+	// degenerate config (validation upstream should reject it, but trust
+	// nothing here — the loop would spin forever on threshold=0). Belt
+	// and suspenders for the runtime path.
+	for safety := 0; safety < 1024; safety++ {
 		p := &s.Config.Phases[s.PhaseIdx]
 		threshold := p.GreenDur
 		if s.IsYellow {
 			threshold = p.YellowDur
+		}
+		if threshold <= 0 {
+			// Skip this transition rather than infinite-loop. Land on
+			// the next non-degenerate phase so the cycle keeps moving.
+			if !s.IsYellow {
+				s.IsYellow = true
+			} else {
+				s.IsYellow = false
+				s.PhaseIdx = (s.PhaseIdx + 1) % len(s.Config.Phases)
+			}
+			continue
 		}
 		if s.Elapsed < threshold {
 			return

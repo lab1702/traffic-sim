@@ -1,10 +1,16 @@
 package main
 
 import (
+	"bufio"
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
@@ -27,7 +33,10 @@ func main() {
 	case "load":
 		runLoad(os.Args[2:])
 	case "run":
-		runRun(os.Args[2:])
+		if err := runRun(os.Args[2:]); err != nil {
+			slog.Error("run failed", "err", err)
+			os.Exit(1)
+		}
 	case "-h", "--help", "help":
 		usage()
 		os.Exit(0)
@@ -71,6 +80,8 @@ func usage() {
 	fmt.Fprintln(out, "    first non-flag argument).")
 	fmt.Fprintln(out, "  - `run --headless` requires `--duration > 0`.")
 	fmt.Fprintln(out, "  - Same `--seed` + same OSM + same `--spawn-rate` yields a byte-identical trace.")
+	fmt.Fprintln(out, "  - Ctrl+C (SIGINT/SIGTERM) triggers an orderly shutdown: the trace is")
+	fmt.Fprintln(out, "    flushed with a final SimEnd event before the process exits.")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Examples:")
 	fmt.Fprintln(out, "  trafficsim load city.osm.pbf")
@@ -170,81 +181,38 @@ func newRunFlagSet() (*flag.FlagSet, *runFlags) {
 	return fs, f
 }
 
-func runRun(args []string) {
+// runRun parses flags, loads the OSM/config, builds the network and world,
+// and dispatches to headless or live mode. Returns an error rather than
+// calling os.Exit so deferreds (trace finalization) get a chance to run.
+func runRun(args []string) error {
 	fs, f := newRunFlagSet()
 	if err := fs.Parse(args); err != nil {
-		os.Exit(2)
+		return err
 	}
 	if fs.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "run: need exactly one OSM path")
 		fs.Usage()
-		os.Exit(2)
+		return errors.New("run: need exactly one OSM path")
 	}
-	path := fs.Arg(0)
-	headless := &f.headless
-	duration := &f.duration
-	seed := &f.seed
-	spawnRate := &f.spawnRate
-	signalsPath := &f.signalsPath
-	tracePath := &f.tracePath
+	if f.headless && f.duration == 0 {
+		return errors.New("--headless requires --duration > 0")
+	}
+	osmPath := fs.Arg(0)
 
-	feat, err := osmload.Load(path)
+	feat, err := osmload.Load(osmPath)
 	if err != nil {
-		slog.Error("load failed", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("load osm: %w", err)
 	}
 	net, _, err := netbuild.Build(feat)
 	if err != nil {
-		slog.Error("build failed", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("build: %w", err)
 	}
 
-	overrides := map[network.IntersectionID]sim.SignalConfig{}
-	if *signalsPath != "" {
-		cfg, err := config.LoadConfig(*signalsPath)
-		if err != nil {
-			slog.Error("config load failed", "err", err)
-			os.Exit(1)
-		}
-		for _, o := range cfg.Signals {
-			phases := make([]sim.SignalPhase, len(o.Phases))
-			for i, p := range o.Phases {
-				phases[i] = sim.SignalPhase{
-					GreenEdges: p.GreenEdges, GreenDur: p.GreenDur, YellowDur: p.YellowDur,
-				}
-			}
-			// Validate intersection_id is in range; warn and skip if not.
-			if int(o.IntersectionID) >= len(net.Intersections) {
-				slog.Warn("signal override references unknown intersection",
-					"id", o.IntersectionID, "max", len(net.Intersections)-1)
-				continue
-			}
-			mode, ok := sim.ParseSignalMode(o.Mode)
-			if !ok {
-				slog.Warn("signal override has unknown mode; using normal",
-					"id", o.IntersectionID, "mode", o.Mode)
-			}
-			sc := sim.SignalConfig{
-				IntersectionID: network.IntersectionID(o.IntersectionID),
-				Phases:         phases,
-				InitialMode:    mode,
-			}
-			// If only `mode:` is set (no phases), inherit the auto-generated
-			// plan for that intersection so phase 0/1 groupings still work
-			// for flash-mode semantics.
-			if len(phases) == 0 {
-				x := &net.Intersections[o.IntersectionID]
-				sc.Phases = sim.DefaultSignalConfig(x.Incoming, net).Phases
-			}
-			overrides[network.IntersectionID(o.IntersectionID)] = sc
-		}
-
-		// Apply turn restrictions to the network before constructing the
-		// Router (which caches the banned-turn map at construction time).
-		applyTurnRestrictions(net, cfg.TurnRestrictions)
+	overrides, err := loadOverrides(f.signalsPath, net)
+	if err != nil {
+		return err
 	}
 
-	spawner := sim.NewRandomOD(net, *seed, *spawnRate)
+	spawner := sim.NewRandomOD(net, f.seed, f.spawnRate)
 	w := sim.NewWorld(net, spawner, overrides)
 
 	// Control channel from the UI to the sim. Renderer pushes mode-toggle
@@ -253,79 +221,144 @@ func runRun(args []string) {
 	controlCh := make(chan sim.ControlEvent, 32)
 	w.Control = controlCh
 
-	if *tracePath != "" {
-		f, err := os.Create(*tracePath)
+	// SIGINT/SIGTERM → ctx cancellation. The context is the single
+	// orderly-shutdown signal: both headless and live modes watch it.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// Trace setup. The sink's Close is deferred so it runs after the sim
+	// goroutine has stopped (see runLive for the wait sequence).
+	var sink *traceSink
+	if f.tracePath != "" {
+		sink, err = newTraceSink(f.tracePath)
 		if err != nil {
-			slog.Error("trace create failed", "err", err)
-			os.Exit(1)
+			return fmt.Errorf("trace create: %w", err)
 		}
-		tw := trace.NewWriter(f)
-		type evMsg struct {
-			tick    uint64
-			simTime float64
-			e       trace.Event
-		}
-		ch := make(chan evMsg, 4096)
-		done := make(chan struct{})
-		go func() {
-			defer close(done)
-			for m := range ch {
-				if err := tw.Write(m.tick, m.simTime, m.e); err != nil {
-					slog.Error("trace write failed", "err", err)
-					return
-				}
+		defer func() {
+			// Emit SimEnd at the final tick/simTime the sim reached, then
+			// flush+fsync+close the file. Reading w.Tick/w.SimTime here is
+			// race-free because the sim goroutine has already returned
+			// (runHeadless and runLive both wait for it before returning).
+			sink.emit(w.Tick, w.SimTime, &trace.SimEnd{Reason: "exit"})
+			if cerr := sink.close(); cerr != nil {
+				slog.Error("trace finalize failed", "err", cerr)
 			}
-			_ = tw.Close()
-			_ = f.Close()
 		}()
-		dropped := uint64(0)
-		w.EmitTrace = func(tick uint64, simTime float64, e trace.Event) {
-			select {
-			case ch <- evMsg{tick, simTime, e}:
-			default:
-				dropped++
-				if dropped%1000 == 1 {
-					slog.Warn("trace dropped", "dropped_total", dropped)
-				}
-			}
-		}
-		// Emit start event with the seed and a network fingerprint so
-		// tracereplay can warn if the OSM doesn't match the original run.
-		w.EmitTrace(0, 0, &trace.SimStart{
-			SeedLo:  *seed,
-			SeedHi:  *seed ^ 0x9E3779B97F4A7C15, // matches RandomOD's PCG seed pair
+		w.EmitTrace = sink.emit
+		// SimStart includes a network fingerprint so tracereplay can warn
+		// if the OSM doesn't match the original run.
+		sink.emit(0, 0, &trace.SimStart{
+			SeedLo:  f.seed,
+			SeedHi:  f.seed ^ 0x9E3779B97F4A7C15, // matches RandomOD's PCG seed pair
 			NetHash: network.Hash(net),
 		})
-		defer func() {
-			w.EmitTrace(w.Tick, w.SimTime, &trace.SimEnd{Reason: "exit"})
-			close(ch)
-			<-done // wait for goroutine to flush and close the file
-			if dropped > 0 {
-				slog.Warn("trace: total events dropped", "count", dropped)
-			}
-		}()
 	}
 
-	if *headless {
-		if *duration == 0 {
-			fmt.Fprintln(os.Stderr, "error: --headless requires --duration > 0")
-			os.Exit(2)
-		}
-		w.Run(duration.Seconds())
+	if f.headless {
+		runHeadless(ctx, w, f.duration)
 		fmt.Printf("done. final_vehicles=%d ticks=%d sim_time=%.2fs\n",
 			len(w.Vehicles), w.Tick, w.SimTime)
-		return
+		return nil
 	}
+	return runLive(ctx, w, controlCh, net)
+}
 
-	// Live mode: sim runs on its own goroutine at 20 Hz wall-clock,
-	// renderer runs at Ebitengine's default frame rate (~60 FPS).
-	stop := make(chan struct{})
+// loadOverrides reads a signals.yaml at signalsPath (if non-empty) and
+// expands its contents into the maps the sim and network consume. Returns
+// (nil, nil) if no path was provided. Returns a wrapped error on any
+// parse, validate, or missing-file failure.
+func loadOverrides(signalsPath string, net *network.Network) (map[network.IntersectionID]sim.SignalConfig, error) {
+	if signalsPath == "" {
+		return nil, nil
+	}
+	cfg, err := config.LoadConfig(signalsPath)
+	if err != nil {
+		return nil, fmt.Errorf("signals: %w", err)
+	}
+	overrides := map[network.IntersectionID]sim.SignalConfig{}
+	for _, o := range cfg.Signals {
+		if int(o.IntersectionID) >= len(net.Intersections) {
+			slog.Warn("signal override references unknown intersection",
+				"id", o.IntersectionID, "count", len(net.Intersections))
+			continue
+		}
+		x := &net.Intersections[o.IntersectionID]
+		if !x.HasSignal {
+			slog.Warn("signal override targets an unsignalled intersection; ignored",
+				"id", o.IntersectionID, "node_id", x.NodeID)
+			continue
+		}
+		mode, ok := sim.ParseSignalMode(o.Mode)
+		if !ok {
+			slog.Warn("signal override has unknown mode; using normal",
+				"id", o.IntersectionID, "mode", o.Mode)
+		}
+		phases := make([]sim.SignalPhase, len(o.Phases))
+		for i, p := range o.Phases {
+			phases[i] = sim.SignalPhase{
+				GreenEdges: p.GreenEdges, GreenDur: p.GreenDur, YellowDur: p.YellowDur,
+			}
+		}
+		sc := sim.SignalConfig{
+			IntersectionID: network.IntersectionID(o.IntersectionID),
+			Phases:         phases,
+			InitialMode:    mode,
+		}
+		// If only `mode:` is set (no phases), inherit the auto-generated
+		// plan for that intersection so phase 0/1 groupings still work
+		// for flash-mode semantics.
+		if len(phases) == 0 {
+			sc.Phases = sim.DefaultSignalConfig(x.Incoming, net).Phases
+		}
+		overrides[network.IntersectionID(o.IntersectionID)] = sc
+	}
+	// Apply turn restrictions to the network before constructing the
+	// Router (which caches the banned-turn map at construction time).
+	applyTurnRestrictions(net, cfg.TurnRestrictions)
+	return overrides, nil
+}
+
+// runHeadless ticks the world in-place until duration elapses or ctx is
+// cancelled (SIGINT/SIGTERM). Caller is responsible for emitting SimEnd
+// after this returns.
+func runHeadless(ctx context.Context, w *sim.World, duration time.Duration) {
+	target := w.SimTime + duration.Seconds()
+	lastLog := w.SimTime
+	for w.SimTime < target {
+		if ctx.Err() != nil {
+			slog.Info("shutdown signal received; finalizing trace")
+			return
+		}
+		w.Step()
+		if w.SimTime-lastLog >= 1.0 {
+			slog.Info("sim progress",
+				"sim_time", w.SimTime,
+				"vehicles", len(w.Vehicles),
+				"tick", w.Tick,
+			)
+			lastLog = w.SimTime
+		}
+	}
+}
+
+// runLive runs the sim goroutine + ebiten viewer concurrently. Shutdown
+// sequence: SIGINT cancellation OR ebiten-window close triggers the sim
+// goroutine to return; we wait for it before returning so the deferred
+// trace finalizer in runRun reads a quiescent w.Tick/w.SimTime.
+func runLive(parentCtx context.Context, w *sim.World, controlCh chan<- sim.ControlEvent, net *network.Network) error {
+	// Derive a child context we can cancel ourselves once ebiten exits,
+	// so the sim goroutine stops cleanly even if SIGINT never fires.
+	ctx, cancel := context.WithCancel(parentCtx)
+	defer cancel()
+
+	simDone := make(chan struct{})
 	go func() {
+		defer close(simDone)
 		ticker := time.NewTicker(time.Duration(sim.DefaultDt * float64(time.Second)))
 		defer ticker.Stop()
 		for {
 			select {
-			case <-stop:
+			case <-ctx.Done():
 				return
 			case <-ticker.C:
 				w.Step()
@@ -347,18 +380,18 @@ func runRun(args []string) {
 	ebiten.SetWindowSize(1280, 800)
 	ebiten.SetWindowTitle("traffic-sim")
 	ebiten.SetWindowResizingMode(ebiten.WindowResizingModeEnabled)
-	if err := ebiten.RunGame(&gameAdapter{vp: vp}); err != nil {
-		close(stop)
-		slog.Error("ebiten exited", "err", err)
-		os.Exit(1)
-	}
-	close(stop)
-}
 
-func hasFlags(fs *flag.FlagSet) bool {
-	any := false
-	fs.VisitAll(func(*flag.Flag) { any = true })
-	return any
+	// If SIGINT fires while ebiten is running, the gameAdapter's Update
+	// returns ebiten.Termination so RunGame returns cleanly. The window
+	// is destroyed and shutdown continues via the normal path.
+	runErr := ebiten.RunGame(&gameAdapter{vp: vp, ctx: ctx})
+
+	// Stop the sim goroutine and wait for it to exit before returning.
+	// This wait is the precondition for the deferred trace finalizer in
+	// runRun to safely read w.Tick/w.SimTime.
+	cancel()
+	<-simDone
+	return runErr
 }
 
 // applyTurnRestrictions expands each high-level Ban category into concrete
@@ -371,7 +404,7 @@ func applyTurnRestrictions(net *network.Network, restrictions []config.TurnRestr
 	for _, r := range restrictions {
 		if int(r.IntersectionID) >= len(net.Intersections) {
 			slog.Warn("turn restriction references unknown intersection",
-				"id", r.IntersectionID, "max", len(net.Intersections)-1)
+				"id", r.IntersectionID, "count", len(net.Intersections))
 			continue
 		}
 		x := &net.Intersections[r.IntersectionID]
@@ -420,11 +453,137 @@ func countSignals(xs []network.Intersection) int {
 	return n
 }
 
-// gameAdapter wraps a Viewport into Ebitengine's Game interface.
-type gameAdapter struct {
-	vp *render.Viewport
+func hasFlags(fs *flag.FlagSet) bool {
+	any := false
+	fs.VisitAll(func(*flag.Flag) { any = true })
+	return any
 }
 
-func (g *gameAdapter) Update() error             { return g.vp.Update() }
-func (g *gameAdapter) Draw(screen *ebiten.Image) { g.vp.Draw(screen) }
+// gameAdapter wraps a Viewport into Ebitengine's Game interface. If ctx
+// is non-nil, Update returns ebiten.Termination as soon as ctx is done
+// (used to wire SIGINT/SIGTERM into a clean ebiten shutdown).
+type gameAdapter struct {
+	vp  *render.Viewport
+	ctx context.Context
+}
+
+func (g *gameAdapter) Update() error {
+	if g.ctx != nil {
+		select {
+		case <-g.ctx.Done():
+			return ebiten.Termination
+		default:
+		}
+	}
+	return g.vp.Update()
+}
+func (g *gameAdapter) Draw(screen *ebiten.Image)  { g.vp.Draw(screen) }
 func (g *gameAdapter) Layout(w, h int) (int, int) { return g.vp.Layout(w, h) }
+
+// --- trace sink ---
+
+// evMsg is one queued trace event.
+type evMsg struct {
+	tick    uint64
+	simTime float64
+	e       trace.Event
+}
+
+// traceSink owns the file/bufio/writer triple plus a bounded backpressure
+// channel and the drain goroutine that empties it. EmitTrace is set to
+// sink.emit on the World; SimEnd and Close are driven from runRun's
+// deferred shutdown.
+type traceSink struct {
+	file    *os.File
+	bw      *bufio.Writer
+	tw      *trace.Writer
+	ch      chan evMsg
+	done    chan struct{}
+	dropped atomic.Uint64
+}
+
+const traceChannelDepth = 4096
+
+func newTraceSink(path string) (*traceSink, error) {
+	f, err := os.Create(path)
+	if err != nil {
+		return nil, err
+	}
+	bw := bufio.NewWriterSize(f, 64<<10) // 64 KiB
+	ts := &traceSink{
+		file: f,
+		bw:   bw,
+		tw:   trace.NewWriter(bw),
+		ch:   make(chan evMsg, traceChannelDepth),
+		done: make(chan struct{}),
+	}
+	go ts.drain()
+	return ts, nil
+}
+
+// emit is the EmitTrace hook the sim calls on every event. Non-blocking
+// to keep the sim's tick deterministic in wall-clock; overflow increments
+// a counter that the drain loop later materializes as a KindTraceDropped
+// marker in the on-disk stream.
+func (ts *traceSink) emit(tick uint64, simTime float64, e trace.Event) {
+	select {
+	case ts.ch <- evMsg{tick, simTime, e}:
+	default:
+		n := ts.dropped.Add(1)
+		if n == 1 || n%1000 == 0 {
+			slog.Warn("trace event dropped (writer backpressure)", "dropped_total", n)
+		}
+	}
+}
+
+// drain pulls events from the channel and writes them through the
+// bufio-wrapped trace.Writer. Before writing each event, if the dropped
+// counter has grown since last seen, a KindTraceDropped marker is emitted
+// FIRST so the replay tool can warn the user the stream is incomplete.
+func (ts *traceSink) drain() {
+	defer close(ts.done)
+	var lastDropped uint64
+	for m := range ts.ch {
+		if cur := ts.dropped.Load(); cur > lastDropped {
+			marker := &trace.TraceDropped{Count: uint32(cur - lastDropped)}
+			if err := ts.tw.Write(m.tick, m.simTime, marker); err != nil {
+				slog.Error("trace drop-marker write failed", "err", err)
+				return
+			}
+			lastDropped = cur
+		}
+		if err := ts.tw.Write(m.tick, m.simTime, m.e); err != nil {
+			slog.Error("trace write failed", "err", err)
+			return
+		}
+	}
+}
+
+// close finalizes the trace: closes the channel, waits for the drain
+// goroutine to flush all queued events, calls trace.Writer.Close to
+// guarantee a header exists, then Flushes the bufio buffer, Syncs the
+// file to disk, and closes it. Returns the first error encountered.
+//
+// Must be called exactly once, AFTER the sim goroutine has stopped and
+// the caller has emitted SimEnd (so it lands in the queued events).
+func (ts *traceSink) close() error {
+	close(ts.ch)
+	<-ts.done
+	var firstErr error
+	if err := ts.tw.Close(); err != nil {
+		firstErr = fmt.Errorf("writer close: %w", err)
+	}
+	if err := ts.bw.Flush(); err != nil && firstErr == nil {
+		firstErr = fmt.Errorf("bufio flush: %w", err)
+	}
+	if err := ts.file.Sync(); err != nil && firstErr == nil {
+		firstErr = fmt.Errorf("fsync: %w", err)
+	}
+	if err := ts.file.Close(); err != nil && firstErr == nil {
+		firstErr = fmt.Errorf("file close: %w", err)
+	}
+	if n := ts.dropped.Load(); n > 0 {
+		slog.Warn("trace finalized with dropped events", "count", n)
+	}
+	return firstErr
+}
