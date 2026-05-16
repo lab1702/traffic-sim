@@ -1224,3 +1224,71 @@ func TestWorld_StopSign_GapAcceptance(t *testing.T) {
 		t.Errorf("stop vehicle is legitimately waiting; StuckTime must be 0, got %.3f", stop.StuckTime)
 	}
 }
+
+// TestWorld_SignalOff_TreatedAsAllWayStop: an intersection with
+// HasSignal=true and Mode=ModeOff behaves like an AllWayStop: every
+// approach must stop and dwell before departing.
+func TestWorld_SignalOff_TreatedAsAllWayStop(t *testing.T) {
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: -100, Y: 0}},
+		{ID: 1, Pos: network.Point{X: 100, Y: 0}},
+		{ID: 2, Pos: network.Point{X: 0, Y: -100}},
+		{ID: 3, Pos: network.Point{X: 0, Y: 100}},
+		{ID: 4, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 5, Pos: network.Point{X: 200, Y: 0}},
+	}
+	mkEdge := func(id, from, to int) network.Edge {
+		return network.Edge{
+			ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: 100, SpeedLimit: 10,
+			Lanes:    []network.Lane{{Index: 0}},
+			Geometry: []network.Point{nodes[from].Pos, nodes[to].Pos},
+		}
+	}
+	edges := []network.Edge{
+		mkEdge(0, 0, 4), // W->C
+		mkEdge(1, 1, 4), // E->C
+		mkEdge(2, 2, 4), // S->C
+		mkEdge(3, 3, 4), // N->C
+		mkEdge(4, 4, 5), // C->east outbound
+	}
+	xs := []network.Intersection{
+		{
+			ID: 0, NodeID: 4,
+			Incoming:        []network.EdgeID{0, 1, 2, 3},
+			IncomingControl: allNone(4), // not consulted: HasSignal=true
+			Outgoing:        []network.EdgeID{4},
+			HasSignal:       true,
+		},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	w.SignalStates[0].Mode = ModeOff
+
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0, 4}, Edge: 0, S: 60, V: 8},
+	}
+	w.nextID = 2
+
+	registeredStop := false
+	for i := 0; i < 500; i++ {
+		w.Step()
+		if len(w.Vehicles) == 0 {
+			break
+		}
+		if w.Vehicles[0].StoppedSinceSec > 0 {
+			registeredStop = true
+		}
+		if w.Vehicles[0].Despawned || w.Vehicles[0].Edge == 4 {
+			break
+		}
+	}
+
+	if !registeredStop {
+		t.Error("ModeOff approach must register a mandatory stop")
+	}
+	if len(w.Vehicles) > 0 && !w.Vehicles[0].Despawned && w.Vehicles[0].Edge != 4 {
+		t.Errorf("vehicle should have cleared the intersection after dwell, still on edge %d", w.Vehicles[0].Edge)
+	}
+}
