@@ -178,6 +178,95 @@ func TestWorld_StopsAtRedLight(t *testing.T) {
 	}
 }
 
+// TestWorld_CrossEdgeLeader_PostTurnLane: a right-turner in lane 1 of the
+// inbound edge must find the leader in lane 0 of the outbound edge — the
+// post-right-turn target — not lane 1. If the cross-edge leader lookup keys
+// off the ego's pre-turn lane, the ego misses the stopped leader on edge 1,
+// crosses the intersection at full speed, snaps to lane 0 (right-turn rule),
+// and collides with the previously-invisible leader.
+//
+// Regression: see review #2 (2026-05-15).
+func TestWorld_CrossEdgeLeader_PostTurnLane(t *testing.T) {
+	// Edge 0: (0,0) → (200,0)  — heading east, 2 lanes, 200m long
+	// Edge 1: (200,0) → (200,-100) — heading south (right turn from edge 0),
+	//        2 lanes, 100m long. Turn angle = -90° → TurnRight.
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 1, Pos: network.Point{X: 200, Y: 0}},
+		{ID: 2, Pos: network.Point{X: 200, Y: -100}},
+	}
+	edges := []network.Edge{
+		{ID: 0, From: 0, To: 1, Length: 200, SpeedLimit: 10,
+			Lanes:    []network.Lane{{Index: 0}, {Index: 1}},
+			Geometry: []network.Point{nodes[0].Pos, nodes[1].Pos}},
+		{ID: 1, From: 1, To: 2, Length: 100, SpeedLimit: 10,
+			Lanes:    []network.Lane{{Index: 0}, {Index: 1}},
+			Geometry: []network.Point{nodes[1].Pos, nodes[2].Pos}},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges}
+
+	// Sanity-check the turn classification — if this changes, the test setup
+	// no longer exercises the bug.
+	if cat := network.ClassifyTurn(net, 0, 1); cat != network.TurnRight {
+		t.Fatalf("turn 0→1 should classify as TurnRight, got %v", cat)
+	}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+
+	// Ego: lane 1 of edge 0, 15m from end of edge 0, moving at v0=10.
+	// Leader: stopped at S=5 on edge 1 in lane 0 (the post-right-turn target lane).
+	// Cross-edge gap = (200 - 15) + 5 = 190... wait, ego S=185 → 200-185=15m to
+	// end of edge 0, then 5m into edge 1 = 20m gap. With v=10 closing on v=0,
+	// IDM safe-distance > 20m, so ego must decelerate strongly.
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0, 1}, Edge: 0, S: 185, V: 10, Lane: 1}, // ego
+		{ID: 2, Route: []network.EdgeID{1}, Edge: 1, S: 5, V: 0, Lane: 0},       // leader (stopped)
+	}
+	w.nextID = 3
+
+	// Linear distance helper: along-route arc-length, used for collision detection.
+	pos := func(v *Vehicle) float64 {
+		switch v.Edge {
+		case 0:
+			return v.S
+		case 1:
+			return edges[0].Length + v.S
+		}
+		return 0
+	}
+
+	// Run for 4 sim-seconds (80 ticks). The ego will cross the intersection
+	// within ~1.5s. Any tick where gap < VehicleLength is a collision.
+	minGap := math.Inf(1)
+	for i := 0; i < 80; i++ {
+		w.Step()
+		// The leader vehicle is the stopped one (V=0 throughout); locate by ID.
+		var ego, leader *Vehicle
+		for j := range w.Vehicles {
+			switch w.Vehicles[j].ID {
+			case 1:
+				ego = &w.Vehicles[j]
+			case 2:
+				leader = &w.Vehicles[j]
+			}
+		}
+		if ego == nil || leader == nil {
+			t.Fatalf("tick %d: lost a vehicle (ego=%v leader=%v)", i, ego, leader)
+		}
+		gap := pos(leader) - pos(ego) - VehicleLength
+		if gap < minGap {
+			minGap = gap
+		}
+		if gap < 0 {
+			t.Fatalf("tick %d: collision — ego at edge=%d S=%.2f V=%.2f lane=%d, leader at edge=%d S=%.2f, gap=%.2f",
+				i, ego.Edge, ego.S, ego.V, ego.Lane, leader.Edge, leader.S, gap)
+		}
+	}
+	if minGap < 0 {
+		t.Errorf("min gap over run was %.2f (collision)", minGap)
+	}
+}
+
 // buildSignalApproach returns a single-edge graph ending at a signalized
 // intersection: a 200m road from node 0 to node 1, with node 1 the
 // signal. Used by the soft-red yellow tests.

@@ -155,23 +155,37 @@ func stepIDM(v *Vehicle, v0 float64, leaderS float64, leaderV float64, hasLeader
 		}
 
 		nLanes := uint8(len(edge.Lanes))
-		switch cat {
-		case network.TurnRight:
-			v.Lane = 0
-		case network.TurnLeft:
-			if nLanes > 0 {
-				v.Lane = nLanes - 1
-			} else {
-				v.Lane = 0
-			}
-		case network.TurnStraight:
-			if uint8(prevLane) >= nLanes && nLanes > 0 {
-				v.Lane = nLanes - 1
-			} else {
-				v.Lane = prevLane
-			}
-		default: // TurnUTurn or unclassified
-			v.Lane = 0
+		v.Lane = postTurnLane(prevLane, cat, nLanes)
+	}
+}
+
+// postTurnLane returns the lane a vehicle will occupy on the outbound edge
+// after a turn of category `cat`, given its lane on the inbound edge
+// (`prevLane`) and the outbound edge's lane count (`nLanes`).
+//
+// Right turns snap to lane 0; left turns snap to the highest lane; straights
+// hold their lane (clamped if the outbound has fewer lanes). U-turns and
+// unclassified fall to lane 0. Returns 0 when nLanes == 0.
+//
+// Used by both the post-turn lane snap in advanceVehicle and the cross-edge
+// leader lookup in world.Step — keep them in sync, otherwise a right-turner
+// will look for a leader in the wrong lane and miss the vehicle it snaps
+// behind on the next tick.
+func postTurnLane(prevLane uint8, cat network.TurnCategory, nLanes uint8) uint8 {
+	if nLanes == 0 {
+		return 0
+	}
+	switch cat {
+	case network.TurnRight:
+		return 0
+	case network.TurnLeft:
+		return nLanes - 1
+	case network.TurnStraight:
+		if prevLane >= nLanes {
+			return nLanes - 1
 		}
+		return prevLane
+	default: // TurnUTurn or unclassified
+		return 0
 	}
 }

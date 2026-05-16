@@ -684,9 +684,16 @@ func (w *World) Step() {
 					if v.RouteIdx+1 < len(v.Route) {
 						nextE := v.Route[v.RouteIdx+1]
 						if nlanes, ok := byEdgeLane[nextE]; ok {
-							// Use first vehicle in the same lane index on the next edge if exists.
-							if ne := &w.Net.Edges[nextE]; uint8(ln) < uint8(len(ne.Lanes)) {
-								if nidxs, ok2 := nlanes[ln]; ok2 && len(nidxs) > 0 {
+							// Look for the leader on the post-turn target lane,
+							// not ego's current lane — right-turners snap to lane
+							// 0 and left-turners to nLanes-1 next tick, so the
+							// current-lane bucket is the wrong one to search.
+							ne := &w.Net.Edges[nextE]
+							nLanes := uint8(len(ne.Lanes))
+							cat := network.ClassifyTurn(w.Net, v.Edge, nextE)
+							nextLane := postTurnLane(uint8(ln), cat, nLanes)
+							if nextLane < nLanes {
+								if nidxs, ok2 := nlanes[nextLane]; ok2 && len(nidxs) > 0 {
 									nv := &w.Vehicles[nidxs[0]]
 									info.lS = edge.Length + nv.S
 									info.lV = nv.V
