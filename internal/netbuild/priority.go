@@ -89,15 +89,32 @@ func sortIncomingByPriority(
 			}
 			return ea < eb
 		})
+		// Build inverse permutation: oldToNew[oldI] = newI.
+		oldToNew := make([]int, len(idx))
+		for newI, oldI := range idx {
+			oldToNew[oldI] = newI
+		}
 		newInc := make([]network.EdgeID, len(x.Incoming))
 		newCtrl := make([]network.Control, len(x.IncomingControl))
+		newOpp := make([]int8, len(x.Opposing))
 		for newI, oldI := range idx {
 			newInc[newI] = x.Incoming[oldI]
 			if oldI < len(x.IncomingControl) {
 				newCtrl[newI] = x.IncomingControl[oldI]
 			}
+			if oldI < len(x.Opposing) {
+				oldVal := x.Opposing[oldI]
+				if oldVal < 0 {
+					newOpp[newI] = -1
+				} else {
+					newOpp[newI] = int8(oldToNew[int(oldVal)])
+				}
+			} else {
+				newOpp[newI] = -1
+			}
 		}
 		x.Incoming = newInc
 		x.IncomingControl = newCtrl
+		x.Opposing = newOpp
 	}
 }

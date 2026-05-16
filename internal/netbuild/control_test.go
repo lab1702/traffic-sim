@@ -232,6 +232,58 @@ func TestNetbuild_HighwayGiveWayOnNode(t *testing.T) {
 	}
 }
 
+// TestNetbuild_Opposing_CoSortsWithIncoming: force a non-trivial
+// priority sort and verify that Opposing indices are correctly
+// remapped to point at the new positions.
+func TestNetbuild_Opposing_CoSortsWithIncoming(t *testing.T) {
+	// 4-way: a "service" road (lower priority) meets a "primary" road.
+	// Pre-sort, Incoming order is whatever buildIntersections produces.
+	// Post-sort, the primary approaches must be at positions 0 and 1.
+	// Manually set Opposing on a fixture to verify remapping.
+	xs := []network.Intersection{
+		{
+			ID:       0,
+			NodeID:   0,
+			Incoming: []network.EdgeID{0, 1, 2, 3},
+			Opposing: []int8{1, 0, 3, 2}, // pre-sort opposition
+		},
+	}
+	// osmWayOfEdge[i] = WayID, so we can fake highway priorities via the
+	// way tags. Edges 0, 1 are on a service road; 2, 3 on a primary.
+	feat := &osmload.Features{}
+	feat.Ways = []*osm.Way{
+		{ID: 100, Tags: []osm.Tag{{Key: "highway", Value: "service"}}},
+		{ID: 200, Tags: []osm.Tag{{Key: "highway", Value: "primary"}}},
+	}
+	osmWayOfEdge := []osm.WayID{100, 100, 200, 200}
+
+	sortIncomingByPriority(xs, osmWayOfEdge, feat)
+
+	x := xs[0]
+	// Verify Incoming is now [2, 3, 0, 1] (primary first, then service).
+	wantIncoming := []network.EdgeID{2, 3, 0, 1}
+	for i := range wantIncoming {
+		if x.Incoming[i] != wantIncoming[i] {
+			t.Errorf("Incoming[%d] = %d, want %d", i, x.Incoming[i], wantIncoming[i])
+		}
+	}
+	// Verify Opposing was remapped:
+	//   Pre-sort: Incoming=[0,1,2,3], Opposing=[1,0,3,2]
+	//   Post-sort: Incoming=[2,3,0,1]  (old positions 2,3,0,1 -> new 0,1,2,3)
+	//   So oldToNew = {0:2, 1:3, 2:0, 3:1}.
+	//   New Opposing[new_i] = oldToNew[old Opposing[old_i]].
+	//   - newI=0 was oldI=2; oldOpposing[2]=3; remapped to oldToNew[3]=1.
+	//   - newI=1 was oldI=3; oldOpposing[3]=2; remapped to oldToNew[2]=0.
+	//   - newI=2 was oldI=0; oldOpposing[0]=1; remapped to oldToNew[1]=3.
+	//   - newI=3 was oldI=1; oldOpposing[1]=0; remapped to oldToNew[0]=2.
+	wantOpposing := []int8{1, 0, 3, 2}
+	for i := range wantOpposing {
+		if x.Opposing[i] != wantOpposing[i] {
+			t.Errorf("Opposing[%d] = %d, want %d", i, x.Opposing[i], wantOpposing[i])
+		}
+	}
+}
+
 // buildNetToOSM is a position-based reverse map: each network NodeID gets
 // matched to the OSM NodeID whose projected (lat, lon) lands at the same
 // planar position. Computed fresh per call; only used in tests on tiny fixtures.
