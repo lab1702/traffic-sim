@@ -1373,3 +1373,73 @@ func TestWorld_SignalOff_TreatedAsAllWayStop(t *testing.T) {
 		t.Errorf("vehicle should have cleared the intersection after dwell, still on edge %d", w.Vehicles[0].Edge)
 	}
 }
+
+// TestWorld_LeftTurn_StuckGuardBypassed: a left turner waiting on
+// perpetual opposing traffic must not be despawned by the 60s
+// stuck-vehicle guard.
+func TestWorld_LeftTurn_StuckGuardBypassed(t *testing.T) {
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 100}},
+		{ID: 1, Pos: network.Point{X: 0, Y: -100}},
+		{ID: 2, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 3, Pos: network.Point{X: 100, Y: 0}},  // E destination (A's left from southbound)
+		{ID: 4, Pos: network.Point{X: 0, Y: -200}}, // unused
+		{ID: 5, Pos: network.Point{X: 0, Y: 200}},  // N destination (B's straight)
+	}
+	mkEdge := func(id, from, to int) network.Edge {
+		return network.Edge{
+			ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: 100, SpeedLimit: 10,
+			Lanes:    []network.Lane{{Index: 0}},
+			Geometry: []network.Point{nodes[from].Pos, nodes[to].Pos},
+		}
+	}
+	edges := []network.Edge{
+		mkEdge(0, 0, 2), // N->C (A's approach)
+		mkEdge(1, 1, 2), // S->C (B's approach)
+		mkEdge(2, 2, 3), // C->E (A's left turn)
+		mkEdge(3, 2, 5), // C->N (B's through)
+	}
+	xs := []network.Intersection{
+		{
+			ID: 0, NodeID: 2,
+			Incoming:        []network.EdgeID{0, 1},
+			IncomingControl: ctrls(network.ControlNone, network.ControlNone),
+			Opposing:        []int8{1, 0},
+			Outgoing:        []network.EdgeID{2, 3},
+			HasSignal:       false,
+		},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0, 2}, Edge: 0, S: 98, V: 0.5}, // A: left, near line
+		{ID: 2, Route: []network.EdgeID{1, 3}, Edge: 1, S: 98, V: 0.5}, // B: straight, pinned imminent
+	}
+	w.nextID = 3
+
+	// Run for 130 sim-seconds (well past stuckTimeoutSec=60).
+	for i := 0; i < 2600; i++ {
+		for j := range w.Vehicles {
+			if w.Vehicles[j].ID == 2 && !w.Vehicles[j].Despawned {
+				w.Vehicles[j].S = 98
+				w.Vehicles[j].V = 0.5
+			}
+		}
+		w.Step()
+	}
+
+	var a *Vehicle
+	for j := range w.Vehicles {
+		if w.Vehicles[j].ID == 1 {
+			a = &w.Vehicles[j]
+		}
+	}
+	if a == nil || a.Despawned {
+		t.Fatal("left turner waiting on perpetual opposing traffic must not be despawned")
+	}
+	if a.StuckTime != 0 {
+		t.Errorf("StuckTime should stay 0 during legitimate left-turn yield, got %.3f", a.StuckTime)
+	}
+}
