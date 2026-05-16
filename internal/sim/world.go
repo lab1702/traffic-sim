@@ -377,6 +377,25 @@ func (w *World) maybeMarkStopped(v *Vehicle, myDist float64) {
 	}
 }
 
+// effectiveGap returns the gap (in seconds of oncoming-ETA) that v
+// will accept for a maneuver whose base critical gap is baseGap.
+// Applies the per-driver GapFactor multiplier and shrinks linearly
+// with WaitTime, floored at minAcceptedGap.
+//
+// A zero GapFactor on a hand-built test vehicle is treated as 1.0 so
+// existing fixtures don't have to be updated.
+func effectiveGap(v *Vehicle, baseGap float64) float64 {
+	factor := v.GapFactor
+	if factor == 0 {
+		factor = 1.0
+	}
+	g := baseGap*factor - impatienceDecayRate*v.WaitTime
+	if g < minAcceptedGap {
+		g = minAcceptedGap
+	}
+	return g
+}
+
 // yieldGapCheck does ETA-based gap-acceptance against every approach at x
 // whose effective control is ControlNone (i.e., the priority approaches).
 // Returns (myDist, true) when we must yield; (0, false) when the gap is
