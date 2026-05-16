@@ -3,6 +3,7 @@ package sim
 import (
 	"bytes"
 	"log/slog"
+	"math"
 	"strings"
 	"testing"
 
@@ -757,11 +758,13 @@ func TestWorld_StuckAtYieldNotDespawned(t *testing.T) {
 	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
 
 	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
-	// Priority vehicle parked close to the stop line, moving slowly enough
-	// that its ETA to the intersection is well inside gapThresholdSec (3s).
+	// Priority vehicle pinned at S=99 (1 m from intersection) with V=2.0 m/s
+	// → ETA = 0.5 s, which is below minAcceptedGap (1.5 s). Impatience can
+	// never shrink effectiveGap below 1.5 s, so the yield vehicle must wait
+	// indefinitely and must not be despawned by the stuck-vehicle guard.
 	// Yield vehicle approaching its own stop line.
 	w.Vehicles = []Vehicle{
-		{ID: 1, Route: []network.EdgeID{0, 2}, Edge: 0, S: 99, V: 0.5}, // priority, ~1m out @ 0.5 m/s = 2s ETA
+		{ID: 1, Route: []network.EdgeID{0, 2}, Edge: 0, S: 99, V: 2.0}, // priority, ~1m out @ 2.0 m/s = 0.5s ETA
 		{ID: 2, Route: []network.EdgeID{1, 2}, Edge: 1, S: 50, V: 10},  // yield, approaching
 	}
 	w.nextID = 3
@@ -774,7 +777,7 @@ func TestWorld_StuckAtYieldNotDespawned(t *testing.T) {
 		for j := range w.Vehicles {
 			if w.Vehicles[j].ID == 1 && !w.Vehicles[j].Despawned {
 				w.Vehicles[j].S = 99
-				w.Vehicles[j].V = 0.5
+				w.Vehicles[j].V = 2.0
 			}
 		}
 		w.Step()
@@ -1413,9 +1416,13 @@ func TestWorld_LeftTurn_StuckGuardBypassed(t *testing.T) {
 	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
 
 	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	// Vehicle B pinned at S=98 (2 m from intersection) with V=2.0 m/s
+	// → ETA = 1.0 s, below minAcceptedGap (1.5 s). Impatience can never
+	// shrink effectiveGap below 1.5 s, so vehicle A must wait indefinitely
+	// and must not be despawned by the stuck-vehicle guard.
 	w.Vehicles = []Vehicle{
 		{ID: 1, Route: []network.EdgeID{0, 2}, Edge: 0, S: 98, V: 0.5}, // A: left, near line
-		{ID: 2, Route: []network.EdgeID{1, 3}, Edge: 1, S: 98, V: 0.5}, // B: straight, pinned imminent
+		{ID: 2, Route: []network.EdgeID{1, 3}, Edge: 1, S: 98, V: 2.0}, // B: straight, pinned imminent (ETA=1s)
 	}
 	w.nextID = 3
 
@@ -1424,7 +1431,7 @@ func TestWorld_LeftTurn_StuckGuardBypassed(t *testing.T) {
 		for j := range w.Vehicles {
 			if w.Vehicles[j].ID == 2 && !w.Vehicles[j].Despawned {
 				w.Vehicles[j].S = 98
-				w.Vehicles[j].V = 0.5
+				w.Vehicles[j].V = 2.0
 			}
 		}
 		w.Step()
@@ -1952,5 +1959,476 @@ func TestWorld_LeftTurn_AllWayStop_CrossTrafficLeftDoesYield(t *testing.T) {
 	}
 	if bEnteredOutboundTick == aEnteredOutboundTick {
 		t.Errorf("cross-traffic left turner B (tick %d) entered outbound edge simultaneously with A (tick %d); mutual-left must not apply to cross-traffic", bEnteredOutboundTick, aEnteredOutboundTick)
+	}
+}
+
+// TestWorld_GapFactor_Heterogeneous: spawn 200 vehicles via trySpawn
+// with a fixed-seed world. Verify GapFactor distribution: mean within
+// [0.95, 1.05], std within [0.07, 0.13], all values within [0.8, 1.2].
+// Determinism: same seed → bit-identical values.
+func TestWorld_GapFactor_Heterogeneous(t *testing.T) {
+	net := build2x2Grid()
+	w := NewWorld(net, NewRandomOD(net, 7, 100), nil) // high rate so spawns succeed
+
+	// Drive 200 spawns by repeatedly calling trySpawn with synthetic
+	// requests. Use a fixed seed via the world's existing rng.
+	factors := make([]float64, 0, 200)
+	for i := 0; i < 1000 && len(factors) < 200; i++ {
+		w.trySpawn(SpawnRequest{OriginNode: 0, DestNode: 3})
+		if len(w.Vehicles) > len(factors) {
+			factors = append(factors, w.Vehicles[len(factors)].GapFactor)
+		}
+	}
+	if len(factors) < 200 {
+		t.Fatalf("could not collect 200 spawned vehicles, got %d", len(factors))
+	}
+
+	// Bounds.
+	for i, f := range factors {
+		if f < 0.8 || f > 1.2 {
+			t.Errorf("factor[%d] = %f, out of [0.8, 1.2]", i, f)
+		}
+	}
+
+	// Mean.
+	sum := 0.0
+	for _, f := range factors {
+		sum += f
+	}
+	mean := sum / float64(len(factors))
+	if mean < 0.95 || mean > 1.05 {
+		t.Errorf("mean = %f, want in [0.95, 1.05]", mean)
+	}
+
+	// Std.
+	varSum := 0.0
+	for _, f := range factors {
+		varSum += (f - mean) * (f - mean)
+	}
+	std := math.Sqrt(varSum / float64(len(factors)))
+	if std < 0.07 || std > 0.13 {
+		t.Errorf("std = %f, want in [0.07, 0.13]", std)
+	}
+}
+
+// TestWorld_Impatience_StraightCrossingShrinksGap: a yield-controlled
+// vehicle facing perpetual cross-traffic with ETA=2.5s yields at t=0
+// (base gap 3s > 2.5s ETA → yield). After ~5s wait, effectiveGap
+// drops to 2.5s and vehicle accepts the gap. Test verifies the wait
+// duration and the eventual departure.
+func TestWorld_Impatience_StraightCrossingShrinksGap(t *testing.T) {
+	// Same fixture as TestWorld_StuckAtYieldNotDespawned: 4-way with W
+	// priority and S yield. Vehicle on S yields; vehicle on W pinned
+	// at perpetual ETA=2.5s.
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: -100, Y: 0}},
+		{ID: 1, Pos: network.Point{X: 0, Y: -100}},
+		{ID: 2, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 3, Pos: network.Point{X: 100, Y: 0}},
+	}
+	mkEdge := func(id, from, to int) network.Edge {
+		return network.Edge{
+			ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: 100, SpeedLimit: 10,
+			Lanes:    []network.Lane{{Index: 0}},
+			Geometry: []network.Point{nodes[from].Pos, nodes[to].Pos},
+		}
+	}
+	edges := []network.Edge{
+		mkEdge(0, 0, 2),
+		mkEdge(1, 1, 2),
+		mkEdge(2, 2, 3),
+	}
+	xs := []network.Intersection{
+		{
+			ID: 0, NodeID: 2,
+			Incoming:        []network.EdgeID{0, 1},
+			IncomingControl: ctrls(network.ControlNone, network.ControlYield),
+			Outgoing:        []network.EdgeID{2},
+			HasSignal:       false,
+		},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	// Priority at S=98, V=0.8 → d=2m, ETA=2.5s (above floor 1.5s,
+	// below base gap 3s).
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0, 2}, Edge: 0, S: 98, V: 0.8},
+		{ID: 2, Route: []network.EdgeID{1, 2}, Edge: 1, S: 99, V: 0.5}, // yield vehicle, near line
+	}
+	w.nextID = 3
+
+	// Yield vehicle starts close to the line so it stops quickly. Pin
+	// priority each tick.
+	var crossedAt float64 = -1.0
+	for i := 0; i < 600; i++ {
+		for j := range w.Vehicles {
+			if w.Vehicles[j].ID == 1 && !w.Vehicles[j].Despawned {
+				w.Vehicles[j].S = 98
+				w.Vehicles[j].V = 0.8
+			}
+		}
+		w.Step()
+		// Detect when the yield vehicle crosses into outbound.
+		for j := range w.Vehicles {
+			v := &w.Vehicles[j]
+			if v.ID == 2 && !v.Despawned && v.Edge == 2 && crossedAt < 0 {
+				crossedAt = w.SimTime
+			}
+		}
+		if crossedAt > 0 {
+			break
+		}
+	}
+
+	if crossedAt < 0 {
+		t.Fatal("yield vehicle never crossed; impatience never reduced gap below ETA")
+	}
+	t.Logf("yield vehicle (ID=2) transitioned to Edge 2 at sim-time %.2f s", crossedAt)
+	// Predicted wait: gap needs to drop from 3.0 to 2.5 = 0.5s reduction.
+	// At decay 0.1 s/s, that's 5s of wait. Plus a few seconds of approach
+	// + stop. Expect crossing somewhere in [5, 15] sim-seconds.
+	if crossedAt < 4 || crossedAt > 20 {
+		t.Errorf("expected crossing in [4, 20] sim-seconds, got %.2f", crossedAt)
+	}
+}
+
+// TestWorld_Impatience_LeftTurnShrinksGap: priority-road left turner
+// with perpetual opposing through at ETA=3.5s. Base 6s × 1.0 = 6s.
+// To drop to 3.5s: 6 - 0.1*t = 3.5 → t = 25s. Vehicle waits ~25s
+// then accepts.
+func TestWorld_Impatience_LeftTurnShrinksGap(t *testing.T) {
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 100}},
+		{ID: 1, Pos: network.Point{X: 0, Y: -100}},
+		{ID: 2, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 3, Pos: network.Point{X: 100, Y: 0}},  // E destination (A's left)
+		{ID: 4, Pos: network.Point{X: 0, Y: 200}},  // N destination (B's through)
+	}
+	mkEdge := func(id, from, to int) network.Edge {
+		return network.Edge{
+			ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: 100, SpeedLimit: 10,
+			Lanes:    []network.Lane{{Index: 0}},
+			Geometry: []network.Point{nodes[from].Pos, nodes[to].Pos},
+		}
+	}
+	edges := []network.Edge{
+		mkEdge(0, 0, 2),
+		mkEdge(1, 1, 2),
+		mkEdge(2, 2, 3), // C->E (A's left turn)
+		mkEdge(3, 2, 4), // C->N (B's through)
+	}
+	xs := []network.Intersection{
+		{
+			ID: 0, NodeID: 2,
+			Incoming:        []network.EdgeID{0, 1},
+			IncomingControl: ctrls(network.ControlNone, network.ControlNone),
+			Opposing:        []int8{1, 0},
+			Outgoing:        []network.EdgeID{2, 3},
+			HasSignal:       false,
+		},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	// A: left turner, near line. B: opposing through, pinned at ETA=3.5s
+	// (d=2m, V=2/3.5 ≈ 0.571 m/s).
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0, 2}, Edge: 0, S: 99, V: 0.5},
+		{ID: 2, Route: []network.EdgeID{1, 3}, Edge: 1, S: 98, V: 0.5714},
+	}
+	w.nextID = 3
+
+	var crossedAt float64 = -1.0
+	for i := 0; i < 1200; i++ {
+		for j := range w.Vehicles {
+			if w.Vehicles[j].ID == 2 && !w.Vehicles[j].Despawned {
+				w.Vehicles[j].S = 98
+				w.Vehicles[j].V = 0.5714
+			}
+		}
+		w.Step()
+		for j := range w.Vehicles {
+			v := &w.Vehicles[j]
+			if v.ID == 1 && !v.Despawned && v.Edge == 2 && crossedAt < 0 {
+				crossedAt = w.SimTime
+			}
+		}
+		if crossedAt > 0 {
+			break
+		}
+	}
+
+	if crossedAt < 0 {
+		t.Fatal("left turner never crossed; impatience never reduced gap below ETA")
+	}
+	// Predicted wait: gap drops from 6 to 3.5 = 2.5s reduction → 25s of
+	// wait. Plus a few seconds of approach. Expect crossing in [20, 40]
+	// sim-seconds.
+	if crossedAt < 20 || crossedAt > 40 {
+		t.Errorf("expected crossing in [20, 40] sim-seconds, got %.2f", crossedAt)
+	}
+}
+
+// TestWorld_Impatience_FloorPreventsCollision: oncoming ETA = 1.0s
+// (below minAcceptedGap=1.5s). Vehicle waits forever — the floor
+// prevents impatience from producing collision-imminent crossings.
+func TestWorld_Impatience_FloorPreventsCollision(t *testing.T) {
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 100}},
+		{ID: 1, Pos: network.Point{X: 0, Y: -100}},
+		{ID: 2, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 3, Pos: network.Point{X: 100, Y: 0}},
+		{ID: 4, Pos: network.Point{X: 0, Y: 200}},
+	}
+	mkEdge := func(id, from, to int) network.Edge {
+		return network.Edge{
+			ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: 100, SpeedLimit: 10,
+			Lanes:    []network.Lane{{Index: 0}},
+			Geometry: []network.Point{nodes[from].Pos, nodes[to].Pos},
+		}
+	}
+	edges := []network.Edge{
+		mkEdge(0, 0, 2),
+		mkEdge(1, 1, 2),
+		mkEdge(2, 2, 3),
+		mkEdge(3, 2, 4),
+	}
+	xs := []network.Intersection{
+		{
+			ID: 0, NodeID: 2,
+			Incoming:        []network.EdgeID{0, 1},
+			IncomingControl: ctrls(network.ControlNone, network.ControlNone),
+			Opposing:        []int8{1, 0},
+			Outgoing:        []network.EdgeID{2, 3},
+			HasSignal:       false,
+		},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	// A: left turner. B: opposing, pinned at ETA=1.0s (d=2m, V=2 m/s).
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0, 2}, Edge: 0, S: 99, V: 0.5},
+		{ID: 2, Route: []network.EdgeID{1, 3}, Edge: 1, S: 98, V: 2.0},
+	}
+	w.nextID = 3
+
+	// 200s sim = 4000 ticks.
+	for i := 0; i < 4000; i++ {
+		for j := range w.Vehicles {
+			if w.Vehicles[j].ID == 2 && !w.Vehicles[j].Despawned {
+				w.Vehicles[j].S = 98
+				w.Vehicles[j].V = 2.0
+			}
+		}
+		w.Step()
+	}
+
+	var a *Vehicle
+	for j := range w.Vehicles {
+		if w.Vehicles[j].ID == 1 {
+			a = &w.Vehicles[j]
+		}
+	}
+	if a == nil || a.Despawned {
+		t.Fatal("left turner should not be despawned during legitimate yield")
+	}
+	if a.Edge != 0 {
+		t.Errorf("left turner should still be on approach edge 0 (floor prevented unsafe crossing), got edge %d", a.Edge)
+	}
+	if a.StuckTime != 0 {
+		t.Errorf("StuckTime must remain 0, got %.3f", a.StuckTime)
+	}
+	// WaitTime should be substantial (impatience accumulated) but vehicle
+	// still hasn't crossed.
+	if a.WaitTime < 100 {
+		t.Errorf("WaitTime should reflect substantial wait, got %.3f", a.WaitTime)
+	}
+}
+
+// TestWorld_Impatience_MonotonicWithinApproach: WaitTime is monotonic
+// within an approach — it accumulates while slow-and-yielding and is
+// preserved through brief windows of movement-but-on-same-edge. This
+// is the post-bugfix semantic: edge-transition is the ONLY in-Step
+// reset point. Verifies WaitTime does not reset mid-approach.
+func TestWorld_Impatience_MonotonicWithinApproach(t *testing.T) {
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: -100, Y: 0}},
+		{ID: 1, Pos: network.Point{X: 0, Y: -100}},
+		{ID: 2, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 3, Pos: network.Point{X: 100, Y: 0}},
+	}
+	mkEdge := func(id, from, to int) network.Edge {
+		return network.Edge{
+			ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: 100, SpeedLimit: 10,
+			Lanes:    []network.Lane{{Index: 0}},
+			Geometry: []network.Point{nodes[from].Pos, nodes[to].Pos},
+		}
+	}
+	edges := []network.Edge{
+		mkEdge(0, 0, 2),
+		mkEdge(1, 1, 2),
+		mkEdge(2, 2, 3),
+	}
+	xs := []network.Intersection{
+		{
+			ID: 0, NodeID: 2,
+			Incoming:        []network.EdgeID{0, 1},
+			IncomingControl: ctrls(network.ControlNone, network.ControlYield),
+			Outgoing:        []network.EdgeID{2},
+			HasSignal:       false,
+		},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0, 2}, Edge: 0, S: 98, V: 0.8}, // priority, ETA=2.5s
+		{ID: 2, Route: []network.EdgeID{1, 2}, Edge: 1, S: 99, V: 0.5},
+	}
+	w.nextID = 3
+
+	prevWait := 0.0
+	for i := 0; i < 300; i++ {
+		for j := range w.Vehicles {
+			if w.Vehicles[j].ID == 1 && !w.Vehicles[j].Despawned {
+				w.Vehicles[j].S = 98
+				w.Vehicles[j].V = 0.8
+			}
+		}
+		w.Step()
+		// Check the yield vehicle's WaitTime monotonicity while it's on
+		// the approach edge (edge 1). Once it transitions to edge 2,
+		// WaitTime resets — that's the only allowed decrement.
+		for j := range w.Vehicles {
+			v := &w.Vehicles[j]
+			if v.ID != 2 || v.Despawned {
+				continue
+			}
+			if v.Edge == 1 && v.WaitTime < prevWait-1e-9 {
+				t.Errorf("WaitTime decreased on approach edge: %.3f -> %.3f (tick %d)",
+					prevWait, v.WaitTime, i)
+				return
+			}
+			if v.Edge == 1 {
+				prevWait = v.WaitTime
+			}
+		}
+	}
+}
+
+// TestWorld_Impatience_ResetsOnEdgeTransition: vehicle yields at
+// intersection A, accumulates WaitTime, eventually crosses. WaitTime
+// must be 0 the moment the vehicle reaches the outbound edge.
+func TestWorld_Impatience_ResetsOnEdgeTransition(t *testing.T) {
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: -100, Y: 0}},
+		{ID: 1, Pos: network.Point{X: 0, Y: -100}},
+		{ID: 2, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 3, Pos: network.Point{X: 100, Y: 0}},
+	}
+	mkEdge := func(id, from, to int) network.Edge {
+		return network.Edge{
+			ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: 100, SpeedLimit: 10,
+			Lanes:    []network.Lane{{Index: 0}},
+			Geometry: []network.Point{nodes[from].Pos, nodes[to].Pos},
+		}
+	}
+	edges := []network.Edge{
+		mkEdge(0, 0, 2),
+		mkEdge(1, 1, 2),
+		mkEdge(2, 2, 3),
+	}
+	xs := []network.Intersection{
+		{
+			ID: 0, NodeID: 2,
+			Incoming:        []network.EdgeID{0, 1},
+			IncomingControl: ctrls(network.ControlNone, network.ControlYield),
+			Outgoing:        []network.EdgeID{2},
+			HasSignal:       false,
+		},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0, 2}, Edge: 0, S: 98, V: 0.8}, // priority, ETA=2.5s
+		{ID: 2, Route: []network.EdgeID{1, 2}, Edge: 1, S: 99, V: 0.5},
+	}
+	w.nextID = 3
+
+	// Pin priority; once yield vehicle accumulates WaitTime past ~5s,
+	// impatience will drive it across. Once it transitions to edge 2,
+	// WaitTime must be 0.
+	for i := 0; i < 600; i++ {
+		for j := range w.Vehicles {
+			if w.Vehicles[j].ID == 1 && !w.Vehicles[j].Despawned {
+				w.Vehicles[j].S = 98
+				w.Vehicles[j].V = 0.8
+			}
+		}
+		w.Step()
+		for j := range w.Vehicles {
+			v := &w.Vehicles[j]
+			if v.ID == 2 && !v.Despawned && v.Edge == 2 {
+				if v.WaitTime != 0 {
+					t.Fatalf("WaitTime should be 0 after edge transition, got %.3f", v.WaitTime)
+				}
+				return
+			}
+		}
+	}
+
+	t.Fatal("yield vehicle never crossed; cannot verify edge-transition reset")
+}
+
+// TestWorld_Impatience_NotAppliedToRedLight: vehicle stopped at a red
+// light for 60s. WaitTime must remain 0 throughout — red lights are
+// hard stops, not gap-acceptance yields.
+func TestWorld_Impatience_NotAppliedToRedLight(t *testing.T) {
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 1, Pos: network.Point{X: 200, Y: 0}},
+	}
+	edges := []network.Edge{
+		{ID: 0, From: 0, To: 1, Length: 200, SpeedLimit: 10,
+			Lanes: []network.Lane{{Index: 0}}},
+	}
+	xs := []network.Intersection{
+		{ID: 0, NodeID: 1, Incoming: []network.EdgeID{0}, HasSignal: true},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	// Permanent all-red phase.
+	w.SignalStates[0] = NewSignalState(SignalConfig{
+		Phases: []SignalPhase{{GreenEdges: nil, GreenDur: 10000, YellowDur: 0}},
+	})
+
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0}, Edge: 0, S: 50, V: 10},
+	}
+	w.nextID = 2
+
+	// Run 1200 ticks = 60 sim-seconds.
+	for i := 0; i < 1200; i++ {
+		w.Step()
+	}
+
+	if len(w.Vehicles) != 1 {
+		t.Fatalf("vehicle should be stopped at red, got %d alive", len(w.Vehicles))
+	}
+	v := &w.Vehicles[0]
+	if v.V > 0.1 {
+		t.Errorf("vehicle should be stopped at red, V=%.2f", v.V)
+	}
+	if v.WaitTime != 0 {
+		t.Errorf("WaitTime should remain 0 at red light (not a gap-acceptance yield), got %.3f", v.WaitTime)
 	}
 }

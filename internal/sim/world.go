@@ -217,6 +217,27 @@ const gapThresholdSec = 3.0
 const leftTurnGapSec = 6.0
 
 const (
+	// Per-driver gap preference — Normal(1.0, gapFactorStdDev) clamped
+	// to [gapFactorMin, gapFactorMax]. Same Normal-then-clamp shape as
+	// SpeedFactor but wider, since gap tolerance varies more across
+	// drivers than cruising-speed preference.
+	gapFactorStdDev = 0.1
+	gapFactorMin    = 0.8
+	gapFactorMax    = 1.2
+
+	// impatienceDecayRate is the seconds of accepted-gap reduction per
+	// second of wait time. At 0.1, a 30-second wait reduces the
+	// accepted gap by 3 seconds. Reduction floors at minAcceptedGap.
+	impatienceDecayRate = 0.1
+
+	// minAcceptedGap is the lower bound on the accepted gap regardless
+	// of wait time. Prevents impatience from producing physically
+	// unsafe gaps. 1.5s is on the aggressive end of normal human gap
+	// acceptance.
+	minAcceptedGap = 1.5
+)
+
+const (
 	// stuckSpeedThresh is the speed (m/s) below which a vehicle is
 	// considered "not moving". Used for two purposes:
 	//   1. Stuck-despawn guard: a vehicle below this threshold with no
@@ -356,6 +377,26 @@ func (w *World) maybeMarkStopped(v *Vehicle, myDist float64) {
 	}
 }
 
+// effectiveGap returns the gap (in seconds of oncoming-ETA) that v
+// will accept for a maneuver whose base critical gap is baseGap.
+// Applies the per-driver GapFactor multiplier and shrinks linearly
+// with WaitTime, floored at minAcceptedGap.
+//
+// A zero or negative GapFactor is treated as 1.0 — covers hand-built
+// test vehicles (default zero value) and protects against any future
+// construction path that fails to sample a valid factor.
+func effectiveGap(v *Vehicle, baseGap float64) float64 {
+	factor := v.GapFactor
+	if factor <= 0 {
+		factor = 1.0
+	}
+	g := baseGap*factor - impatienceDecayRate*v.WaitTime
+	if g < minAcceptedGap {
+		g = minAcceptedGap
+	}
+	return g
+}
+
 // yieldGapCheck does ETA-based gap-acceptance against every approach at x
 // whose effective control is ControlNone (i.e., the priority approaches).
 // Returns (myDist, true) when we must yield; (0, false) when the gap is
@@ -382,7 +423,7 @@ func (w *World) yieldGapCheck(v *Vehicle, x *network.Intersection, myPos int,
 			if ovV < 0.5 {
 				ovV = 0.5
 			}
-			if d/ovV < gapThresholdSec {
+			if d/ovV < effectiveGap(v, gapThresholdSec) {
 				return myDist, true
 			}
 		}
@@ -519,7 +560,7 @@ func (w *World) leftTurnYieldsToOpposing(v *Vehicle, byEdge map[network.EdgeID][
 		if ovV < 0.5 {
 			ovV = 0.5
 		}
-		if d/ovV < leftTurnGapSec {
+		if d/ovV < effectiveGap(v, leftTurnGapSec) {
 			return myDist, true
 		}
 	}
@@ -698,6 +739,18 @@ func (w *World) Step() {
 		v0 := w.computeDesiredSpeed(v)
 		stepIDM(v, v0, lS, lV, has, w.Net, DefaultIDM(), w.dt)
 
+		// Accumulate WaitTime while the vehicle is effectively stopped
+		// AND yielding via gap-acceptance. WaitTime is only reset on
+		// edge transition (see stepIDM); within an approach edge it is
+		// monotonic. This lets impatience commit the vehicle to a
+		// crossing once the gap is accepted: WaitTime stays high after
+		// the vehicle starts moving, so effectiveGap stays below ETA
+		// and mustYield stays false. Edge-transition reset gives each
+		// new approach a fresh WaitTime=0. Does NOT apply to red lights.
+		if v.V < stuckSpeedThresh && (mustYield || mustYieldLT) {
+			v.WaitTime += w.dt
+		}
+
 		// Stuck-vehicle guard. Defensive against sim bugs that would
 		// otherwise leave a vehicle wedged forever. Runs only when the
 		// vehicle is below the speed threshold; reuses the yield-check
@@ -781,6 +834,13 @@ func (w *World) trySpawn(r SpawnRequest) {
 		factor = speedFactorMax
 	}
 
+	gapFactor := 1.0 + w.rng.NormFloat64()*gapFactorStdDev
+	if gapFactor < gapFactorMin {
+		gapFactor = gapFactorMin
+	} else if gapFactor > gapFactorMax {
+		gapFactor = gapFactorMax
+	}
+
 	// Spawn at this driver's cruising speed (factor * edge limit) so they
 	// don't immediately decelerate. IDM regulates from there.
 	v := Vehicle{
@@ -791,6 +851,7 @@ func (w *World) trySpawn(r SpawnRequest) {
 		S:           0,
 		V:           w.Net.Edges[route[0]].SpeedLimit * factor,
 		SpeedFactor: factor,
+		GapFactor:   gapFactor,
 	}
 	w.nextID++
 	w.Vehicles = append(w.Vehicles, v)

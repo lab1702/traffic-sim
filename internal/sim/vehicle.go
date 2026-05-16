@@ -44,6 +44,24 @@ type Vehicle struct {
 	// keep hand-constructed test vehicles working without modification.
 	SpeedFactor float64
 
+	// GapFactor is a per-driver multiplier on critical-gap thresholds
+	// (gapThresholdSec for straight crossings, leftTurnGapSec for left
+	// turns). Sampled at spawn from Normal(1.0, gapFactorStdDev) and
+	// clamped to [gapFactorMin, gapFactorMax]. A zero value is treated
+	// as 1.0 to keep hand-constructed test vehicles working without
+	// modification.
+	GapFactor float64
+
+	// WaitTime accumulates sim-seconds during which the vehicle is
+	// effectively stopped (V < stuckSpeedThresh) AND yielding via
+	// gap-acceptance (mustYield or mustYieldLT). Monotonic within an
+	// approach edge — the ONLY reset point is the edge transition in
+	// stepIDM. This is intentional: once impatience accepts the gap,
+	// WaitTime stays high so effectiveGap stays low, committing the
+	// vehicle to crossing. Resetting on movement would cause a
+	// flip-flop oscillation at the line. Does NOT apply to red lights.
+	WaitTime float64
+
 	// LastLCDir records the direction of the most recent lane change in
 	// human terms: +1 = moved left (higher lane index, toward centerline),
 	// -1 = moved right (lower lane index, toward curb), 0 = no recent
@@ -101,9 +119,10 @@ func stepIDM(v *Vehicle, v0 float64, leaderS float64, leaderV float64, hasLeader
 		v.Edge = v.Route[v.RouteIdx]
 		edge = &net.Edges[v.Edge]
 
-		// Clear any mandatory-stop arrival timestamp now that we've left
-		// the prior approach.
+		// Clear any mandatory-stop arrival timestamp and accumulated
+		// impatience now that we've left the prior approach.
 		v.StoppedSinceSec = 0
+		v.WaitTime = 0
 
 		// Lane carry-over: pick the new lane based on the just-completed
 		// turn. This is both the normal post-turn carry-over AND the snap
