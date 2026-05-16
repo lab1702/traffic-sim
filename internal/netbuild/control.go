@@ -27,6 +27,7 @@ func resolveControls(
 	feat *osmload.Features,
 	osmWayOfEdge []osm.WayID,
 	osmNodeOf func(network.NodeID) (osm.NodeID, bool),
+	edges []network.Edge,
 ) {
 	wayByID := make(map[osm.WayID]*osm.Way, len(feat.Ways))
 	for _, w := range feat.Ways {
@@ -48,14 +49,25 @@ func resolveControls(
 		return 100
 	}
 
+	edgeFromOSM := func(eid network.EdgeID) (osm.NodeID, bool) {
+		if int(eid) >= len(edges) {
+			return 0, false
+		}
+		return osmNodeOf(edges[eid].From)
+	}
+	_ = edgeFromOSM // used in Tasks 2/4
+
 	for i := range xs {
 		x := &xs[i]
 		var nodeTags osm.Tags
+		var xOSMID osm.NodeID
 		if osmID, ok := osmNodeOf(x.NodeID); ok {
+			xOSMID = osmID
 			if n, ok2 := feat.Nodes[osmID]; ok2 && n != nil {
 				nodeTags = n.Tags
 			}
 		}
+		_ = xOSMID // used in Tasks 2/4
 
 		// Start from the class-based fallback, then layer explicit OSM
 		// signage on top (Task 12 covers fallback + stop=all/stop=minor;
