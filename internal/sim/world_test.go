@@ -2171,3 +2171,81 @@ func TestWorld_Impatience_LeftTurnShrinksGap(t *testing.T) {
 		t.Errorf("expected crossing in [20, 40] sim-seconds, got %.2f", crossedAt)
 	}
 }
+
+// TestWorld_Impatience_FloorPreventsCollision: oncoming ETA = 1.0s
+// (below minAcceptedGap=1.5s). Vehicle waits forever — the floor
+// prevents impatience from producing collision-imminent crossings.
+func TestWorld_Impatience_FloorPreventsCollision(t *testing.T) {
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 100}},
+		{ID: 1, Pos: network.Point{X: 0, Y: -100}},
+		{ID: 2, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 3, Pos: network.Point{X: 100, Y: 0}},
+		{ID: 4, Pos: network.Point{X: 0, Y: 200}},
+	}
+	mkEdge := func(id, from, to int) network.Edge {
+		return network.Edge{
+			ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: 100, SpeedLimit: 10,
+			Lanes:    []network.Lane{{Index: 0}},
+			Geometry: []network.Point{nodes[from].Pos, nodes[to].Pos},
+		}
+	}
+	edges := []network.Edge{
+		mkEdge(0, 0, 2),
+		mkEdge(1, 1, 2),
+		mkEdge(2, 2, 3),
+		mkEdge(3, 2, 4),
+	}
+	xs := []network.Intersection{
+		{
+			ID: 0, NodeID: 2,
+			Incoming:        []network.EdgeID{0, 1},
+			IncomingControl: ctrls(network.ControlNone, network.ControlNone),
+			Opposing:        []int8{1, 0},
+			Outgoing:        []network.EdgeID{2, 3},
+			HasSignal:       false,
+		},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	// A: left turner. B: opposing, pinned at ETA=1.0s (d=2m, V=2 m/s).
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0, 2}, Edge: 0, S: 99, V: 0.5},
+		{ID: 2, Route: []network.EdgeID{1, 3}, Edge: 1, S: 98, V: 2.0},
+	}
+	w.nextID = 3
+
+	// 200s sim = 4000 ticks.
+	for i := 0; i < 4000; i++ {
+		for j := range w.Vehicles {
+			if w.Vehicles[j].ID == 2 && !w.Vehicles[j].Despawned {
+				w.Vehicles[j].S = 98
+				w.Vehicles[j].V = 2.0
+			}
+		}
+		w.Step()
+	}
+
+	var a *Vehicle
+	for j := range w.Vehicles {
+		if w.Vehicles[j].ID == 1 {
+			a = &w.Vehicles[j]
+		}
+	}
+	if a == nil || a.Despawned {
+		t.Fatal("left turner should not be despawned during legitimate yield")
+	}
+	if a.Edge != 0 {
+		t.Errorf("left turner should still be on approach edge 0 (floor prevented unsafe crossing), got edge %d", a.Edge)
+	}
+	if a.StuckTime != 0 {
+		t.Errorf("StuckTime must remain 0, got %.3f", a.StuckTime)
+	}
+	// WaitTime should be substantial (impatience accumulated) but vehicle
+	// still hasn't crossed.
+	if a.WaitTime < 100 {
+		t.Errorf("WaitTime should reflect substantial wait, got %.3f", a.WaitTime)
+	}
+}
