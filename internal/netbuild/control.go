@@ -73,6 +73,7 @@ func resolveControls(
 		applyClassFallback(x, classOfEdge)
 		applyStopAllOrMinor(x, nodeTags, classOfEdge)
 		applyNodeLevelSign(x, nodeTags, wayByID, osmWayOfEdge, edgeFromOSM, xOSMID)
+		applyInteriorNodeSign(x, wayByID, osmWayOfEdge, edgeFromOSM, xOSMID, feat.Nodes)
 	}
 }
 
@@ -208,6 +209,96 @@ func approachDirectionOnWay(
 		return "backward"
 	}
 	return ""
+}
+
+// applyInteriorNodeSign overrides per-approach Control based on
+// highway=stop or highway=give_way tags on interior shaping nodes —
+// nodes between the approach edge's From intersection and the
+// intersection X along the underlying OSM way. Mappers conventionally
+// place sign tags at the physical stop-line position rather than at
+// the intersection node, so honoring those tags gives per-approach
+// precision.
+//
+// Runs last in the resolution chain so interior tags win over
+// intersection-node tags when both apply to the same approach. Skips
+// approaches already promoted to ControlAllWayStop.
+func applyInteriorNodeSign(
+	x *network.Intersection,
+	wayByID map[osm.WayID]*osm.Way,
+	osmWayOfEdge []osm.WayID,
+	edgeFromOSM func(network.EdgeID) (osm.NodeID, bool),
+	xOSMID osm.NodeID,
+	nodeByID map[osm.NodeID]*osm.Node,
+) {
+	for j, eid := range x.Incoming {
+		if x.IncomingControl[j] == network.ControlAllWayStop {
+			continue
+		}
+		sign := interiorSignFor(eid, xOSMID, wayByID, osmWayOfEdge, edgeFromOSM, nodeByID)
+		if sign != network.ControlNone {
+			x.IncomingControl[j] = sign
+		}
+	}
+}
+
+// interiorSignFor walks the underlying OSM way's node sequence between
+// (exclusive) the approach edge's From node and the intersection node
+// xOSMID, looking for the closest sign-tagged interior shaping node.
+// Returns ControlStop for highway=stop, ControlYield for highway=give_way,
+// or ControlNone if no sign-tagged interior node exists. The walk
+// starts at xOSMID and steps toward fromOSM so the FIRST tag encountered
+// is the one closest to X (the stop-line position).
+func interiorSignFor(
+	eid network.EdgeID,
+	xOSMID osm.NodeID,
+	wayByID map[osm.WayID]*osm.Way,
+	osmWayOfEdge []osm.WayID,
+	edgeFromOSM func(network.EdgeID) (osm.NodeID, bool),
+	nodeByID map[osm.NodeID]*osm.Node,
+) network.Control {
+	if int(eid) >= len(osmWayOfEdge) {
+		return network.ControlNone
+	}
+	way, ok := wayByID[osmWayOfEdge[eid]]
+	if !ok || way == nil {
+		return network.ControlNone
+	}
+	fromOSM, ok := edgeFromOSM(eid)
+	if !ok {
+		return network.ControlNone
+	}
+	xIdx, fromIdx := -1, -1
+	for i, n := range way.Nodes {
+		if n.ID == xOSMID && xIdx < 0 {
+			xIdx = i
+		}
+		if n.ID == fromOSM && fromIdx < 0 {
+			fromIdx = i
+		}
+	}
+	if xIdx < 0 || fromIdx < 0 || xIdx == fromIdx {
+		return network.ControlNone
+	}
+	step := -1
+	if fromIdx > xIdx {
+		step = 1
+	}
+	for i := xIdx + step; i != fromIdx; i += step {
+		n := way.Nodes[i]
+		node, ok := nodeByID[n.ID]
+		if !ok || node == nil {
+			continue
+		}
+		for _, t := range node.Tags {
+			if t.Key == "highway" && t.Value == "stop" {
+				return network.ControlStop
+			}
+			if t.Key == "highway" && t.Value == "give_way" {
+				return network.ControlYield
+			}
+		}
+	}
+	return network.ControlNone
 }
 
 // applyStopAllOrMinor overrides class-fallback with explicit OSM tags

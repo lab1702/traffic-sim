@@ -87,6 +87,10 @@ func TestNetbuild_Fallback_EqualClass(t *testing.T) {
 // highwayOfEdge returns the highway= tag of the OSM way an edge was derived from.
 // Built via a node-position reverse map to avoid relying on NodeID ↔ osm.NodeID
 // arithmetic.
+//
+// Handles both simple edges (From and To are adjacent in the way) and edges
+// with interior shaping nodes (From and To appear in the same way but may not
+// be directly adjacent).
 func highwayOfEdge(net *network.Network, eid network.EdgeID, feat *osmload.Features) string {
 	e := net.Edges[eid]
 	netToOSM := buildNetToOSM(net, feat)
@@ -96,6 +100,7 @@ func highwayOfEdge(net *network.Network, eid network.EdgeID, feat *osmload.Featu
 		return ""
 	}
 	for _, w := range feat.Ways {
+		// First try adjacent pairs (common case — no interior shaping nodes).
 		for i := 0; i+1 < len(w.Nodes); i++ {
 			a, b := w.Nodes[i].ID, w.Nodes[i+1].ID
 			if (a == fromOSM && b == toOSM) || (a == toOSM && b == fromOSM) {
@@ -103,6 +108,24 @@ func highwayOfEdge(net *network.Network, eid network.EdgeID, feat *osmload.Featu
 					if t.Key == "highway" {
 						return t.Value
 					}
+				}
+			}
+		}
+		// Fall back: both endpoints appear somewhere in the way (edge has
+		// interior shaping nodes, so From and To are not adjacent).
+		hasFrom, hasTo := false, false
+		for _, n := range w.Nodes {
+			if n.ID == fromOSM {
+				hasFrom = true
+			}
+			if n.ID == toOSM {
+				hasTo = true
+			}
+		}
+		if hasFrom && hasTo {
+			for _, t := range w.Tags {
+				if t.Key == "highway" {
+					return t.Value
 				}
 			}
 		}
@@ -537,6 +560,55 @@ func TestNetbuild_DirectionBackward(t *testing.T) {
 		for i := range x.Incoming {
 			t.Logf("  Incoming[%d] edge=%d control=%v", i, x.Incoming[i], x.IncomingControl[i])
 		}
+	}
+}
+
+// TestNetbuild_InteriorNodeStop: a primary way has an interior shaping
+// node tagged `highway=stop`. The approach edge whose geometry contains
+// that node should get ControlStop, overriding the class-fallback
+// ControlNone that a primary approach would otherwise have.
+func TestNetbuild_InteriorNodeStop(t *testing.T) {
+	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
+		1: mkNode(1, 40.0000, -74.0010), // W primary endpoint
+		2: mkNode(2, 40.0010, -74.0005), // N service endpoint
+		3: mkNode(3, 40.0000, -74.0000), // E primary endpoint
+		4: mkNode(4, 39.9990, -74.0005), // S service endpoint
+		5: mkNode(5, 40.0000, -74.0005), // intersection
+		6: mkNode(6, 40.0000, -74.0008, "highway", "stop"), // interior on W approach
+	}}
+	feat.Ways = []*osm.Way{
+		mkWay(10, "primary", false, 1, 6, 5, 3),
+		mkWay(20, "service", false, 2, 5, 4),
+	}
+
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(net.Intersections) != 1 {
+		t.Fatalf("want 1 intersection, got %d", len(net.Intersections))
+	}
+	x := net.Intersections[0]
+
+	// W primary approach (with interior stop) -> Stop.
+	// E primary approach (no interior) -> None (class fallback).
+	// Service approaches (lower class) -> Stop (class fallback).
+	var sawPrimaryStop, sawPrimaryNone bool
+	for i, eid := range x.Incoming {
+		hw := highwayOfEdge(net, eid, feat)
+		c := x.IncomingControl[i]
+		if hw == "primary" && c == network.ControlStop {
+			sawPrimaryStop = true
+		}
+		if hw == "primary" && c == network.ControlNone {
+			sawPrimaryNone = true
+		}
+	}
+	if !sawPrimaryStop {
+		t.Error("primary approach with interior stop-tagged node should be ControlStop")
+	}
+	if !sawPrimaryNone {
+		t.Error("the other primary approach (no interior tag) should remain ControlNone")
 	}
 }
 
