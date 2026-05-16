@@ -671,22 +671,25 @@ func (w *World) Step() {
 		lS, lV, has := info.lS, info.lV, info.has
 
 		// Apply red-light virtual leader if closer.
-		if d, isRed := w.stopDistanceForRed(v); isRed {
-			virtualS := v.S + d
+		dRed, isRed := w.stopDistanceForRed(v)
+		if isRed {
+			virtualS := v.S + dRed
 			if !has || virtualS < lS {
 				lS, lV, has = virtualS, 0, true
 			}
 		}
 		// Apply unsignalized-yield virtual leader if closer.
-		if d, mustYield := w.stopDistanceForYield(v, byEdge); mustYield {
-			virtualS := v.S + d
+		dYield, mustYield := w.stopDistanceForYield(v, byEdge)
+		if mustYield {
+			virtualS := v.S + dYield
 			if !has || virtualS < lS {
 				lS, lV, has = virtualS, 0, true
 			}
 		}
 		// Apply left-turn opposing-traffic virtual leader if closer.
-		if d, mustYield := w.leftTurnYieldsToOpposing(v, byEdge); mustYield {
-			virtualS := v.S + d
+		dLT, mustYieldLT := w.leftTurnYieldsToOpposing(v, byEdge)
+		if mustYieldLT {
+			virtualS := v.S + dLT
 			if !has || virtualS < lS {
 				lS, lV, has = virtualS, 0, true
 			}
@@ -697,12 +700,9 @@ func (w *World) Step() {
 
 		// Stuck-vehicle guard. Defensive against sim bugs that would
 		// otherwise leave a vehicle wedged forever. Runs only when the
-		// vehicle is below the speed threshold; the stopDistance helpers
-		// are cheap but skipped for the common moving case.
+		// vehicle is below the speed threshold; reuses the yield-check
+		// results from above to avoid re-calling stopDistance helpers.
 		if !v.Despawned && v.V < stuckSpeedThresh {
-			_, isRed := w.stopDistanceForRed(v)
-			_, mustYield := w.stopDistanceForYield(v, byEdge)
-			_, mustYieldLT := w.leftTurnYieldsToOpposing(v, byEdge)
 			if !isRed && !mustYield && !mustYieldLT {
 				v.StuckTime += w.dt
 				if v.StuckTime > stuckTimeoutSec {
