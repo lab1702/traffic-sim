@@ -60,6 +60,7 @@ func resolveControls(
 		// Task 13 adds node-level highway=stop / give_way).
 		applyClassFallback(x, classOfEdge)
 		applyStopAllOrMinor(x, nodeTags, classOfEdge)
+		applyNodeLevelSign(x, nodeTags)
 	}
 }
 
@@ -96,6 +97,38 @@ func applyClassFallback(x *network.Intersection, classOfEdge func(network.EdgeID
 		} else {
 			x.IncomingControl[j] = network.ControlStop
 		}
+	}
+}
+
+// applyNodeLevelSign handles highway=stop and highway=give_way tags on
+// the intersection node itself. Without direction=, applies to all
+// approaches. Direction= refinement is deferred to a later phase; we
+// take the lenient interpretation (apply to all).
+//
+// Skips approaches that have already been promoted to AllWayStop by an
+// earlier rule (stop=all or equal-class fallback) — AllWayStop is
+// strictly stricter than Stop or Yield, so we never weaken it.
+func applyNodeLevelSign(x *network.Intersection, tags osm.Tags) {
+	var target network.Control
+	hasSign := false
+	for _, t := range tags {
+		if t.Key == "highway" && t.Value == "stop" {
+			target = network.ControlStop
+			hasSign = true
+		}
+		if t.Key == "highway" && t.Value == "give_way" {
+			target = network.ControlYield
+			hasSign = true
+		}
+	}
+	if !hasSign {
+		return
+	}
+	for j := range x.IncomingControl {
+		if x.IncomingControl[j] == network.ControlAllWayStop {
+			continue
+		}
+		x.IncomingControl[j] = target
 	}
 }
 

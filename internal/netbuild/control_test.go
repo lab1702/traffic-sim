@@ -110,6 +110,128 @@ func highwayOfEdge(net *network.Network, eid network.EdgeID, feat *osmload.Featu
 	return ""
 }
 
+// TestNetbuild_StopAll: an intersection node tagged stop=all forces
+// every approach to AllWayStop regardless of class.
+func TestNetbuild_StopAll(t *testing.T) {
+	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
+		1: mkNode(1, 40.0, -74.0010),
+		2: mkNode(2, 40.0010, -74.0005),
+		3: mkNode(3, 40.0, 0.0),
+		4: mkNode(4, 39.9990, -74.0005),
+		5: mkNode(5, 40.0, -74.0005, "stop", "all"),
+	}}
+	feat.Ways = []*osm.Way{
+		mkWay(10, "primary", false, 1, 5, 3),
+		mkWay(20, "residential", false, 2, 5, 4),
+	}
+
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	x := net.Intersections[0]
+	for i, c := range x.IncomingControl {
+		if c != network.ControlAllWayStop {
+			t.Errorf("approach %d should be AllWayStop under stop=all, got %v", i, c)
+		}
+	}
+}
+
+// TestNetbuild_StopMinor: stop=minor tags only the lower-class approaches.
+func TestNetbuild_StopMinor(t *testing.T) {
+	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
+		1: mkNode(1, 40.0, -74.0010),
+		2: mkNode(2, 40.0010, -74.0005),
+		3: mkNode(3, 40.0, 0.0),
+		4: mkNode(4, 39.9990, -74.0005),
+		5: mkNode(5, 40.0, -74.0005, "stop", "minor"),
+	}}
+	feat.Ways = []*osm.Way{
+		mkWay(10, "primary", false, 1, 5, 3),
+		mkWay(20, "residential", false, 2, 5, 4),
+	}
+
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	x := net.Intersections[0]
+	var sawStop, sawNone bool
+	for i, eid := range x.Incoming {
+		c := x.IncomingControl[i]
+		hw := highwayOfEdge(net, eid, feat)
+		switch hw {
+		case "primary":
+			if c != network.ControlNone {
+				t.Errorf("primary approach should be None under stop=minor, got %v", c)
+			}
+			sawNone = true
+		case "residential":
+			if c != network.ControlStop {
+				t.Errorf("residential approach should be Stop under stop=minor, got %v", c)
+			}
+			sawStop = true
+		}
+	}
+	if !sawStop || !sawNone {
+		t.Error("expected mixed controls under stop=minor")
+	}
+}
+
+// TestNetbuild_HighwayStopOnNode: an intersection node tagged
+// highway=stop (no direction) applies Stop to all approaches.
+func TestNetbuild_HighwayStopOnNode(t *testing.T) {
+	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
+		1: mkNode(1, 40.0, -74.0010),
+		2: mkNode(2, 40.0010, -74.0005),
+		3: mkNode(3, 40.0, 0.0),
+		4: mkNode(4, 39.9990, -74.0005),
+		5: mkNode(5, 40.0, -74.0005, "highway", "stop"),
+	}}
+	feat.Ways = []*osm.Way{
+		mkWay(10, "primary", false, 1, 5, 3),
+		mkWay(20, "residential", false, 2, 5, 4),
+	}
+
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	x := net.Intersections[0]
+	for i, c := range x.IncomingControl {
+		if c != network.ControlStop {
+			t.Errorf("approach %d should be Stop under highway=stop without direction, got %v", i, c)
+		}
+	}
+}
+
+// TestNetbuild_HighwayGiveWayOnNode: an intersection node tagged
+// highway=give_way applies Yield to all approaches.
+func TestNetbuild_HighwayGiveWayOnNode(t *testing.T) {
+	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
+		1: mkNode(1, 40.0, -74.0010),
+		2: mkNode(2, 40.0010, -74.0005),
+		3: mkNode(3, 40.0, 0.0),
+		4: mkNode(4, 39.9990, -74.0005),
+		5: mkNode(5, 40.0, -74.0005, "highway", "give_way"),
+	}}
+	feat.Ways = []*osm.Way{
+		mkWay(10, "primary", false, 1, 5, 3),
+		mkWay(20, "residential", false, 2, 5, 4),
+	}
+
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	x := net.Intersections[0]
+	for i, c := range x.IncomingControl {
+		if c != network.ControlYield {
+			t.Errorf("approach %d should be Yield under highway=give_way, got %v", i, c)
+		}
+	}
+}
+
 // buildNetToOSM is a position-based reverse map: each network NodeID gets
 // matched to the OSM NodeID whose projected (lat, lon) lands at the same
 // planar position. Computed fresh per call; only used in tests on tiny fixtures.
