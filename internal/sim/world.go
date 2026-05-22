@@ -806,8 +806,24 @@ func (w *World) Step() {
 			}
 		}
 
+		// Apply incident virtual leader (stopped obstacle at the edge end) if
+		// closer. Full closure blocks every lane; a lane closure blocks only
+		// the vehicle's lane.
+		dInc, incBlocked := w.incidentStopDistance(v)
+		if incBlocked {
+			virtualS := v.S + dInc
+			if !has || virtualS < lS {
+				lS, lV, has = virtualS, 0, true
+			}
+		}
+
 		prevEdge := v.Edge
 		v0 := w.computeDesiredSpeed(v)
+		if incBlocked {
+			v0 = 1e-9 // near-zero desired speed forces IDMAcceleration to apply
+			// near-MaxBraking deceleration — matches emergency-stop response to
+			// a road closure. Must be >0 to bypass stepIDM's v0≤0 guard.
+		}
 		stepIDM(v, v0, lS, lV, has, w.Net, DefaultIDM(), w.dt)
 
 		// GPS rerouting fires on edge entry (a decision point), bounded by the
