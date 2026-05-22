@@ -314,3 +314,126 @@ func TestWorld_FullClose_BlocksEntryFromUpstream(t *testing.T) {
 		t.Fatalf("car should be stopped at the closure entrance, V=%.2f", v.V)
 	}
 }
+
+func TestWorld_NextEdgeFullClosed(t *testing.T) {
+	net := buildRerouteGraph()
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	v := &Vehicle{Route: []network.EdgeID{0, 1}, RouteIdx: 0} // next edge is 1
+
+	if w.nextEdgeFullClosed(v) {
+		t.Fatal("no incident: next edge should not be reported closed")
+	}
+	for _, sev := range []Severity{Slowdown, LaneClose} {
+		w.Incidents[1] = sev
+		if w.nextEdgeFullClosed(v) {
+			t.Fatalf("severity %d on next edge must not count as full close", sev)
+		}
+	}
+	w.Incidents[1] = FullClose
+	if !w.nextEdgeFullClosed(v) {
+		t.Fatal("FullClose on the next edge should be detected")
+	}
+	// On the last edge there is no next edge.
+	last := &Vehicle{Route: []network.EdgeID{0, 1}, RouteIdx: 1}
+	if w.nextEdgeFullClosed(last) {
+		t.Fatal("last edge: there is no next edge to be closed")
+	}
+}
+
+func TestWorld_FullClose_GPSReroutesWhenBlocked(t *testing.T) {
+	// A GPS car on e0 whose next edge e1 (the direct edge to dest node 3) is
+	// fully closed must reroute around it (to the detour tail [2,3]) EVEN within
+	// the cooldown window — proving the cooldown bypass.
+	net := buildRerouteGraph()
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	var events int
+	w.EmitTrace = func(_ uint64, _ float64, e trace.Event) {
+		if _, ok := e.(*trace.VehicleReroute); ok {
+			events++
+		}
+	}
+	w.Incidents[1] = FullClose
+
+	v := &Vehicle{
+		ID: 1, Route: []network.EdgeID{0, 1}, RouteIdx: 0, Edge: 0, S: 50, V: 5,
+		HasGPS: true, DestNode: 3, LastRerouteSec: w.SimTime, // within cooldown
+	}
+	if !w.maybeReroute(v) {
+		t.Fatal("blocked GPS car should reroute despite the cooldown (bypass)")
+	}
+	if len(v.Route) != 3 || v.Route[1] != 2 || v.Route[2] != 3 {
+		t.Fatalf("route after reroute = %v, want [0 2 3] around the closure", v.Route)
+	}
+	if events != 1 {
+		t.Fatalf("want 1 VehicleReroute event, got %d", events)
+	}
+}
+
+func TestWorld_FullClose_GPSDivertsViaStep(t *testing.T) {
+	// A GPS car driving along e0 toward the (now closed) direct edge e1 should
+	// divert to the detour [2,3] via the Step trigger — without crossing e1 and
+	// without needing an edge transition to trigger the reroute.
+	net := buildRerouteGraph()
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	w.Incidents[1] = FullClose
+	w.Vehicles = []Vehicle{{
+		ID: 1, Route: []network.EdgeID{0, 1}, RouteIdx: 0, Edge: 0, S: 50, V: 5,
+		HasGPS: true, DestNode: 3, LastRerouteSec: -1000, // cooldown not the gate here
+	}}
+	w.nextID = 2
+
+	diverted := false
+	for i := 0; i < 400; i++ {
+		w.Step()
+		if len(w.Vehicles) == 0 {
+			diverted = true // reached dest 3 — only possible via the detour
+			break
+		}
+		if w.Vehicles[0].Edge == 1 {
+			t.Fatalf("GPS car entered the closed direct edge at tick %d", i)
+		}
+		if r := w.Vehicles[0].Route; len(r) == 3 && r[1] == 2 && r[2] == 3 {
+			diverted = true
+		}
+	}
+	if !diverted {
+		t.Fatal("GPS car did not divert around the closure via the Step trigger")
+	}
+}
+
+func TestWorld_FullClose_GPSNoAlternativeQueues(t *testing.T) {
+	// Linear 0->1->2; edge 1 is the ONLY path to dest node 2. With no alternative,
+	// the GPS car keeps its route and queues at the entry block — never entering
+	// the closed edge (the safety net still holds).
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 1, Pos: network.Point{X: 200, Y: 0}},
+		{ID: 2, Pos: network.Point{X: 400, Y: 0}},
+	}
+	edges := []network.Edge{
+		{ID: 0, From: 0, To: 1, Length: 200, SpeedLimit: 15, Lanes: []network.Lane{{Index: 0}}},
+		{ID: 1, From: 1, To: 2, Length: 200, SpeedLimit: 15, Lanes: []network.Lane{{Index: 0}}},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges}
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	w.Incidents[1] = FullClose
+	w.Vehicles = []Vehicle{{
+		ID: 1, Route: []network.EdgeID{0, 1}, RouteIdx: 0, Edge: 0, S: 20, V: 15,
+		HasGPS: true, DestNode: 2, LastRerouteSec: -1000,
+	}}
+	w.nextID = 2
+
+	for i := 0; i < 400; i++ {
+		w.Step()
+		if len(w.Vehicles) == 0 {
+			t.Fatal("car despawned; expected it queued at the closure")
+		}
+		if w.Vehicles[0].Edge != 0 {
+			t.Fatalf("GPS car with no alternative entered closed edge %d at tick %d",
+				w.Vehicles[0].Edge, i)
+		}
+	}
+	if r := w.Vehicles[0].Route; len(r) != 2 || r[1] != 1 {
+		t.Fatalf("route should be unchanged [0 1] (no alternative), got %v", r)
+	}
+}

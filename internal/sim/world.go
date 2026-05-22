@@ -821,9 +821,12 @@ func (w *World) Step() {
 		v0 := w.computeDesiredSpeed(v)
 		stepIDM(v, v0, lS, lV, has, w.Net, DefaultIDM(), w.dt)
 
-		// GPS rerouting fires on edge entry (a decision point), bounded by the
-		// per-tick budget. maybeReroute self-gates on HasGPS and cooldown.
-		if !v.Despawned && v.Edge != prevEdge && rerouteBudget > 0 {
+		// GPS rerouting fires on edge entry (a decision point) and, additionally,
+		// when the next edge ahead is fully closed (so a committed vehicle diverts
+		// around a closure rather than queuing at it). Bounded by the per-tick
+		// budget. maybeReroute self-gates on HasGPS and cooldown.
+		if !v.Despawned && rerouteBudget > 0 &&
+			(v.Edge != prevEdge || (v.HasGPS && w.nextEdgeFullClosed(v))) {
 			if w.maybeReroute(v) {
 				rerouteBudget--
 			}
@@ -911,6 +914,17 @@ func sortVehicleIdxByS(vs []Vehicle, idxs []int) {
 	}
 }
 
+// nextEdgeFullClosed reports whether the vehicle's next route edge exists and is
+// fully closed. Used to trigger an immediate reroute and to bypass the reroute
+// cooldown, so a GPS vehicle diverts around a closure ahead of it instead of
+// queuing at the entry block. O(1); false whenever there are no incidents.
+func (w *World) nextEdgeFullClosed(v *Vehicle) bool {
+	if v.RouteIdx+1 >= len(v.Route) {
+		return false
+	}
+	return w.Incidents[v.Route[v.RouteIdx+1]] == FullClose
+}
+
 // maybeReroute re-evaluates a GPS vehicle's remaining path against live
 // congestion costs and switches to a cheaper route if one beats the current
 // remaining route by switchMargin. Called when the vehicle crosses into a new
@@ -932,7 +946,9 @@ func (w *World) maybeReroute(v *Vehicle) bool {
 	if v.RouteIdx+1 >= len(v.Route) {
 		return false // on the last edge: nothing downstream to change
 	}
-	if w.SimTime-v.LastRerouteSec < rerouteCooldownSec {
+	// Bypass the cooldown when the next edge is fully closed: a committed vehicle
+	// should divert around a closure promptly rather than waiting out the cooldown.
+	if !w.nextEdgeFullClosed(v) && w.SimTime-v.LastRerouteSec < rerouteCooldownSec {
 		return false
 	}
 	v.LastRerouteSec = w.SimTime
