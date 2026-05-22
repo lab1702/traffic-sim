@@ -65,6 +65,14 @@ type World struct {
 	// SpeedFactor). Seeded with a fixed default so two runs of the same
 	// scenario produce identical vehicle profiles.
 	rng *rand.Rand
+
+	// Cong tracks live per-edge congestion and supplies routing costs.
+	Cong *Congestion
+
+	// GpsShare is the fraction of spawned vehicles given GPS rerouting, in
+	// [0,1]. Defaults to 1.0 (every vehicle) in NewWorld; overridden from the
+	// --gps-share flag.
+	GpsShare float64
 }
 
 const (
@@ -147,6 +155,8 @@ func NewWorld(net *network.Network, spawner Spawner, overrides map[network.Inter
 		SnapshotBuf:  snapshot.New(),
 		EmitTrace:    func(uint64, float64, trace.Event) {},
 		rng:          rand.New(rand.NewPCG(0xCAFE, 0xBEEF)),
+		Cong:     NewCongestion(net, ewmaHalfLifeSec, DefaultDt),
+		GpsShare: 1.0,
 	}
 }
 
@@ -672,6 +682,9 @@ func (w *World) Step() {
 			sortVehicleIdxByS(w.Vehicles, idxs)
 		}
 	}
+
+	// 2b. Refresh live per-edge congestion from this tick's positions/speeds.
+	w.Cong.Update(w.Net, byEdge, w.Vehicles)
 
 	// 3. Pre-compute leaders per vehicle index using per-lane buckets.
 	//    This is done in a separate pass to avoid order-dependence during stepping.

@@ -2521,3 +2521,31 @@ func TestWorld_Impatience_NotAppliedToRedLight(t *testing.T) {
 		t.Errorf("WaitTime should remain 0 at red light (not a gap-acceptance yield), got %.3f", v.WaitTime)
 	}
 }
+
+func TestWorld_CongestionRisesUnderJam(t *testing.T) {
+	net := buildLineGraph() // 3 edges, 100m, 10 m/s; edge 0 ends at a plain node
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	free := w.Cong.Cost(net, 0)
+
+	// Two vehicles parked on edge 0, pinned stationary each tick so the
+	// observed mean speed there stays ~0 and Congestion.Update drives the cost
+	// up. (Hand-built vehicles have HasGPS=false, so no rerouting occurs.)
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0, 1, 2}, Edge: 0, S: 20, V: 0},
+		{ID: 2, Route: []network.EdgeID{0, 1, 2}, Edge: 0, S: 40, V: 0},
+	}
+	w.nextID = 3
+
+	for i := 0; i < 300; i++ { // 15 sim-seconds — under the 60s stuck-despawn
+		for j := range w.Vehicles {
+			w.Vehicles[j].V = 0
+			w.Vehicles[j].S = 20 + float64(j)*20 // pin in place; never reach edge end
+		}
+		w.Step()
+	}
+
+	jammed := w.Cong.Cost(net, 0)
+	if jammed <= free {
+		t.Fatalf("jammed cost %v should exceed free-flow %v after a sustained stop", jammed, free)
+	}
+}
