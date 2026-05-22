@@ -437,6 +437,7 @@ func (v *Viewport) Draw(screen *ebiten.Image) {
 	v.drawRoadBands(screen)
 
 	snap := v.Buf.Read()
+	v.drawEdgeSelection(screen)
 	v.drawIncidents(screen, snap)
 
 	// Blink phase for flash modes: on for 500ms, off for 500ms (1 Hz).
@@ -616,6 +617,31 @@ func (v *Viewport) drawRoadBands(screen *ebiten.Image) {
 		drawOpts.ColorScale.Reset()
 		drawOpts.ColorScale.ScaleWithColor(clr)
 		vector.StrokePath(screen, path, strokeOpts, drawOpts)
+	}
+}
+
+// drawEdgeSelection strokes the selected edge in the selection color, a few
+// pixels wider than the incident overlay, so it reads as a highlight halo even
+// when the edge also carries a severity color. Uses the From/To node fallback
+// for edges with <2 geometry points, like hitTestEdge / drawIncidents.
+func (v *Viewport) drawEdgeSelection(screen *ebiten.Image) {
+	if !v.hasEdgeSelection || int(v.selectedEdge) >= len(v.Net.Edges) {
+		return
+	}
+	e := &v.Net.Edges[v.selectedEdge]
+	pts := e.Geometry
+	if len(pts) < 2 {
+		pts = []network.Point{v.Net.Nodes[e.From].Pos, v.Net.Nodes[e.To].Pos}
+	}
+	clr := color.RGBA{180, 180, 255, 255}
+	w := float32(e.Width*v.zoom) + 5
+	if w < minRoadStrokePx+5 {
+		w = minRoadStrokePx + 5
+	}
+	for j := 0; j+1 < len(pts); j++ {
+		x1, y1 := v.toScreen(pts[j].X, pts[j].Y)
+		x2, y2 := v.toScreen(pts[j+1].X, pts[j+1].Y)
+		vector.StrokeLine(screen, x1, y1, x2, y2, w, clr, true)
 	}
 }
 
