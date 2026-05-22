@@ -31,6 +31,9 @@ const (
 	// KindVehicleReroute records that a vehicle replaced the tail of its route
 	// at runtime (GPS rerouting around congestion).
 	KindVehicleReroute Kind = 9
+	// KindIncidentSet records that the incident on an edge was set or cleared
+	// at runtime (interactive injection in the viewer).
+	KindIncidentSet Kind = 10
 )
 
 // Event is implemented by every concrete event type.
@@ -130,6 +133,16 @@ type VehicleReroute struct {
 }
 
 func (*VehicleReroute) Kind() Kind { return KindVehicleReroute }
+
+// IncidentSet records that the incident on an edge was set or cleared at
+// runtime. Severity 0 is a clear; 1/2/3 are Slowdown/LaneClose/FullClose,
+// matching sim.Severity. Replayers track the latest severity per edge.
+type IncidentSet struct {
+	EdgeID   uint32
+	Severity uint8
+}
+
+func (*IncidentSet) Kind() Kind { return KindIncidentSet }
 
 // UnknownEvent is returned by Reader.Next when a trace contains an event
 // kind this reader doesn't recognize. The wire format's per-event `length`
