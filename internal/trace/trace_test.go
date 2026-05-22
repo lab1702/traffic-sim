@@ -20,6 +20,7 @@ func TestRoundTrip_AllEventKinds(t *testing.T) {
 		&SignalPhase{IntersectionID: 5, PhaseIdx: 1, IsYellow: false},
 		&MetricsTick{TotalVehicles: 42, AvgSpeed: 7.5, CongestionIdx: 0.2},
 		&SignalModeChange{IntersectionID: 5, Mode: 2}, // ModeFlashB
+		&IncidentSet{EdgeID: 55, Severity: 2},
 		&TraceDropped{Count: 17},
 		&SimEnd{Reason: "duration"},
 	}

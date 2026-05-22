@@ -141,6 +141,11 @@ func encodePayload(b *bytes.Buffer, e Event) error {
 		return binary.Write(b, le, ev.Mode)
 	case *TraceDropped:
 		return binary.Write(b, le, ev.Count)
+	case *IncidentSet:
+		if err := binary.Write(b, le, ev.EdgeID); err != nil {
+			return err
+		}
+		return binary.Write(b, le, ev.Severity)
 	case *VehicleReroute:
 		if err := binary.Write(b, le, ev.VehicleID); err != nil {
 			return err

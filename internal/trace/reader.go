@@ -163,6 +163,15 @@ func decodePayload(k Kind, p []byte) (Event, error) {
 			return nil, err
 		}
 		return e, nil
+	case KindIncidentSet:
+		e := &IncidentSet{}
+		if err := binary.Read(rd, le, &e.EdgeID); err != nil {
+			return nil, err
+		}
+		if err := binary.Read(rd, le, &e.Severity); err != nil {
+			return nil, err
+		}
+		return e, nil
 	case KindVehicleReroute:
 		e := &VehicleReroute{}
 		if err := binary.Read(rd, le, &e.VehicleID); err != nil {

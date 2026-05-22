@@ -69,6 +69,15 @@ type World struct {
 	// Cong tracks live per-edge congestion and supplies routing costs.
 	Cong *Congestion
 
+	// Incidents maps an edge to its active incident severity. Absent key means
+	// no incident. Owned by the sim goroutine; read by publishSnapshot.
+	Incidents map[network.EdgeID]Severity
+
+	// IncidentControl delivers runtime incident commands from the UI. Step
+	// drains it non-blocking at the top of each tick, like Control. Nil
+	// disables.
+	IncidentControl <-chan IncidentEvent
+
 	// GpsShare is the fraction of spawned vehicles given GPS rerouting, in
 	// [0,1]. Defaults to 1.0 (every vehicle) in NewWorld; overridden from the
 	// --gps-share flag.
@@ -156,6 +165,7 @@ func NewWorld(net *network.Network, spawner Spawner, overrides map[network.Inter
 		EmitTrace:    func(uint64, float64, trace.Event) {},
 		rng:          rand.New(rand.NewPCG(0xCAFE, 0xBEEF)),
 		Cong:         NewCongestion(net, ewmaHalfLifeSec, DefaultDt),
+		Incidents:    make(map[network.EdgeID]Severity),
 		GpsShare:     1.0,
 	}
 }
@@ -638,6 +648,18 @@ func (w *World) Step() {
 		}
 	}
 
+	// Drain pending incident commands from the UI (same pattern as Control).
+	if w.IncidentControl != nil {
+		for i := 0; i < 64; i++ {
+			select {
+			case ev := <-w.IncidentControl:
+				w.applyIncident(ev)
+			default:
+				i = 64
+			}
+		}
+	}
+
 	// 0b. Advance all signal phases.
 	for _, s := range w.SignalStates {
 		if s != nil {
@@ -784,6 +806,17 @@ func (w *World) Step() {
 			}
 		}
 
+		// Apply incident virtual leader (stopped obstacle at the edge end) if
+		// closer. Full closure blocks every lane; a lane closure blocks only
+		// the vehicle's lane.
+		dInc, incBlocked := w.incidentStopDistance(v)
+		if incBlocked {
+			virtualS := v.S + dInc
+			if !has || virtualS < lS {
+				lS, lV, has = virtualS, 0, true
+			}
+		}
+
 		prevEdge := v.Edge
 		v0 := w.computeDesiredSpeed(v)
 		stepIDM(v, v0, lS, lV, has, w.Net, DefaultIDM(), w.dt)
@@ -851,7 +884,11 @@ func (w *World) Step() {
 		// Try lane change after stepping (byEdgeLane is a tick-old snapshot —
 		// consistent and avoids order-dependence).
 		if lanes, ok := byEdgeLane[v.Edge]; ok {
-			tryLaneChange(v, i, lanes, w.Vehicles, w.Net)
+			cl := int8(-1)
+			if c, ok := w.closedLaneFor(v.Edge); ok {
+				cl = int8(c)
+			}
+			tryLaneChange(v, i, lanes, w.Vehicles, w.Net, cl)
 		}
 	}
 
@@ -900,7 +937,7 @@ func (w *World) maybeReroute(v *Vehicle) bool {
 	}
 	v.LastRerouteSec = w.SimTime
 
-	costFn := func(eid network.EdgeID) float64 { return w.Cong.Cost(w.Net, eid) }
+	costFn := func(eid network.EdgeID) float64 { return w.edgeCost(eid) }
 	src := w.Net.Edges[v.Edge].To
 	candidate, err := w.Router.RouteCost(src, v.DestNode, costFn)
 	if err != nil || len(candidate) == 0 {
@@ -980,7 +1017,7 @@ func (w *World) trySpawn(r SpawnRequest) {
 	var err error
 	if hasGPS {
 		route, err = w.Router.RouteCost(r.OriginNode, r.DestNode, func(eid network.EdgeID) float64 {
-			return w.Cong.Cost(w.Net, eid)
+			return w.edgeCost(eid)
 		})
 	} else {
 		route, err = w.Router.Route(r.OriginNode, r.DestNode)
@@ -1105,9 +1142,15 @@ func (w *World) publishSnapshot() {
 			})
 		}
 	}
+	incidents := make([]snapshot.IncidentView, 0, len(w.Incidents))
+	for eid, sev := range w.Incidents {
+		incidents = append(incidents, snapshot.IncidentView{
+			EdgeID: uint32(eid), Severity: uint8(sev),
+		})
+	}
 	w.SnapshotBuf.Publish(snapshot.Snapshot{
 		Tick: w.Tick, SimTime: w.SimTime,
-		Vehicles: views, Signals: sigs, Bounds: w.Net.Bounds,
+		Vehicles: views, Signals: sigs, Incidents: incidents, Bounds: w.Net.Bounds,
 	})
 }
 

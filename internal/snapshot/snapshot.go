@@ -28,12 +28,24 @@ const (
 	ModeOff    uint8 = 3
 )
 
+// Incident severities used in IncidentView.Severity. Kept here (not in sim/)
+// so the renderer and replayer can switch on them without importing sim. The
+// values match sim.Severity exactly; a sim-package test guards the match,
+// mirroring the signal-mode constants above.
+const (
+	SevNone      uint8 = 0
+	SevSlowdown  uint8 = 1
+	SevLaneClose uint8 = 2
+	SevFullClose uint8 = 3
+)
+
 type Snapshot struct {
-	Tick     uint64
-	SimTime  float64
-	Vehicles []VehicleView
-	Signals  []SignalView
-	Bounds   network.BoundingBox
+	Tick      uint64
+	SimTime   float64
+	Vehicles  []VehicleView
+	Signals   []SignalView
+	Incidents []IncidentView
+	Bounds    network.BoundingBox
 }
 
 type VehicleView struct {
@@ -49,6 +61,12 @@ type VehicleView struct {
 	// Triggered by an upcoming left/right turn within signal range or
 	// a recent lane change while the LC cooldown is still active.
 	TurnSignal int8
+}
+
+// IncidentView is one active incident, for rendering an edge overlay.
+type IncidentView struct {
+	EdgeID   uint32
+	Severity uint8 // Sev* constants
 }
 
 type SignalView struct {
