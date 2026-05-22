@@ -911,6 +911,17 @@ func sortVehicleIdxByS(vs []Vehicle, idxs []int) {
 	}
 }
 
+// nextEdgeFullClosed reports whether the vehicle's next route edge exists and is
+// fully closed. Used to trigger an immediate reroute and to bypass the reroute
+// cooldown, so a GPS vehicle diverts around a closure ahead of it instead of
+// queuing at the entry block. O(1); false whenever there are no incidents.
+func (w *World) nextEdgeFullClosed(v *Vehicle) bool {
+	if v.RouteIdx+1 >= len(v.Route) {
+		return false
+	}
+	return w.Incidents[v.Route[v.RouteIdx+1]] == FullClose
+}
+
 // maybeReroute re-evaluates a GPS vehicle's remaining path against live
 // congestion costs and switches to a cheaper route if one beats the current
 // remaining route by switchMargin. Called when the vehicle crosses into a new

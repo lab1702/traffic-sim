@@ -314,3 +314,28 @@ func TestWorld_FullClose_BlocksEntryFromUpstream(t *testing.T) {
 		t.Fatalf("car should be stopped at the closure entrance, V=%.2f", v.V)
 	}
 }
+
+func TestWorld_NextEdgeFullClosed(t *testing.T) {
+	net := buildRerouteGraph()
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	v := &Vehicle{Route: []network.EdgeID{0, 1}, RouteIdx: 0} // next edge is 1
+
+	if w.nextEdgeFullClosed(v) {
+		t.Fatal("no incident: next edge should not be reported closed")
+	}
+	for _, sev := range []Severity{Slowdown, LaneClose} {
+		w.Incidents[1] = sev
+		if w.nextEdgeFullClosed(v) {
+			t.Fatalf("severity %d on next edge must not count as full close", sev)
+		}
+	}
+	w.Incidents[1] = FullClose
+	if !w.nextEdgeFullClosed(v) {
+		t.Fatal("FullClose on the next edge should be detected")
+	}
+	// On the last edge there is no next edge.
+	last := &Vehicle{Route: []network.EdgeID{0, 1}, RouteIdx: 1}
+	if w.nextEdgeFullClosed(last) {
+		t.Fatal("last edge: there is no next edge to be closed")
+	}
+}
