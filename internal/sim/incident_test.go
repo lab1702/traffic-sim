@@ -133,8 +133,10 @@ func TestComputeDesiredSpeed_SlowdownCap(t *testing.T) {
 }
 
 func TestWorld_FullClose_VehicleStopsBeforeEnd(t *testing.T) {
-	// One 1-lane edge; a car starts 80m from the end at speed and must stop
-	// at the FullClose obstacle (edge end) instead of running off the edge.
+	// One 1-lane edge; a car well upstream must brake to a stop at the
+	// FullClose obstacle (edge end) instead of running off the edge. Uses
+	// ordinary IDM braking via the virtual leader (no v0 override), so allow
+	// time for the approach + asymptotic stop, but stay under stuckTimeoutSec.
 	net := &network.Network{
 		Nodes: []network.Node{
 			{ID: 0, Pos: network.Point{X: 0, Y: 0}},
@@ -147,15 +149,15 @@ func TestWorld_FullClose_VehicleStopsBeforeEnd(t *testing.T) {
 	}
 	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
 	w.Incidents[0] = FullClose
-	w.Vehicles = []Vehicle{{ID: 1, Route: []network.EdgeID{0}, Edge: 0, S: 120, V: 15}}
+	w.Vehicles = []Vehicle{{ID: 1, Route: []network.EdgeID{0}, Edge: 0, S: 20, V: 15}}
 	w.nextID = 2
 
-	// 100 ticks = 5s: enough to brake to a stop, less than stuckTimeoutSec so
-	// the stuck-guard hasn't despawned the (legitimately blocked) car yet.
-	for i := 0; i < 100; i++ {
+	// 600 ticks = 30s: ample for the car to cruise, brake, and settle to a
+	// near-stop, yet well under stuckTimeoutSec (60s) so it isn't despawned.
+	for i := 0; i < 600; i++ {
 		w.Step()
 		if len(w.Vehicles) == 0 {
-			t.Fatal("vehicle despawned too early; expected it blocked at the closure")
+			t.Fatal("vehicle despawned; expected it blocked at the closure")
 		}
 	}
 	v := &w.Vehicles[0]

@@ -819,11 +819,6 @@ func (w *World) Step() {
 
 		prevEdge := v.Edge
 		v0 := w.computeDesiredSpeed(v)
-		if incBlocked {
-			v0 = 1e-9 // near-zero desired speed forces IDMAcceleration to apply
-			// near-MaxBraking deceleration — matches emergency-stop response to
-			// a road closure. Must be >0 to bypass stepIDM's v0≤0 guard.
-		}
 		stepIDM(v, v0, lS, lV, has, w.Net, DefaultIDM(), w.dt)
 
 		// GPS rerouting fires on edge entry (a decision point), bounded by the
