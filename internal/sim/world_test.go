@@ -2757,3 +2757,56 @@ func TestWorld_Reroute_TriggersOnEdgeEntry(t *testing.T) {
 		t.Fatalf("no VehicleReroute event emitted on edge entry")
 	}
 }
+
+func TestWorld_Reroute_NoSwitchWhenAlreadyOptimal(t *testing.T) {
+	net := buildRerouteGraph()
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	events := 0
+	w.EmitTrace = func(_ uint64, _ float64, e trace.Event) {
+		if _, ok := e.(*trace.VehicleReroute); ok {
+			events++
+		}
+	}
+	// No jam: free-flow costs, so the current direct route [0,1] is already the
+	// cheapest. maybeReroute should run A* (return true) but not switch or emit.
+	v := &Vehicle{
+		ID: 1, Route: []network.EdgeID{0, 1}, RouteIdx: 0, Edge: 0, S: 50, V: 5,
+		HasGPS: true, DestNode: 3, LastRerouteSec: -1000,
+	}
+	if !w.maybeReroute(v) {
+		t.Fatalf("eligible GPS vehicle should make an attempt (return true)")
+	}
+	if len(v.Route) != 2 || v.Route[1] != 1 {
+		t.Fatalf("route changed when already optimal: %v", v.Route)
+	}
+	if events != 0 {
+		t.Fatalf("spurious VehicleReroute emitted when route unchanged: %d events", events)
+	}
+}
+
+func TestWorld_Reroute_KeepsRouteOnNoPath(t *testing.T) {
+	net := buildRerouteGraph()
+	// Add an isolated node with no edges — an unreachable destination.
+	net.Nodes = append(net.Nodes, network.Node{ID: 4, Pos: network.Point{X: 999, Y: 999}})
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	events := 0
+	w.EmitTrace = func(_ uint64, _ float64, e trace.Event) {
+		if _, ok := e.(*trace.VehicleReroute); ok {
+			events++
+		}
+	}
+	w.Cong.speed[1] = minEdgeSpeed // even with the direct edge jammed...
+	v := &Vehicle{
+		ID: 1, Route: []network.EdgeID{0, 1}, RouteIdx: 0, Edge: 0, S: 50, V: 5,
+		HasGPS: true, DestNode: 4, LastRerouteSec: -1000, // ...node 4 is unreachable
+	}
+	if !w.maybeReroute(v) {
+		t.Fatalf("attempt should still count (return true) on no-route")
+	}
+	if len(v.Route) != 2 || v.Route[1] != 1 {
+		t.Fatalf("route changed despite no alternative path: %v", v.Route)
+	}
+	if events != 0 {
+		t.Fatalf("emitted reroute event despite no-route: %d", events)
+	}
+}

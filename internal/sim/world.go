@@ -877,9 +877,13 @@ func sortVehicleIdxByS(vs []Vehicle, idxs []int) {
 // maybeReroute re-evaluates a GPS vehicle's remaining path against live
 // congestion costs and switches to a cheaper route if one beats the current
 // remaining route by switchMargin. Called when the vehicle crosses into a new
-// edge. Returns true if an attempt was made (A* was run, or skipped only by
-// the cheap pre-checks for HasGPS/last-edge/cooldown returning false). A true
-// return consumes one slot of the per-tick reroute budget.
+// edge.
+//
+// Returns false immediately — without consuming a budget slot or touching
+// LastRerouteSec — when HasGPS is false, the vehicle is on its last edge, or
+// the cooldown hasn't elapsed. Returns true (and stamps LastRerouteSec) once
+// A* is run, regardless of whether a switch was made; the caller decrements
+// the per-tick reroute budget on a true return.
 //
 // On switch it splices Route[:RouteIdx+1] + candidate (RouteIdx still points
 // at the current edge, unchanged) and emits a VehicleReroute event so replay
