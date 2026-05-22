@@ -35,6 +35,7 @@ type player struct {
 	vehicles     map[uint32]*replayVehicle
 	signals      []approachLight
 	signalStates map[uint32]*sim.SignalState
+	incidents    map[uint32]uint8 // EdgeID -> snapshot.Sev*
 }
 
 type replayVehicle struct {
@@ -91,6 +92,7 @@ func newPlayer(net *network.Network, r *trace.Reader, buf *snapshot.Buffer, spee
 		buf:          buf,
 		speedMul:     speedMul,
 		vehicles:     make(map[uint32]*replayVehicle),
+		incidents:    make(map[uint32]uint8),
 		signals:      lights,
 		signalStates: states,
 	}
@@ -145,6 +147,12 @@ func (p *player) apply(hdr trace.Header, ev trace.Event) {
 		}
 	case *trace.VehicleDespawn:
 		delete(p.vehicles, e.VehicleID)
+	case *trace.IncidentSet:
+		if e.Severity == 0 {
+			delete(p.incidents, e.EdgeID)
+		} else {
+			p.incidents[e.EdgeID] = e.Severity
+		}
 	case *trace.VehicleReroute:
 		rv := p.vehicles[e.VehicleID]
 		// Replace route[AtIndex:] with NewTail, preserving the prefix the
@@ -246,10 +254,15 @@ func (p *player) publish(simTime float64) {
 	for i, s := range p.signals {
 		sigViews[i] = s.view
 	}
+	incViews := make([]snapshot.IncidentView, 0, len(p.incidents))
+	for eid, sev := range p.incidents {
+		incViews = append(incViews, snapshot.IncidentView{EdgeID: eid, Severity: sev})
+	}
 	p.buf.Publish(snapshot.Snapshot{
-		SimTime:  simTime,
-		Vehicles: views,
-		Signals:  sigViews,
-		Bounds:   p.net.Bounds,
+		SimTime:   simTime,
+		Vehicles:  views,
+		Signals:   sigViews,
+		Incidents: incViews,
+		Bounds:    p.net.Bounds,
 	})
 }
