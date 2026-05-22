@@ -103,8 +103,9 @@ an edge** to cycle its incident severity:
 
 - **Slowdown** — traffic crawls through the edge (desired speed capped).
 - **Lane closed** — the curb lane is blocked; vehicles merge out of it.
-- **Fully closed** — every lane is blocked; through-traffic queues and
-  GPS-equipped vehicles reroute around it.
+- **Fully closed** — every lane is blocked. GPS-equipped vehicles reroute around
+  it (diverting promptly, even mid-approach); vehicles with no alternative — and
+  vehicles without GPS — queue at the entrance until it reopens.
 
 Incidents stay until you clear them (cycle back to `none`). The active count is
 shown in the HUD, with a color legend (bottom-left) for the overlay colors.
