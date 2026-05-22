@@ -24,7 +24,7 @@ const turnBiasRange = 300.0 // meters before the intersection
 //     When turn bias is active, this still runs only if the ego lane is
 //     already compatible, AND candidate lanes that would become
 //     incompatible are rejected.
-func tryLaneChange(v *Vehicle, vi int, laneVehicles map[uint8][]int, vs []Vehicle, net *network.Network) {
+func tryLaneChange(v *Vehicle, vi int, laneVehicles map[uint8][]int, vs []Vehicle, net *network.Network, closedLane int8) {
 	if v.LaneChangeCooldown > 0 {
 		return
 	}
@@ -32,6 +32,32 @@ func tryLaneChange(v *Vehicle, vi int, laneVehicles map[uint8][]int, vs []Vehicl
 	numLanes := uint8(len(edge.Lanes))
 	if numLanes < 2 {
 		return
+	}
+
+	// Incident: ego is in a closed lane — vacate to an adjacent open lane as
+	// soon as a safe gap exists (overrides the normal speed/turn incentive,
+	// but never overrides the safety gaps).
+	if closedLane >= 0 && v.Lane == uint8(closedLane) {
+		for _, dl := range []int8{1, -1} {
+			nl := int(v.Lane) + int(dl)
+			if nl < 0 || nl >= int(numLanes) || nl == int(closedLane) {
+				continue
+			}
+			other := laneVehicles[uint8(nl)]
+			frontS, hasFront := nextAheadS(other, vs, v.Edge, v.S)
+			rearS, hasRear := nextBehindS(other, vs, v.Edge, v.S)
+			if hasFront && frontS-v.S-VehicleLength < safetyGapFront {
+				continue
+			}
+			if hasRear && v.S-rearS-VehicleLength < safetyGapRear {
+				continue
+			}
+			v.Lane = uint8(nl)
+			v.LaneChangeCooldown = laneChangeCooldown
+			v.LastLCDir = dl
+			return
+		}
+		return // blocked in the closed lane; don't fall through to normal LC
 	}
 
 	// --- Turn-bias context ---

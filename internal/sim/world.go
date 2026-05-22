@@ -884,7 +884,11 @@ func (w *World) Step() {
 		// Try lane change after stepping (byEdgeLane is a tick-old snapshot —
 		// consistent and avoids order-dependence).
 		if lanes, ok := byEdgeLane[v.Edge]; ok {
-			tryLaneChange(v, i, lanes, w.Vehicles, w.Net)
+			cl := int8(-1)
+			if c, ok := w.closedLaneFor(v.Edge); ok {
+				cl = int8(c)
+			}
+			tryLaneChange(v, i, lanes, w.Vehicles, w.Net, cl)
 		}
 	}
 

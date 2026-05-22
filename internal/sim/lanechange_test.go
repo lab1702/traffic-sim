@@ -168,6 +168,32 @@ func TestLaneChange_TurnBias_BeyondTrigger_NoChange(t *testing.T) {
 	}
 }
 
+func TestLaneChange_VacatesClosedLane(t *testing.T) {
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 1, Pos: network.Point{X: 1000, Y: 0}},
+	}
+	edges := []network.Edge{
+		{ID: 0, From: 0, To: 1, Length: 1000, SpeedLimit: 20,
+			Lanes: []network.Lane{{Index: 0}, {Index: 1}}},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges}
+
+	// Car in the closed curb lane (0); open lane (1) is empty -> must vacate.
+	vs := []Vehicle{{ID: 1, Route: []network.EdgeID{0}, Edge: 0, Lane: 0, S: 100, V: 10}}
+	tryLaneChange(&vs[0], 0, map[uint8][]int{0: {0}}, vs, net, 0)
+	if vs[0].Lane != 1 {
+		t.Fatalf("car in closed lane should move to lane 1, got %d", vs[0].Lane)
+	}
+
+	// Baseline: no incident (closedLane = -1), no slow leader -> no change.
+	vs2 := []Vehicle{{ID: 1, Route: []network.EdgeID{0}, Edge: 0, Lane: 0, S: 100, V: 10}}
+	tryLaneChange(&vs2[0], 0, map[uint8][]int{0: {0}}, vs2, net, -1)
+	if vs2[0].Lane != 0 {
+		t.Fatalf("no incident: lane should be unchanged, got %d", vs2[0].Lane)
+	}
+}
+
 // TestLaneChange_TurnBias_LastEdge_NoFire verifies bias is a no-op when
 // the current edge is the last edge of the route.
 func TestLaneChange_TurnBias_LastEdge_NoFire(t *testing.T) {
