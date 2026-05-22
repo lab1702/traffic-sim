@@ -132,6 +132,23 @@ func TestComputeDesiredSpeed_SlowdownCap(t *testing.T) {
 	}
 }
 
+func TestWorld_FullClose_GPSReroutes(t *testing.T) {
+	net := buildRerouteGraph() // route [0,1] direct; detour [0,2,3]; dest node 3
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	w.Incidents[1] = FullClose // close the direct edge
+
+	v := &Vehicle{
+		ID: 1, Route: []network.EdgeID{0, 1}, RouteIdx: 0, Edge: 0, S: 50, V: 5,
+		HasGPS: true, DestNode: 3, LastRerouteSec: -1000,
+	}
+	if !w.maybeReroute(v) {
+		t.Fatalf("maybeReroute returned false for an eligible GPS vehicle")
+	}
+	if len(v.Route) != 3 || v.Route[1] != 2 || v.Route[2] != 3 {
+		t.Fatalf("route after reroute = %v, want [0 2 3] around the closure", v.Route)
+	}
+}
+
 func TestWorld_FullClose_VehicleStopsBeforeEnd(t *testing.T) {
 	// One 1-lane edge; a car well upstream must brake to a stop at the
 	// FullClose obstacle (edge end) instead of running off the edge. Uses

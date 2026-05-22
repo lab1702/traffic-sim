@@ -933,7 +933,7 @@ func (w *World) maybeReroute(v *Vehicle) bool {
 	}
 	v.LastRerouteSec = w.SimTime
 
-	costFn := func(eid network.EdgeID) float64 { return w.Cong.Cost(w.Net, eid) }
+	costFn := func(eid network.EdgeID) float64 { return w.edgeCost(eid) }
 	src := w.Net.Edges[v.Edge].To
 	candidate, err := w.Router.RouteCost(src, v.DestNode, costFn)
 	if err != nil || len(candidate) == 0 {
@@ -1013,7 +1013,7 @@ func (w *World) trySpawn(r SpawnRequest) {
 	var err error
 	if hasGPS {
 		route, err = w.Router.RouteCost(r.OriginNode, r.DestNode, func(eid network.EdgeID) float64 {
-			return w.Cong.Cost(w.Net, eid)
+			return w.edgeCost(eid)
 		})
 	} else {
 		route, err = w.Router.Route(r.OriginNode, r.DestNode)
