@@ -19,9 +19,12 @@ func TestWriteRead_IncidentSet(t *testing.T) {
 			t.Fatalf("write: %v", err)
 		}
 		r := NewReader(&buf)
-		_, ev, err := r.Next()
+		hdr, ev, err := r.Next()
 		if err != nil {
 			t.Fatalf("read: %v", err)
+		}
+		if hdr.Tick != 5 || hdr.SimTime != 1.25 {
+			t.Fatalf("header round-trip = %+v, want tick=5 simTime=1.25", hdr)
 		}
 		got, ok := ev.(*IncidentSet)
 		if !ok {
