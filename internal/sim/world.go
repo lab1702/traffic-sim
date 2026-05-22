@@ -847,7 +847,11 @@ func sortVehicleIdxByS(vs []Vehicle, idxs []int) {
 }
 
 func (w *World) trySpawn(r SpawnRequest) {
-	// Sample a per-driver speed preference: Normal(1.0, σ), clamped.
+	// Sample a per-driver speed preference: Normal(mean=1.0, σ=0.015),
+	// clamped to [0.95, 1.05]. The clamp basically never fires (≈3σ each
+	// side covers 99.7%), so the distribution is effectively a tight
+	// normal — most vehicles drive at the speed limit, a few noticeably
+	// slower or faster.
 	factor := 1.0 + w.rng.NormFloat64()*speedFactorStdDev
 	if factor < speedFactorMin {
 		factor = speedFactorMin
