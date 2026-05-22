@@ -280,3 +280,37 @@ func TestWorld_FullClose_VehicleStopsBeforeEnd(t *testing.T) {
 		t.Fatalf("vehicle should be ~stopped at the closure: V=%.2f", v.V)
 	}
 }
+
+func TestWorld_FullClose_BlocksEntryFromUpstream(t *testing.T) {
+	// Path 0->1->2; edge 1 is fully closed. A non-GPS car on edge 0 (committed
+	// to route [0,1]) must NOT drive through the closed edge 1 — it should stop
+	// at the entrance (end of edge 0) and never transition onto edge 1.
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 1, Pos: network.Point{X: 200, Y: 0}},
+		{ID: 2, Pos: network.Point{X: 400, Y: 0}},
+	}
+	edges := []network.Edge{
+		{ID: 0, From: 0, To: 1, Length: 200, SpeedLimit: 15, Lanes: []network.Lane{{Index: 0}}},
+		{ID: 1, From: 1, To: 2, Length: 200, SpeedLimit: 15, Lanes: []network.Lane{{Index: 0}}},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges}
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	w.Incidents[1] = FullClose
+	w.Vehicles = []Vehicle{{ID: 1, Route: []network.EdgeID{0, 1}, Edge: 0, S: 20, V: 15}}
+	w.nextID = 2
+
+	for i := 0; i < 400; i++ { // 20s, well under stuckTimeoutSec (60s)
+		w.Step()
+		if len(w.Vehicles) == 0 {
+			t.Fatal("car despawned; expected it queued at the closure entrance")
+		}
+		if w.Vehicles[0].Edge != 0 {
+			t.Fatalf("car entered closed edge %d at tick %d (S=%.1f) — should be blocked at entry",
+				w.Vehicles[0].Edge, i, w.Vehicles[0].S)
+		}
+	}
+	if v := &w.Vehicles[0]; v.V > 1.0 {
+		t.Fatalf("car should be stopped at the closure entrance, V=%.2f", v.V)
+	}
+}
