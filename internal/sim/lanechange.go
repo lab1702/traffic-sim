@@ -16,7 +16,10 @@ const turnBiasRange = 300.0 // meters before the intersection
 // laneVehicles[lane] is a sorted-by-S slice of vehicle indices on that
 // lane of the current edge.
 //
-// Two modes:
+// Three modes:
+//   - Incident vacate: when the vehicle is in an incident's closed lane,
+//     move to an adjacent open lane as soon as a safe gap exists (takes
+//     priority over the other modes; still respects safety gaps).
 //   - Turn bias: within turnBiasRange of an intersection where v will turn,
 //     shift toward the nearest lane whose AllowedTurns includes the next
 //     route edge. Skips the speed-difference threshold but keeps safety gaps.
@@ -40,7 +43,7 @@ func tryLaneChange(v *Vehicle, vi int, laneVehicles map[uint8][]int, vs []Vehicl
 	if closedLane >= 0 && v.Lane == uint8(closedLane) {
 		for _, dl := range []int8{1, -1} {
 			nl := int(v.Lane) + int(dl)
-			if nl < 0 || nl >= int(numLanes) || nl == int(closedLane) {
+			if nl < 0 || nl >= int(numLanes) || nl == int(closedLane) { // last clause defensive: nl != closedLane here
 				continue
 			}
 			other := laneVehicles[uint8(nl)]

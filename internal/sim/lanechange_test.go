@@ -194,6 +194,31 @@ func TestLaneChange_VacatesClosedLane(t *testing.T) {
 	}
 }
 
+func TestLaneChange_ClosedLaneBlockedStaysPut(t *testing.T) {
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 1, Pos: network.Point{X: 1000, Y: 0}},
+	}
+	edges := []network.Edge{
+		{ID: 0, From: 0, To: 1, Length: 1000, SpeedLimit: 20,
+			Lanes: []network.Lane{{Index: 0}, {Index: 1}}},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges}
+
+	// Ego in closed lane 0 at S=100; a blocker sitting right alongside in lane
+	// 1 (S=105) is within safetyGapFront (gap = 105-100-5 = 0 < 20), so ego
+	// must stay in lane 0.
+	vs := []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0}, Edge: 0, Lane: 0, S: 100, V: 10}, // ego
+		{ID: 2, Route: []network.EdgeID{0}, Edge: 0, Lane: 1, S: 105, V: 10}, // blocker ahead
+	}
+	laneVehicles := map[uint8][]int{0: {0}, 1: {1}}
+	tryLaneChange(&vs[0], 0, laneVehicles, vs, net, 0) // closedLane = 0
+	if vs[0].Lane != 0 {
+		t.Fatalf("ego should stay in closed lane 0 (no safe gap in lane 1), got %d", vs[0].Lane)
+	}
+}
+
 // TestLaneChange_TurnBias_LastEdge_NoFire verifies bias is a no-op when
 // the current edge is the last edge of the route.
 func TestLaneChange_TurnBias_LastEdge_NoFire(t *testing.T) {
