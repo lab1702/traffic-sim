@@ -51,6 +51,18 @@ func TestCongestion_JamRaisesCost(t *testing.T) {
 	if math.Abs(jammed-want) > 1.0 {
 		t.Fatalf("jammed cost %v, want ~%v", jammed, want)
 	}
+
+	// After the jam clears, cost must recover back toward free-flow.
+	for i := 0; i < 2000; i++ {
+		c.Update(net, map[network.EdgeID][]int{}, nil)
+	}
+	recovered := c.Cost(net, 0)
+	if recovered >= jammed {
+		t.Fatalf("cost after clearing jam = %v, want < jam cost %v", recovered, jammed)
+	}
+	if math.Abs(recovered-free) > 0.5 {
+		t.Fatalf("recovered cost = %v, want ~free-flow %v", recovered, free)
+	}
 }
 
 func TestCongestion_EWMASmoothing(t *testing.T) {

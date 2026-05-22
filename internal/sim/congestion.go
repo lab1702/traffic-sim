@@ -36,7 +36,7 @@ func NewCongestion(net *network.Network, halfLifeSec, dt float64) *Congestion {
 		speed[i] = net.Edges[i].SpeedLimit
 	}
 	alpha := 1.0
-	if halfLifeSec > 0 {
+	if halfLifeSec > 0 && dt > 0 {
 		alpha = 1 - math.Exp(-math.Ln2*dt/halfLifeSec)
 	}
 	return &Congestion{speed: speed, alpha: alpha}
@@ -67,6 +67,10 @@ func (c *Congestion) Update(net *network.Network, byEdge map[network.EdgeID][]in
 // by the smoothed observed speed, clamped to [minEdgeSpeed, freeFlowSpeed].
 // The free-flow ceiling keeps the router's A* heuristic admissible (congestion
 // only makes edges slower than free-flow, never faster).
+//
+// Precondition: eid must be a valid EdgeID in the same Network passed to
+// NewCongestion (0 <= eid < len(net.Edges)); callers violating this will panic,
+// consistent with edge access elsewhere in the sim package.
 func (c *Congestion) Cost(net *network.Network, eid network.EdgeID) float64 {
 	e := &net.Edges[eid]
 	freeFlow := e.SpeedLimit
