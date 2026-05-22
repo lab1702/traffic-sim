@@ -158,6 +158,7 @@ type runFlags struct {
 	spawnRate   float64
 	signalsPath string
 	tracePath   string
+	gpsShare    float64
 }
 
 func newRunFlagSet() (*flag.FlagSet, *runFlags) {
@@ -169,6 +170,8 @@ func newRunFlagSet() (*flag.FlagSet, *runFlags) {
 	fs.Float64Var(&f.spawnRate, "spawn-rate", 5.0, "vehicles attempted per simulated second")
 	fs.StringVar(&f.signalsPath, "signals", "", "path to a YAML file of per-intersection signal overrides")
 	fs.StringVar(&f.tracePath, "trace", "", "write binary trace events to this file for replay/analysis")
+	fs.Float64Var(&f.gpsShare, "gps-share", 1.0,
+		"fraction of vehicles (0..1) with GPS rerouting around congestion")
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "Usage: trafficsim run [flags] <path-to-osm>")
 		fmt.Fprintln(fs.Output(), "")
@@ -196,6 +199,9 @@ func runRun(args []string) error {
 	if f.headless && f.duration == 0 {
 		return errors.New("--headless requires --duration > 0")
 	}
+	if f.gpsShare < 0 || f.gpsShare > 1 {
+		return fmt.Errorf("--gps-share must be in [0,1], got %v", f.gpsShare)
+	}
 	osmPath := fs.Arg(0)
 
 	feat, err := osmload.Load(osmPath)
@@ -214,6 +220,7 @@ func runRun(args []string) error {
 
 	spawner := sim.NewRandomOD(net, f.seed, f.spawnRate)
 	w := sim.NewWorld(net, spawner, overrides)
+	w.GpsShare = f.gpsShare
 
 	// Control channel from the UI to the sim. Renderer pushes mode-toggle
 	// events here; sim drains at the top of each Step. Buffered so a
