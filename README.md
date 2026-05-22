@@ -108,8 +108,9 @@ This is verified by `TestWorld_TraceDeterminism`.
 
 ## Performance
 
-Tick budget is 50 ms at 20 Hz. Current per-tick benchmarks on a 40x40 grid
-(1,600 intersections, ~6,240 directed edges), measured on Intel Core Ultra 9 285K:
+Tick budget is 50 ms at 20 Hz. Baseline per-tick benchmarks on a 40x40 grid
+(1,600 intersections, ~6,240 directed edges) with static routing (pre-GPS),
+measured on Intel Core Ultra 9 285K:
 
 | Vehicles | ns/op     | ms/tick |
 |----------|-----------|---------|
@@ -120,12 +121,29 @@ Tick budget is 50 ms at 20 Hz. Current per-tick benchmarks on a 40x40 grid
 All three are well under the 50 ms budget, leaving headroom for real-world
 network complexity and additional features.
 
-> These figures predate GPS rerouting (now on by default), which adds a
-> per-tick congestion update and periodic per-vehicle A* reroutes. With it
-> enabled, live per-tick cost is higher and more workload-dependent (it scales
-> with congestion, not just vehicle count), but still comfortably within the
-> 50 ms budget. Re-run the benchmark for current numbers, or use `--gps-share 0`
-> to measure static routing.
+### GPS rerouting overhead
+
+GPS rerouting (on by default) adds two per-tick costs: an always-on congestion
+update (O(edges)) and, for each vehicle that has just crossed into a new edge and
+is past its reroute cooldown, a shortest-path recomputation. Comparing
+`--gps-share 0` (static routing) against `--gps-share 1` (every vehicle) on the
+same 40x40 grid (AMD Ryzen AI 9 HX 370, median of 3 runs):
+
+| Vehicles | `--gps-share 0` | `--gps-share 1` | Rerouting overhead |
+|----------|-----------------|-----------------|--------------------|
+| 1,000    | ~0.6 ms/tick    | ~1.7 ms/tick    | +1.1 ms (~2.8x)    |
+| 5,000    | ~2.4 ms/tick    | ~6.7 ms/tick    | +4.3 ms (~2.8x)    |
+| 10,000   | ~3.6 ms/tick    | ~3.4 ms/tick    | ~0 (gridlock)      |
+
+The overhead is workload-dependent, not a fixed multiplier. Reroutes trigger on
+edge entry, so under heavy gridlock (10k) vehicles rarely cross edges and the A*
+recomputations seldom fire — GPS cost falls to near zero. The peak is at
+moderate-but-congested load (5k). Every case stays well within the 50 ms budget.
+
+`--gps-share 0` still pays the always-on congestion update, so the delta above
+isolates the rerouting/A* work specifically rather than the full feature cost.
+The two tables were measured on different hardware (don't compare them directly),
+and per-run variance is roughly 10–20%.
 
 Run benchmarks yourself:
 ```
