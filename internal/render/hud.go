@@ -17,7 +17,7 @@ const hudLineHeight = 16
 
 // hudLineCount is the number of lines DrawHUD renders, used by callers to
 // offset content drawn below the HUD.
-const hudLineCount = 4
+const hudLineCount = 5
 
 // speedStats is a min/max/mean/median summary of vehicle speeds.
 type speedStats struct {
@@ -58,16 +58,18 @@ func computeSpeedStats(vehicles []snapshot.VehicleView) speedStats {
 // in world meters, vehicle speed stats). viewWidthM/viewHeightM are
 // window dimensions divided by the current zoom and indicate how many
 // meters of world are visible.
-func DrawHUD(screen *ebiten.Image, simTime float64, vehicleCount int, viewWidthM, viewHeightM float64, stats speedStats) {
+func DrawHUD(screen *ebiten.Image, simTime float64, vehicleCount int, incidentCount int, viewWidthM, viewHeightM float64, stats speedStats) {
 	line1 := fmt.Sprintf("sim t=%.1fs  vehicles=%d", simTime, vehicleCount)
 	line2 := fmt.Sprintf("FPS=%.1f  TPS=%.1f", ebiten.ActualFPS(), ebiten.ActualTPS())
 	line3 := fmt.Sprintf("view: %.0f m wide x %.0f m tall", viewWidthM, viewHeightM)
 	line4 := fmt.Sprintf("speed (m/s): min=%.1f  max=%.1f  mean=%.1f  median=%.1f",
 		stats.min, stats.max, stats.mean, stats.median)
+	line5 := fmt.Sprintf("incidents=%d  (shift+click an edge to cycle)", incidentCount)
 	ebitenutil.DebugPrintAt(screen, line1, 8, 8)
 	ebitenutil.DebugPrintAt(screen, line2, 8, 8+hudLineHeight)
 	ebitenutil.DebugPrintAt(screen, line3, 8, 8+2*hudLineHeight)
 	ebitenutil.DebugPrintAt(screen, line4, 8, 8+3*hudLineHeight)
+	ebitenutil.DebugPrintAt(screen, line5, 8, 8+4*hudLineHeight)
 }
 
 // DrawSelectionPanel renders an info block for the currently selected
