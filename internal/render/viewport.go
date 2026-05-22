@@ -144,6 +144,11 @@ type Viewport struct {
 	// the sim drains each tick. Mode values: 0=normal, 1=flash_a,
 	// 2=flash_b, 3=off (mirroring sim.SignalMode).
 	OnSetMode func(intersectionID uint32, mode uint8)
+
+	// OnIncident, if non-nil, is invoked when the user Shift+clicks an edge.
+	// severity uses the snapshot.Sev* values. Same non-blocking, goroutine-
+	// safe contract as OnSetMode (typically pushes onto a channel).
+	OnIncident func(edgeID uint32, severity uint8)
 }
 
 func NewViewport(net *network.Network, buf *snapshot.Buffer, w, h int) *Viewport {
@@ -228,8 +233,13 @@ func (v *Viewport) Update() error {
 		}
 	} else {
 		if v.dragging && !v.movedSinceDown {
-			// Click without drag → try to select an intersection.
-			if id, ok := v.hitTestIntersection(mx, my); ok {
+			// Shift+click cycles an incident on the nearest edge; plain click
+			// selects an intersection.
+			if shiftHeld() {
+				if eid, ok := v.hitTestEdge(mx, my); ok && v.OnIncident != nil {
+					v.OnIncident(uint32(eid), nextSeverity(v.severityOf(eid)))
+				}
+			} else if id, ok := v.hitTestIntersection(mx, my); ok {
 				v.selectedID = id
 				v.hasSelection = true
 			} else {
@@ -323,6 +333,84 @@ func (v *Viewport) hitTestIntersection(mx, my int) (network.IntersectionID, bool
 	return bestID, found
 }
 
+// segDist2 returns the squared distance from point (px,py) to the segment
+// (ax,ay)-(bx,by).
+func segDist2(px, py, ax, ay, bx, by float64) float64 {
+	dx, dy := bx-ax, by-ay
+	if dx == 0 && dy == 0 {
+		ex, ey := px-ax, py-ay
+		return ex*ex + ey*ey
+	}
+	t := ((px-ax)*dx + (py-ay)*dy) / (dx*dx + dy*dy)
+	if t < 0 {
+		t = 0
+	} else if t > 1 {
+		t = 1
+	}
+	cx, cy := ax+t*dx, ay+t*dy
+	ex, ey := px-cx, py-cy
+	return ex*ex + ey*ey
+}
+
+// hitTestEdge returns the nearest edge to the screen-space cursor within a
+// 30 m radius (point-to-polyline distance). Mirrors hitTestIntersection.
+func (v *Viewport) hitTestEdge(mx, my int) (network.EdgeID, bool) {
+	wx := v.camX + (float64(mx)-float64(v.Width)/2)/v.zoom
+	wy := v.camY - (float64(my)-float64(v.Height)/2)/v.zoom
+	const radius = 30.0
+	bestD2 := radius * radius
+	var bestID network.EdgeID
+	found := false
+	for i := range v.Net.Edges {
+		e := &v.Net.Edges[i]
+		pts := e.Geometry
+		if len(pts) < 2 {
+			pts = []network.Point{v.Net.Nodes[e.From].Pos, v.Net.Nodes[e.To].Pos}
+		}
+		for j := 0; j+1 < len(pts); j++ {
+			d2 := segDist2(wx, wy, pts[j].X, pts[j].Y, pts[j+1].X, pts[j+1].Y)
+			if d2 < bestD2 {
+				bestD2 = d2
+				bestID = network.EdgeID(i)
+				found = true
+			}
+		}
+	}
+	return bestID, found
+}
+
+// shiftHeld reports whether either Shift key is down.
+func shiftHeld() bool {
+	return ebiten.IsKeyPressed(ebiten.KeyShiftLeft) || ebiten.IsKeyPressed(ebiten.KeyShiftRight)
+}
+
+// severityOf returns the current incident severity on an edge from the latest
+// snapshot (snapshot.Sev* value), or SevNone.
+func (v *Viewport) severityOf(eid network.EdgeID) uint8 {
+	snap := v.Buf.Read()
+	for _, inc := range snap.Incidents {
+		if inc.EdgeID == uint32(eid) {
+			return inc.Severity
+		}
+	}
+	return snapshot.SevNone
+}
+
+// nextSeverity advances the click cycle none -> Slowdown -> LaneClose ->
+// FullClose -> none.
+func nextSeverity(cur uint8) uint8 {
+	switch cur {
+	case snapshot.SevNone:
+		return snapshot.SevSlowdown
+	case snapshot.SevSlowdown:
+		return snapshot.SevLaneClose
+	case snapshot.SevLaneClose:
+		return snapshot.SevFullClose
+	default:
+		return snapshot.SevNone
+	}
+}
+
 func (v *Viewport) Draw(screen *ebiten.Image) {
 	bg := color.RGBA{20, 20, 24, 255}
 	screen.Fill(bg)
@@ -334,6 +422,7 @@ func (v *Viewport) Draw(screen *ebiten.Image) {
 	v.drawRoadBands(screen)
 
 	snap := v.Buf.Read()
+	v.drawIncidents(screen, snap)
 
 	// Blink phase for flash modes: on for 500ms, off for 500ms (1 Hz).
 	blinkOn := (time.Now().UnixMilli()/500)%2 == 0
@@ -512,6 +601,39 @@ func (v *Viewport) drawRoadBands(screen *ebiten.Image) {
 		drawOpts.ColorScale.Reset()
 		drawOpts.ColorScale.ScaleWithColor(clr)
 		vector.StrokePath(screen, path, strokeOpts, drawOpts)
+	}
+}
+
+// drawIncidents overlays each active-incident edge in a severity color,
+// slightly thicker than the road band so it reads as a highlight.
+func (v *Viewport) drawIncidents(screen *ebiten.Image, snap snapshot.Snapshot) {
+	for _, inc := range snap.Incidents {
+		if int(inc.EdgeID) >= len(v.Net.Edges) {
+			continue
+		}
+		e := &v.Net.Edges[inc.EdgeID]
+		g := e.Geometry
+		if len(g) < 2 {
+			continue
+		}
+		var clr color.RGBA
+		switch inc.Severity {
+		case snapshot.SevSlowdown:
+			clr = color.RGBA{240, 180, 0, 220} // amber
+		case snapshot.SevLaneClose:
+			clr = color.RGBA{240, 120, 0, 230} // orange
+		default:
+			clr = color.RGBA{230, 40, 40, 240} // red (full close)
+		}
+		w := float32(e.Width*v.zoom) + 2
+		if w < minRoadStrokePx+2 {
+			w = minRoadStrokePx + 2
+		}
+		for j := 0; j+1 < len(g); j++ {
+			x1, y1 := v.toScreen(g[j].X, g[j].Y)
+			x2, y2 := v.toScreen(g[j+1].X, g[j+1].Y)
+			vector.StrokeLine(screen, x1, y1, x2, y2, w, clr, true)
+		}
 	}
 }
 
