@@ -2540,6 +2540,7 @@ func TestWorld_CongestionRisesUnderJam(t *testing.T) {
 		for j := range w.Vehicles {
 			w.Vehicles[j].V = 0
 			w.Vehicles[j].S = 20 + float64(j)*20 // pin in place; never reach edge end
+			w.Vehicles[j].StuckTime = 0          // keep the jam alive regardless of stuck-despawn tuning
 		}
 		w.Step()
 	}

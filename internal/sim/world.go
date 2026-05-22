@@ -155,8 +155,8 @@ func NewWorld(net *network.Network, spawner Spawner, overrides map[network.Inter
 		SnapshotBuf:  snapshot.New(),
 		EmitTrace:    func(uint64, float64, trace.Event) {},
 		rng:          rand.New(rand.NewPCG(0xCAFE, 0xBEEF)),
-		Cong:     NewCongestion(net, ewmaHalfLifeSec, DefaultDt),
-		GpsShare: 1.0,
+		Cong:         NewCongestion(net, ewmaHalfLifeSec, DefaultDt),
+		GpsShare:     1.0,
 	}
 }
 
