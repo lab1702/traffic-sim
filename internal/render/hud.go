@@ -142,6 +142,31 @@ func severityName(sev uint8) string {
 	}
 }
 
+// DrawEdgePanel renders the selected edge's id, current incident level, and a
+// little context, mirroring DrawSelectionPanel. The level is read from the
+// snapshot so it reflects live state (re-clicking the same edge updates it).
+func DrawEdgePanel(screen *ebiten.Image, net *network.Network, snap snapshot.Snapshot, id network.EdgeID, startY int) {
+	if int(id) >= len(net.Edges) {
+		return
+	}
+	e := &net.Edges[id]
+	sev := uint8(snapshot.SevNone)
+	for _, inc := range snap.Incidents {
+		if inc.EdgeID == uint32(id) {
+			sev = inc.Severity
+			break
+		}
+	}
+	lines := []string{
+		fmt.Sprintf("Edge #%d", id),
+		fmt.Sprintf("  incident: %s", severityName(sev)),
+		fmt.Sprintf("  %.0f m, limit %.0f m/s, %d lane(s)", e.Length, e.SpeedLimit, len(e.Lanes)),
+	}
+	for i, line := range lines {
+		ebitenutil.DebugPrintAt(screen, line, 8, startY+i*hudLineHeight)
+	}
+}
+
 func modeNameOf(mode uint8) string {
 	switch mode {
 	case modeNormal:

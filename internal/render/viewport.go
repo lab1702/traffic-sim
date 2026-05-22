@@ -573,6 +573,9 @@ func (v *Viewport) Draw(screen *ebiten.Image) {
 		// HUD lines start at y=8; selection panel starts just below them.
 		DrawSelectionPanel(screen, v.Net, snap, v.selectedID, 8+hudLineCount*hudLineHeight+8)
 	}
+	if v.hasEdgeSelection {
+		DrawEdgePanel(screen, v.Net, snap, v.selectedEdge, 8+hudLineCount*hudLineHeight+8)
+	}
 }
 
 // drawRoadBands strokes each edge's polyline at a thickness derived from
