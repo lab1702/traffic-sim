@@ -648,7 +648,7 @@ func (w *World) Step() {
 		}
 	}
 
-	// 0a-bis. Drain pending incident commands from the UI, like Control.
+	// Drain pending incident commands from the UI (same pattern as Control).
 	if w.IncidentControl != nil {
 		for i := 0; i < 64; i++ {
 			select {

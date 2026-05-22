@@ -1,6 +1,8 @@
 package sim
 
 import (
+	"log/slog"
+
 	"github.com/lab1702/traffic-sim/internal/network"
 	"github.com/lab1702/traffic-sim/internal/trace"
 )
@@ -93,7 +95,17 @@ func (w *World) incidentStopDistance(v *Vehicle) (float64, bool) {
 // applyIncident sets or clears the incident on an edge and records it. Out-of-
 // range edge ids are ignored (defensive, like applyControl).
 func (w *World) applyIncident(ev IncidentEvent) {
+	// Ignore out-of-range edge ids (defensive, mirrors applyControl). EdgeID is
+	// uint32 so the < 0 arm never fires; the upper bound is the real guard.
 	if int(ev.EdgeID) < 0 || int(ev.EdgeID) >= len(w.Net.Edges) {
+		return
+	}
+	switch ev.Severity {
+	case SeverityNone, Slowdown, LaneClose, FullClose:
+		// valid
+	default:
+		slog.Warn("applyIncident: unknown Severity; ignoring",
+			"edge_id", uint32(ev.EdgeID), "severity", uint8(ev.Severity))
 		return
 	}
 	if ev.Severity == SeverityNone {

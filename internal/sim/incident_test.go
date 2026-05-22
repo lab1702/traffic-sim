@@ -78,6 +78,16 @@ func TestApplyIncident_SetClear(t *testing.T) {
 	if len(events) != 2 {
 		t.Fatalf("emitted %d IncidentSet events, want 2 (set + clear)", len(events))
 	}
+
+	// Unknown severity is rejected: not stored, not emitted.
+	before := len(events)
+	w.applyIncident(IncidentEvent{EdgeID: 0, Severity: Severity(99)})
+	if _, present := w.Incidents[0]; present {
+		t.Fatal("unknown severity should not be stored")
+	}
+	if len(events) != before {
+		t.Fatal("unknown severity should not emit a trace event")
+	}
 }
 
 func TestIncidentStopDistance_Blocks(t *testing.T) {
@@ -99,5 +109,10 @@ func TestIncidentStopDistance_Blocks(t *testing.T) {
 	v.Lane = 1
 	if _, ok := w.incidentStopDistance(v); ok {
 		t.Fatal("LaneClose should not block a vehicle in the open lane")
+	}
+	v.Lane = 0
+	w.Incidents[0] = Slowdown
+	if _, ok := w.incidentStopDistance(v); ok {
+		t.Fatal("Slowdown should not block")
 	}
 }
