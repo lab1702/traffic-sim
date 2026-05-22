@@ -821,9 +821,12 @@ func (w *World) Step() {
 		v0 := w.computeDesiredSpeed(v)
 		stepIDM(v, v0, lS, lV, has, w.Net, DefaultIDM(), w.dt)
 
-		// GPS rerouting fires on edge entry (a decision point), bounded by the
-		// per-tick budget. maybeReroute self-gates on HasGPS and cooldown.
-		if !v.Despawned && v.Edge != prevEdge && rerouteBudget > 0 {
+		// GPS rerouting fires on edge entry (a decision point) and, additionally,
+		// when the next edge ahead is fully closed (so a committed vehicle diverts
+		// around a closure rather than queuing at it). Bounded by the per-tick
+		// budget. maybeReroute self-gates on HasGPS and cooldown.
+		if !v.Despawned && rerouteBudget > 0 &&
+			(v.Edge != prevEdge || (v.HasGPS && w.nextEdgeFullClosed(v))) {
 			if w.maybeReroute(v) {
 				rerouteBudget--
 			}
