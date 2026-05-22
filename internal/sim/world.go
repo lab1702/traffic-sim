@@ -943,7 +943,9 @@ func (w *World) maybeReroute(v *Vehicle) bool {
 	if v.RouteIdx+1 >= len(v.Route) {
 		return false // on the last edge: nothing downstream to change
 	}
-	if w.SimTime-v.LastRerouteSec < rerouteCooldownSec {
+	// Bypass the cooldown when the next edge is fully closed: a committed vehicle
+	// should divert around a closure promptly rather than waiting out the cooldown.
+	if !w.nextEdgeFullClosed(v) && w.SimTime-v.LastRerouteSec < rerouteCooldownSec {
 		return false
 	}
 	v.LastRerouteSec = w.SimTime

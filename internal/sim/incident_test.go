@@ -339,3 +339,32 @@ func TestWorld_NextEdgeFullClosed(t *testing.T) {
 		t.Fatal("last edge: there is no next edge to be closed")
 	}
 }
+
+func TestWorld_FullClose_GPSReroutesWhenBlocked(t *testing.T) {
+	// A GPS car on e0 whose next edge e1 (the direct edge to dest node 3) is
+	// fully closed must reroute around it (to the detour tail [2,3]) EVEN within
+	// the cooldown window — proving the cooldown bypass.
+	net := buildRerouteGraph()
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	var events int
+	w.EmitTrace = func(_ uint64, _ float64, e trace.Event) {
+		if _, ok := e.(*trace.VehicleReroute); ok {
+			events++
+		}
+	}
+	w.Incidents[1] = FullClose
+
+	v := &Vehicle{
+		ID: 1, Route: []network.EdgeID{0, 1}, RouteIdx: 0, Edge: 0, S: 50, V: 5,
+		HasGPS: true, DestNode: 3, LastRerouteSec: w.SimTime, // within cooldown
+	}
+	if !w.maybeReroute(v) {
+		t.Fatal("blocked GPS car should reroute despite the cooldown (bypass)")
+	}
+	if len(v.Route) != 3 || v.Route[1] != 2 || v.Route[2] != 3 {
+		t.Fatalf("route after reroute = %v, want [0 2 3] around the closure", v.Route)
+	}
+	if events != 1 {
+		t.Fatalf("want 1 VehicleReroute event, got %d", events)
+	}
+}
