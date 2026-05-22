@@ -279,6 +279,24 @@ const (
 	stopLineTolMeters = 8.0
 )
 
+const (
+	// rerouteCooldownSec is the minimum sim-time between a vehicle's reroutes.
+	// 20s gives GPS-like periodic re-evaluation without thrashing A* on every
+	// short edge a vehicle crosses.
+	rerouteCooldownSec = 20.0
+
+	// switchMargin is the hysteresis threshold: a vehicle adopts a candidate
+	// route only if its estimated cost is at least this fraction cheaper than
+	// the current remaining route. 0.15 stops flapping between near-equal
+	// routes as smoothed speeds wobble.
+	switchMargin = 0.15
+
+	// maxReroutesPerTick caps reroute attempts per tick as a defensive guard
+	// on the 50ms tick budget under pathological spawn rates. The
+	// edge-transition trigger plus cooldown keep the real count far lower.
+	maxReroutesPerTick = 64
+)
+
 // stopDistanceForYield returns (distance to stop line, true) when the
 // vehicle's current edge ends at an intersection where it must wait
 // before crossing. Dispatches on the effective Control for this approach:
@@ -732,6 +750,7 @@ func (w *World) Step() {
 
 	// 4. Step each vehicle, applying signal/yield virtual leaders.
 	//    Iterate vehicles in stable index order to preserve determinism.
+	rerouteBudget := maxReroutesPerTick
 	for i := range w.Vehicles {
 		if w.Vehicles[i].Despawned {
 			continue
@@ -765,8 +784,17 @@ func (w *World) Step() {
 			}
 		}
 
+		prevEdge := v.Edge
 		v0 := w.computeDesiredSpeed(v)
 		stepIDM(v, v0, lS, lV, has, w.Net, DefaultIDM(), w.dt)
+
+		// GPS rerouting fires on edge entry (a decision point), bounded by the
+		// per-tick budget. maybeReroute self-gates on HasGPS and cooldown.
+		if !v.Despawned && v.Edge != prevEdge && rerouteBudget > 0 {
+			if w.maybeReroute(v) {
+				rerouteBudget--
+			}
+		}
 
 		// Accumulate WaitTime while the vehicle is effectively stopped
 		// AND yielding via gap-acceptance. WaitTime is only reset on
@@ -844,6 +872,80 @@ func sortVehicleIdxByS(vs []Vehicle, idxs []int) {
 			idxs[j-1], idxs[j] = idxs[j], idxs[j-1]
 		}
 	}
+}
+
+// maybeReroute re-evaluates a GPS vehicle's remaining path against live
+// congestion costs and switches to a cheaper route if one beats the current
+// remaining route by switchMargin. Called when the vehicle crosses into a new
+// edge. Returns true if an attempt was made (A* was run, or skipped only by
+// the cheap pre-checks for HasGPS/last-edge/cooldown returning false). A true
+// return consumes one slot of the per-tick reroute budget.
+//
+// On switch it splices Route[:RouteIdx+1] + candidate (RouteIdx still points
+// at the current edge, unchanged) and emits a VehicleReroute event so replay
+// follows the new path.
+func (w *World) maybeReroute(v *Vehicle) bool {
+	if !v.HasGPS {
+		return false
+	}
+	if v.RouteIdx+1 >= len(v.Route) {
+		return false // on the last edge: nothing downstream to change
+	}
+	if w.SimTime-v.LastRerouteSec < rerouteCooldownSec {
+		return false
+	}
+	v.LastRerouteSec = w.SimTime
+
+	costFn := func(eid network.EdgeID) float64 { return w.Cong.Cost(w.Net, eid) }
+	src := w.Net.Edges[v.Edge].To
+	candidate, err := w.Router.RouteCost(src, v.DestNode, costFn)
+	if err != nil || len(candidate) == 0 {
+		return true // attempt made; keep current route
+	}
+
+	curCost := 0.0
+	for _, eid := range v.Route[v.RouteIdx+1:] {
+		curCost += costFn(eid)
+	}
+	newCost := 0.0
+	for _, eid := range candidate {
+		newCost += costFn(eid)
+	}
+
+	if newCost < curCost*(1-switchMargin) && !sameTail(v.Route[v.RouteIdx+1:], candidate) {
+		idx := v.RouteIdx + 1
+		// 3-index slice caps capacity so append allocates fresh, avoiding any
+		// aliasing with the old tail.
+		v.Route = append(v.Route[:idx:idx], candidate...)
+		w.emitReroute(v, idx, candidate)
+	}
+	return true
+}
+
+// emitReroute writes a VehicleReroute trace event for a route-tail switch.
+func (w *World) emitReroute(v *Vehicle, atIndex int, tail []network.EdgeID) {
+	tail32 := make([]uint32, len(tail))
+	for i, eid := range tail {
+		tail32[i] = uint32(eid)
+	}
+	w.EmitTrace(w.Tick, w.SimTime, &trace.VehicleReroute{
+		VehicleID: uint32(v.ID),
+		AtIndex:   uint32(atIndex),
+		NewTail:   tail32,
+	})
+}
+
+// sameTail reports whether two edge sequences are identical.
+func sameTail(a, b []network.EdgeID) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (w *World) trySpawn(r SpawnRequest) {
