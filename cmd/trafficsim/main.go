@@ -228,6 +228,11 @@ func runRun(args []string) error {
 	controlCh := make(chan sim.ControlEvent, 32)
 	w.Control = controlCh
 
+	// Incident channel from the UI to the sim, mirroring Control. Shift+click
+	// on an edge in the viewer cycles its incident severity.
+	incidentCh := make(chan sim.IncidentEvent, 32)
+	w.IncidentControl = incidentCh
+
 	// SIGINT/SIGTERM → ctx cancellation. The context is the single
 	// orderly-shutdown signal: both headless and live modes watch it.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -267,7 +272,7 @@ func runRun(args []string) error {
 			len(w.Vehicles), w.Tick, w.SimTime)
 		return nil
 	}
-	return runLive(ctx, w, controlCh, net)
+	return runLive(ctx, w, controlCh, incidentCh, net)
 }
 
 // loadOverrides reads a signals.yaml at signalsPath (if non-empty) and
@@ -352,7 +357,7 @@ func runHeadless(ctx context.Context, w *sim.World, duration time.Duration) {
 // sequence: SIGINT cancellation OR ebiten-window close triggers the sim
 // goroutine to return; we wait for it before returning so the deferred
 // trace finalizer in runRun reads a quiescent w.Tick/w.SimTime.
-func runLive(parentCtx context.Context, w *sim.World, controlCh chan<- sim.ControlEvent, net *network.Network) error {
+func runLive(parentCtx context.Context, w *sim.World, controlCh chan<- sim.ControlEvent, incidentCh chan<- sim.IncidentEvent, net *network.Network) error {
 	// Derive a child context we can cancel ourselves once ebiten exits,
 	// so the sim goroutine stops cleanly even if SIGINT never fires.
 	ctx, cancel := context.WithCancel(parentCtx)
@@ -382,6 +387,16 @@ func runLive(parentCtx context.Context, w *sim.World, controlCh chan<- sim.Contr
 		}:
 		default:
 			slog.Warn("control channel full; dropping signal mode change")
+		}
+	}
+	vp.OnIncident = func(edgeID uint32, severity uint8) {
+		select {
+		case incidentCh <- sim.IncidentEvent{
+			EdgeID:   network.EdgeID(edgeID),
+			Severity: sim.Severity(severity),
+		}:
+		default:
+			slog.Warn("incident channel full; dropping incident change")
 		}
 	}
 	ebiten.SetWindowSize(1280, 800)
