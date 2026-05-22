@@ -847,15 +847,7 @@ func sortVehicleIdxByS(vs []Vehicle, idxs []int) {
 }
 
 func (w *World) trySpawn(r SpawnRequest) {
-	route, err := w.Router.Route(r.OriginNode, r.DestNode)
-	if err != nil || len(route) == 0 {
-		return
-	}
-	// Sample a per-driver speed preference: Normal(mean=1.0, σ=0.015),
-	// clamped to [0.95, 1.05]. The clamp basically never fires (≈3σ each
-	// side covers 99.7%), so the distribution is effectively a tight
-	// normal — most vehicles drive at the speed limit, a few noticeably
-	// slower or faster.
+	// Sample a per-driver speed preference: Normal(1.0, σ), clamped.
 	factor := 1.0 + w.rng.NormFloat64()*speedFactorStdDev
 	if factor < speedFactorMin {
 		factor = speedFactorMin
@@ -870,17 +862,36 @@ func (w *World) trySpawn(r SpawnRequest) {
 		gapFactor = gapFactorMax
 	}
 
-	// Spawn at this driver's cruising speed (factor * edge limit) so they
-	// don't immediately decelerate. IDM regulates from there.
+	// Decide GPS membership deterministically against the configured share.
+	hasGPS := w.rng.Float64() < w.GpsShare
+
+	// GPS vehicles route on live congestion cost; others on free-flow time.
+	var route []network.EdgeID
+	var err error
+	if hasGPS {
+		route, err = w.Router.RouteCost(r.OriginNode, r.DestNode, func(eid network.EdgeID) float64 {
+			return w.Cong.Cost(w.Net, eid)
+		})
+	} else {
+		route, err = w.Router.Route(r.OriginNode, r.DestNode)
+	}
+	if err != nil || len(route) == 0 {
+		return
+	}
+
+	// Spawn at this driver's cruising speed so they don't immediately brake.
 	v := Vehicle{
-		ID:          w.nextID,
-		Route:       route,
-		Edge:        route[0],
-		Lane:        0,
-		S:           0,
-		V:           w.Net.Edges[route[0]].SpeedLimit * factor,
-		SpeedFactor: factor,
-		GapFactor:   gapFactor,
+		ID:             w.nextID,
+		Route:          route,
+		Edge:           route[0],
+		Lane:           0,
+		S:              0,
+		V:              w.Net.Edges[route[0]].SpeedLimit * factor,
+		SpeedFactor:    factor,
+		GapFactor:      gapFactor,
+		HasGPS:         hasGPS,
+		DestNode:       r.DestNode,
+		LastRerouteSec: w.SimTime,
 	}
 	w.nextID++
 	w.Vehicles = append(w.Vehicles, v)

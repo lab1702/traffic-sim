@@ -2550,3 +2550,53 @@ func TestWorld_CongestionRisesUnderJam(t *testing.T) {
 		t.Fatalf("jammed cost %v should exceed free-flow %v after a sustained stop", jammed, free)
 	}
 }
+
+func TestWorld_GpsShare_BoundsAllOrNone(t *testing.T) {
+	check := func(share float64, wantGPS bool) {
+		net := build2x2Grid()
+		w := NewWorld(net, NewRandomOD(net, 7, 30.0), nil)
+		w.GpsShare = share
+		w.Run(4.0)
+		seen := false
+		for i := range w.Vehicles {
+			seen = true
+			if w.Vehicles[i].HasGPS != wantGPS {
+				t.Fatalf("share=%v: vehicle %d HasGPS=%v, want %v",
+					share, w.Vehicles[i].ID, w.Vehicles[i].HasGPS, wantGPS)
+			}
+		}
+		if !seen {
+			t.Fatalf("share=%v: no vehicles alive to check", share)
+		}
+	}
+	check(1.0, true)  // Float64() in [0,1) is always < 1.0
+	check(0.0, false) // never < 0.0
+}
+
+func TestWorld_GpsShare_DeterministicSplit(t *testing.T) {
+	run := func() (gps, total int) {
+		net := build2x2Grid()
+		w := NewWorld(net, NewRandomOD(net, 4242, 50.0), nil)
+		w.GpsShare = 0.5
+		w.Run(5.0)
+		for i := range w.Vehicles {
+			total++
+			if w.Vehicles[i].HasGPS {
+				gps++
+			}
+		}
+		return
+	}
+	g1, t1 := run()
+	g2, t2 := run()
+	if g1 != g2 || t1 != t2 {
+		t.Fatalf("non-deterministic GPS split: run1 (%d/%d) run2 (%d/%d)", g1, t1, g2, t2)
+	}
+	if t1 == 0 {
+		t.Fatalf("no vehicles spawned")
+	}
+	frac := float64(g1) / float64(t1)
+	if frac < 0.2 || frac > 0.8 {
+		t.Fatalf("GPS fraction %v far from 0.5 (gps=%d total=%d)", frac, g1, t1)
+	}
+}
