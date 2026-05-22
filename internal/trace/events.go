@@ -28,6 +28,9 @@ const (
 	// overflowed and N events were dropped before this point in the
 	// stream. Lets replayers warn that the trace is incomplete.
 	KindTraceDropped Kind = 8
+	// KindVehicleReroute records that a vehicle replaced the tail of its route
+	// at runtime (GPS rerouting around congestion).
+	KindVehicleReroute Kind = 9
 )
 
 // Event is implemented by every concrete event type.
@@ -115,6 +118,18 @@ type TraceDropped struct {
 }
 
 func (*TraceDropped) Kind() Kind { return KindTraceDropped }
+
+// VehicleReroute records that a vehicle replaced the tail of its route at
+// runtime (GPS rerouting around congestion). AtIndex is the route index of the
+// first replaced edge; NewTail is the replacement edge sequence. Replayers
+// splice route[:AtIndex] + NewTail to follow the path actually taken.
+type VehicleReroute struct {
+	VehicleID uint32
+	AtIndex   uint32
+	NewTail   []uint32
+}
+
+func (*VehicleReroute) Kind() Kind { return KindVehicleReroute }
 
 // UnknownEvent is returned by Reader.Next when a trace contains an event
 // kind this reader doesn't recognize. The wire format's per-event `length`

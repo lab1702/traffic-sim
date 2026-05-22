@@ -206,3 +206,45 @@ func TestReader_TruncatedPayload(t *testing.T) {
 		t.Errorf("want io.ErrUnexpectedEOF on truncated payload, got %v", err)
 	}
 }
+
+func TestRoundTrip_VehicleReroute(t *testing.T) {
+	var buf bytes.Buffer
+	w := NewWriter(&buf)
+
+	in := []Event{
+		&VehicleReroute{VehicleID: 7, AtIndex: 2, NewTail: []uint32{5, 6, 7}},
+		&VehicleReroute{VehicleID: 8, AtIndex: 0, NewTail: nil}, // empty tail
+	}
+	for i, e := range in {
+		if err := w.Write(uint64(i), float64(i), e); err != nil {
+			t.Fatalf("write %T: %v", e, err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	r := NewReader(&buf)
+	for i, want := range in {
+		_, ev, err := r.Next()
+		if err != nil {
+			t.Fatalf("read %d: %v", i, err)
+		}
+		gotRR, ok := ev.(*VehicleReroute)
+		if !ok {
+			t.Fatalf("event %d: got %T, want *VehicleReroute", i, ev)
+		}
+		wantRR := want.(*VehicleReroute)
+		if gotRR.VehicleID != wantRR.VehicleID || gotRR.AtIndex != wantRR.AtIndex {
+			t.Errorf("event %d: got %+v, want %+v", i, gotRR, wantRR)
+		}
+		if len(gotRR.NewTail) != len(wantRR.NewTail) {
+			t.Errorf("event %d: tail len %d, want %d", i, len(gotRR.NewTail), len(wantRR.NewTail))
+		}
+		for j := range wantRR.NewTail {
+			if gotRR.NewTail[j] != wantRR.NewTail[j] {
+				t.Errorf("event %d tail[%d]: got %d, want %d", i, j, gotRR.NewTail[j], wantRR.NewTail[j])
+			}
+		}
+	}
+}

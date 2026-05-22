@@ -141,6 +141,25 @@ func encodePayload(b *bytes.Buffer, e Event) error {
 		return binary.Write(b, le, ev.Mode)
 	case *TraceDropped:
 		return binary.Write(b, le, ev.Count)
+	case *VehicleReroute:
+		if err := binary.Write(b, le, ev.VehicleID); err != nil {
+			return err
+		}
+		if err := binary.Write(b, le, ev.AtIndex); err != nil {
+			return err
+		}
+		if len(ev.NewTail) > 0xFFFF {
+			return fmt.Errorf("trace VehicleReroute tail too long: %d edges (max %d)", len(ev.NewTail), 0xFFFF)
+		}
+		if err := binary.Write(b, le, uint16(len(ev.NewTail))); err != nil {
+			return err
+		}
+		for _, eid := range ev.NewTail {
+			if err := binary.Write(b, le, eid); err != nil {
+				return err
+			}
+		}
+		return nil
 	case *UnknownEvent:
 		// Round-trip support: a tool that reads → filters → rewrites a
 		// trace shouldn't lose unknown-kind events. The reader preserved

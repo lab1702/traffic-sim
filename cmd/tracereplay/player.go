@@ -145,6 +145,22 @@ func (p *player) apply(hdr trace.Header, ev trace.Event) {
 		}
 	case *trace.VehicleDespawn:
 		delete(p.vehicles, e.VehicleID)
+	case *trace.VehicleReroute:
+		rv := p.vehicles[e.VehicleID]
+		// Replace route[AtIndex:] with NewTail, preserving the prefix the
+		// replay vehicle has already traversed. Skip when the vehicle is
+		// unknown, AtIndex is past the route end, or the replay vehicle has
+		// already advanced past AtIndex. The last case matters because replay
+		// uses speed-limit kinematics and can outrun the jam-slowed sim, so a
+		// late reroute event may point behind curEdge; splicing there would
+		// desync curEdge from route[routeIdx]. AtIndex == len(route) is a pure
+		// extension and is allowed.
+		if rv == nil || int(e.AtIndex) > len(rv.route) || int(e.AtIndex) < rv.routeIdx {
+			return
+		}
+		tail := make([]uint32, len(e.NewTail))
+		copy(tail, e.NewTail)
+		rv.route = append(rv.route[:e.AtIndex:e.AtIndex], tail...)
 	case *trace.SignalPhase:
 		st := p.signalStates[e.IntersectionID]
 		if st == nil {

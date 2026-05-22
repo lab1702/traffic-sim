@@ -2521,3 +2521,292 @@ func TestWorld_Impatience_NotAppliedToRedLight(t *testing.T) {
 		t.Errorf("WaitTime should remain 0 at red light (not a gap-acceptance yield), got %.3f", v.WaitTime)
 	}
 }
+
+func TestWorld_CongestionRisesUnderJam(t *testing.T) {
+	net := buildLineGraph() // 3 edges, 100m, 10 m/s; edge 0 ends at a plain node
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	free := w.Cong.Cost(net, 0)
+
+	// Two vehicles parked on edge 0, pinned stationary each tick so the
+	// observed mean speed there stays ~0 and Congestion.Update drives the cost
+	// up. (Hand-built vehicles have HasGPS=false, so no rerouting occurs.)
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0, 1, 2}, Edge: 0, S: 20, V: 0},
+		{ID: 2, Route: []network.EdgeID{0, 1, 2}, Edge: 0, S: 40, V: 0},
+	}
+	w.nextID = 3
+
+	for i := 0; i < 300; i++ { // 15 sim-seconds — under the 60s stuck-despawn
+		for j := range w.Vehicles {
+			w.Vehicles[j].V = 0
+			w.Vehicles[j].S = 20 + float64(j)*20 // pin in place; never reach edge end
+			w.Vehicles[j].StuckTime = 0          // keep the jam alive regardless of stuck-despawn tuning
+		}
+		w.Step()
+	}
+
+	jammed := w.Cong.Cost(net, 0)
+	if jammed <= free {
+		t.Fatalf("jammed cost %v should exceed free-flow %v after a sustained stop", jammed, free)
+	}
+}
+
+func TestWorld_GpsShare_BoundsAllOrNone(t *testing.T) {
+	check := func(share float64, wantGPS bool) {
+		net := build2x2Grid()
+		w := NewWorld(net, NewRandomOD(net, 7, 30.0), nil)
+		w.GpsShare = share
+		w.Run(4.0)
+		seen := false
+		for i := range w.Vehicles {
+			seen = true
+			if w.Vehicles[i].HasGPS != wantGPS {
+				t.Fatalf("share=%v: vehicle %d HasGPS=%v, want %v",
+					share, w.Vehicles[i].ID, w.Vehicles[i].HasGPS, wantGPS)
+			}
+		}
+		if !seen {
+			t.Fatalf("share=%v: no vehicles alive to check", share)
+		}
+	}
+	check(1.0, true)  // Float64() in [0,1) is always < 1.0
+	check(0.0, false) // never < 0.0
+}
+
+func TestWorld_GpsShare_DeterministicSplit(t *testing.T) {
+	run := func() (gps, total int) {
+		net := build2x2Grid()
+		w := NewWorld(net, NewRandomOD(net, 4242, 50.0), nil)
+		w.GpsShare = 0.5
+		w.Run(5.0)
+		for i := range w.Vehicles {
+			total++
+			if w.Vehicles[i].HasGPS {
+				gps++
+			}
+		}
+		return
+	}
+	g1, t1 := run()
+	g2, t2 := run()
+	if g1 != g2 || t1 != t2 {
+		t.Fatalf("non-deterministic GPS split: run1 (%d/%d) run2 (%d/%d)", g1, t1, g2, t2)
+	}
+	if t1 == 0 {
+		t.Fatalf("no vehicles spawned")
+	}
+	frac := float64(g1) / float64(t1)
+	if frac < 0.2 || frac > 0.8 {
+		t.Fatalf("GPS fraction %v far from 0.5 (gps=%d total=%d)", frac, g1, t1)
+	}
+}
+
+// buildRerouteGraph: from node 1 a vehicle can reach dest node 3 directly via
+// e1 (1->3, 150m) or via the detour e2,e3 (1->2->3, 110+110m). Edge e0 (0->1)
+// is the entry edge. Free-flow, the direct e1 is cheaper.
+func buildRerouteGraph() *network.Network {
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 1, Pos: network.Point{X: 100, Y: 0}},
+		{ID: 2, Pos: network.Point{X: 100, Y: -100}},
+		{ID: 3, Pos: network.Point{X: 250, Y: 0}},
+	}
+	mk := func(id, from, to int, length float64) network.Edge {
+		return network.Edge{
+			ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: length, SpeedLimit: 10, Lanes: []network.Lane{{Index: 0}},
+		}
+	}
+	edges := []network.Edge{
+		mk(0, 0, 1, 100), // e0 entry
+		mk(1, 1, 3, 150), // e1 direct
+		mk(2, 1, 2, 110), // e2 detour leg 1
+		mk(3, 2, 3, 110), // e3 detour leg 2
+	}
+	return &network.Network{Nodes: nodes, Edges: edges}
+}
+
+func TestWorld_Reroute_SwitchesAroundJam(t *testing.T) {
+	net := buildRerouteGraph()
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	var events []*trace.VehicleReroute
+	w.EmitTrace = func(_ uint64, _ float64, e trace.Event) {
+		if rr, ok := e.(*trace.VehicleReroute); ok {
+			events = append(events, rr)
+		}
+	}
+	w.Cong.speed[1] = minEdgeSpeed // jam the direct edge
+
+	v := &Vehicle{
+		ID: 1, Route: []network.EdgeID{0, 1}, RouteIdx: 0, Edge: 0, S: 50, V: 5,
+		HasGPS: true, DestNode: 3, LastRerouteSec: -1000,
+	}
+	if !w.maybeReroute(v) {
+		t.Fatalf("maybeReroute returned false for an eligible GPS vehicle")
+	}
+	if len(v.Route) != 3 || v.Route[0] != 0 || v.Route[1] != 2 || v.Route[2] != 3 {
+		t.Fatalf("route after reroute = %v, want [0 2 3]", v.Route)
+	}
+	if len(events) != 1 {
+		t.Fatalf("want 1 VehicleReroute event, got %d", len(events))
+	}
+	if events[0].AtIndex != 1 || len(events[0].NewTail) != 2 ||
+		events[0].NewTail[0] != 2 || events[0].NewTail[1] != 3 {
+		t.Fatalf("event = %+v, want AtIndex 1 NewTail [2 3]", events[0])
+	}
+}
+
+func TestWorld_Reroute_NonGPSDoesNotSwitch(t *testing.T) {
+	net := buildRerouteGraph()
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	w.Cong.speed[1] = minEdgeSpeed
+	v := &Vehicle{
+		ID: 1, Route: []network.EdgeID{0, 1}, RouteIdx: 0, Edge: 0, S: 50, V: 5,
+		HasGPS: false, DestNode: 3, LastRerouteSec: -1000,
+	}
+	if w.maybeReroute(v) {
+		t.Fatalf("non-GPS vehicle should not attempt a reroute")
+	}
+	if len(v.Route) != 2 || v.Route[1] != 1 {
+		t.Fatalf("non-GPS route changed: %v", v.Route)
+	}
+}
+
+func TestWorld_Reroute_CooldownRespected(t *testing.T) {
+	net := buildRerouteGraph()
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	w.Cong.speed[1] = minEdgeSpeed
+	v := &Vehicle{
+		ID: 1, Route: []network.EdgeID{0, 1}, RouteIdx: 0, Edge: 0, S: 50, V: 5,
+		HasGPS: true, DestNode: 3, LastRerouteSec: w.SimTime, // just rerouted
+	}
+	if w.maybeReroute(v) {
+		t.Fatalf("within cooldown, maybeReroute should not attempt")
+	}
+	if len(v.Route) != 2 {
+		t.Fatalf("route changed despite cooldown: %v", v.Route)
+	}
+}
+
+func TestWorld_Reroute_HysteresisNoFlap(t *testing.T) {
+	net := buildRerouteGraph()
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	// Mild slowdown on the direct edge: Cost(e1)=150/6.25=24; detour=22, which
+	// is cheaper but within switchMargin (22 > 24*0.85=20.4) -> no switch.
+	w.Cong.speed[1] = 6.25
+	v := &Vehicle{
+		ID: 1, Route: []network.EdgeID{0, 1}, RouteIdx: 0, Edge: 0, S: 50, V: 5,
+		HasGPS: true, DestNode: 3, LastRerouteSec: -1000,
+	}
+	if !w.maybeReroute(v) {
+		t.Fatalf("eligible GPS vehicle should make an attempt (return true)")
+	}
+	if len(v.Route) != 2 || v.Route[1] != 1 {
+		t.Fatalf("hysteresis failed: switched on a sub-margin improvement: %v", v.Route)
+	}
+}
+
+func TestWorld_Reroute_TriggersOnEdgeEntry(t *testing.T) {
+	// e_pre(4->0) feeds e0(0->1); from node 1, e1(1->3) direct or e2,e3 detour.
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 1, Pos: network.Point{X: 100, Y: 0}},
+		{ID: 2, Pos: network.Point{X: 100, Y: -100}},
+		{ID: 3, Pos: network.Point{X: 250, Y: 0}},
+		{ID: 4, Pos: network.Point{X: -100, Y: 0}},
+	}
+	mk := func(id, from, to int, length float64) network.Edge {
+		return network.Edge{ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: length, SpeedLimit: 10, Lanes: []network.Lane{{Index: 0}}}
+	}
+	net := &network.Network{Nodes: nodes, Edges: []network.Edge{
+		mk(0, 0, 1, 100), // e0
+		mk(1, 1, 3, 150), // e1 direct (jammed)
+		mk(2, 1, 2, 110), // e2 detour
+		mk(3, 2, 3, 110), // e3 detour
+		mk(4, 4, 0, 100), // e_pre
+	}}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	var rerouted bool
+	w.EmitTrace = func(_ uint64, _ float64, e trace.Event) {
+		if _, ok := e.(*trace.VehicleReroute); ok {
+			rerouted = true
+		}
+	}
+	// Near the end of e_pre, about to cross into e0.
+	w.Vehicles = []Vehicle{{
+		ID: 1, Route: []network.EdgeID{4, 0, 1}, RouteIdx: 0, Edge: 4, S: 99, V: 10,
+		HasGPS: true, DestNode: 3, LastRerouteSec: -1000,
+	}}
+	w.nextID = 2
+
+	for i := 0; i < 5; i++ {
+		w.Cong.speed[1] = minEdgeSpeed // keep the direct edge jammed each tick
+		w.Step()
+	}
+
+	if len(w.Vehicles) == 0 {
+		t.Fatalf("vehicle unexpectedly despawned")
+	}
+	got := w.Vehicles[0].Route
+	if len(got) < 3 || got[0] != 4 || got[1] != 0 || got[2] != 2 {
+		t.Fatalf("route after edge-entry reroute = %v, want prefix [4 0 2 ...]", got)
+	}
+	if !rerouted {
+		t.Fatalf("no VehicleReroute event emitted on edge entry")
+	}
+}
+
+func TestWorld_Reroute_NoSwitchWhenAlreadyOptimal(t *testing.T) {
+	net := buildRerouteGraph()
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	events := 0
+	w.EmitTrace = func(_ uint64, _ float64, e trace.Event) {
+		if _, ok := e.(*trace.VehicleReroute); ok {
+			events++
+		}
+	}
+	// No jam: free-flow costs, so the current direct route [0,1] is already the
+	// cheapest. maybeReroute should run A* (return true) but not switch or emit.
+	v := &Vehicle{
+		ID: 1, Route: []network.EdgeID{0, 1}, RouteIdx: 0, Edge: 0, S: 50, V: 5,
+		HasGPS: true, DestNode: 3, LastRerouteSec: -1000,
+	}
+	if !w.maybeReroute(v) {
+		t.Fatalf("eligible GPS vehicle should make an attempt (return true)")
+	}
+	if len(v.Route) != 2 || v.Route[1] != 1 {
+		t.Fatalf("route changed when already optimal: %v", v.Route)
+	}
+	if events != 0 {
+		t.Fatalf("spurious VehicleReroute emitted when route unchanged: %d events", events)
+	}
+}
+
+func TestWorld_Reroute_KeepsRouteOnNoPath(t *testing.T) {
+	net := buildRerouteGraph()
+	// Add an isolated node with no edges — an unreachable destination.
+	net.Nodes = append(net.Nodes, network.Node{ID: 4, Pos: network.Point{X: 999, Y: 999}})
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	events := 0
+	w.EmitTrace = func(_ uint64, _ float64, e trace.Event) {
+		if _, ok := e.(*trace.VehicleReroute); ok {
+			events++
+		}
+	}
+	w.Cong.speed[1] = minEdgeSpeed // even with the direct edge jammed...
+	v := &Vehicle{
+		ID: 1, Route: []network.EdgeID{0, 1}, RouteIdx: 0, Edge: 0, S: 50, V: 5,
+		HasGPS: true, DestNode: 4, LastRerouteSec: -1000, // ...node 4 is unreachable
+	}
+	if !w.maybeReroute(v) {
+		t.Fatalf("attempt should still count (return true) on no-route")
+	}
+	if len(v.Route) != 2 || v.Route[1] != 1 {
+		t.Fatalf("route changed despite no alternative path: %v", v.Route)
+	}
+	if events != 0 {
+		t.Fatalf("emitted reroute event despite no-route: %d", events)
+	}
+}

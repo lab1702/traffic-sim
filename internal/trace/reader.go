@@ -163,6 +163,25 @@ func decodePayload(k Kind, p []byte) (Event, error) {
 			return nil, err
 		}
 		return e, nil
+	case KindVehicleReroute:
+		e := &VehicleReroute{}
+		if err := binary.Read(rd, le, &e.VehicleID); err != nil {
+			return nil, err
+		}
+		if err := binary.Read(rd, le, &e.AtIndex); err != nil {
+			return nil, err
+		}
+		var n uint16
+		if err := binary.Read(rd, le, &n); err != nil {
+			return nil, err
+		}
+		e.NewTail = make([]uint32, n)
+		for i := range e.NewTail {
+			if err := binary.Read(rd, le, &e.NewTail[i]); err != nil {
+				return nil, err
+			}
+		}
+		return e, nil
 	}
 	// Forward compatibility: a trace produced by a newer writer can contain
 	// kinds this reader doesn't recognize. The wire format's length-prefixed

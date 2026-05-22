@@ -69,6 +69,22 @@ type Vehicle struct {
 	// turn-signal dot during that window.
 	LastLCDir int8
 
+	// HasGPS marks a vehicle that re-routes around congestion. Set at spawn
+	// from World.GpsShare. Hand-constructed test vehicles default to false
+	// (zero value) and are never re-routed, so existing fixtures are
+	// unaffected.
+	HasGPS bool
+
+	// DestNode is the vehicle's destination node, cached at spawn so
+	// re-routing needn't re-derive it from the route tail. Equal to the To
+	// node of the final route edge.
+	DestNode network.NodeID
+
+	// LastRerouteSec is the sim-time of this vehicle's most recent reroute
+	// attempt (or spawn). Gates re-routing to at most once per
+	// rerouteCooldownSec so a vehicle doesn't recompute on every short edge.
+	LastRerouteSec float64
+
 	Despawned bool
 }
 

@@ -65,6 +65,14 @@ type World struct {
 	// SpeedFactor). Seeded with a fixed default so two runs of the same
 	// scenario produce identical vehicle profiles.
 	rng *rand.Rand
+
+	// Cong tracks live per-edge congestion and supplies routing costs.
+	Cong *Congestion
+
+	// GpsShare is the fraction of spawned vehicles given GPS rerouting, in
+	// [0,1]. Defaults to 1.0 (every vehicle) in NewWorld; overridden from the
+	// --gps-share flag.
+	GpsShare float64
 }
 
 const (
@@ -147,6 +155,8 @@ func NewWorld(net *network.Network, spawner Spawner, overrides map[network.Inter
 		SnapshotBuf:  snapshot.New(),
 		EmitTrace:    func(uint64, float64, trace.Event) {},
 		rng:          rand.New(rand.NewPCG(0xCAFE, 0xBEEF)),
+		Cong:         NewCongestion(net, ewmaHalfLifeSec, DefaultDt),
+		GpsShare:     1.0,
 	}
 }
 
@@ -267,6 +277,24 @@ const (
 	// S0 (2m) plus the vehicle length (5m), so the front bumper rests
 	// about 7m from the end of the edge; 8m gives a 1m margin.
 	stopLineTolMeters = 8.0
+)
+
+const (
+	// rerouteCooldownSec is the minimum sim-time between a vehicle's reroutes.
+	// 20s gives GPS-like periodic re-evaluation without thrashing A* on every
+	// short edge a vehicle crosses.
+	rerouteCooldownSec = 20.0
+
+	// switchMargin is the hysteresis threshold: a vehicle adopts a candidate
+	// route only if its estimated cost is at least this fraction cheaper than
+	// the current remaining route. 0.15 stops flapping between near-equal
+	// routes as smoothed speeds wobble.
+	switchMargin = 0.15
+
+	// maxReroutesPerTick caps reroute attempts per tick as a defensive guard
+	// on the 50ms tick budget under pathological spawn rates. The
+	// edge-transition trigger plus cooldown keep the real count far lower.
+	maxReroutesPerTick = 64
 )
 
 // stopDistanceForYield returns (distance to stop line, true) when the
@@ -673,6 +701,9 @@ func (w *World) Step() {
 		}
 	}
 
+	// 2b. Refresh live per-edge congestion from this tick's positions/speeds.
+	w.Cong.Update(w.Net, byEdge, w.Vehicles)
+
 	// 3. Pre-compute leaders per vehicle index using per-lane buckets.
 	//    This is done in a separate pass to avoid order-dependence during stepping.
 	type leaderInfo struct {
@@ -719,6 +750,7 @@ func (w *World) Step() {
 
 	// 4. Step each vehicle, applying signal/yield virtual leaders.
 	//    Iterate vehicles in stable index order to preserve determinism.
+	rerouteBudget := maxReroutesPerTick
 	for i := range w.Vehicles {
 		if w.Vehicles[i].Despawned {
 			continue
@@ -752,8 +784,17 @@ func (w *World) Step() {
 			}
 		}
 
+		prevEdge := v.Edge
 		v0 := w.computeDesiredSpeed(v)
 		stepIDM(v, v0, lS, lV, has, w.Net, DefaultIDM(), w.dt)
+
+		// GPS rerouting fires on edge entry (a decision point), bounded by the
+		// per-tick budget. maybeReroute self-gates on HasGPS and cooldown.
+		if !v.Despawned && v.Edge != prevEdge && rerouteBudget > 0 {
+			if w.maybeReroute(v) {
+				rerouteBudget--
+			}
+		}
 
 		// Accumulate WaitTime while the vehicle is effectively stopped
 		// AND yielding via gap-acceptance. WaitTime is only reset on
@@ -833,11 +874,85 @@ func sortVehicleIdxByS(vs []Vehicle, idxs []int) {
 	}
 }
 
-func (w *World) trySpawn(r SpawnRequest) {
-	route, err := w.Router.Route(r.OriginNode, r.DestNode)
-	if err != nil || len(route) == 0 {
-		return
+// maybeReroute re-evaluates a GPS vehicle's remaining path against live
+// congestion costs and switches to a cheaper route if one beats the current
+// remaining route by switchMargin. Called when the vehicle crosses into a new
+// edge.
+//
+// Returns false immediately — without consuming a budget slot or touching
+// LastRerouteSec — when HasGPS is false, the vehicle is on its last edge, or
+// the cooldown hasn't elapsed. Returns true (and stamps LastRerouteSec) once
+// A* is run, regardless of whether a switch was made; the caller decrements
+// the per-tick reroute budget on a true return.
+//
+// On switch it splices Route[:RouteIdx+1] + candidate (RouteIdx still points
+// at the current edge, unchanged) and emits a VehicleReroute event so replay
+// follows the new path.
+func (w *World) maybeReroute(v *Vehicle) bool {
+	if !v.HasGPS {
+		return false
 	}
+	if v.RouteIdx+1 >= len(v.Route) {
+		return false // on the last edge: nothing downstream to change
+	}
+	if w.SimTime-v.LastRerouteSec < rerouteCooldownSec {
+		return false
+	}
+	v.LastRerouteSec = w.SimTime
+
+	costFn := func(eid network.EdgeID) float64 { return w.Cong.Cost(w.Net, eid) }
+	src := w.Net.Edges[v.Edge].To
+	candidate, err := w.Router.RouteCost(src, v.DestNode, costFn)
+	if err != nil || len(candidate) == 0 {
+		return true // attempt made; keep current route
+	}
+
+	curCost := 0.0
+	for _, eid := range v.Route[v.RouteIdx+1:] {
+		curCost += costFn(eid)
+	}
+	newCost := 0.0
+	for _, eid := range candidate {
+		newCost += costFn(eid)
+	}
+
+	if newCost < curCost*(1-switchMargin) && !sameTail(v.Route[v.RouteIdx+1:], candidate) {
+		idx := v.RouteIdx + 1
+		// 3-index slice caps capacity so append allocates fresh, avoiding any
+		// aliasing with the old tail.
+		v.Route = append(v.Route[:idx:idx], candidate...)
+		w.emitReroute(v, idx, candidate)
+	}
+	return true
+}
+
+// emitReroute writes a VehicleReroute trace event for a route-tail switch.
+func (w *World) emitReroute(v *Vehicle, atIndex int, tail []network.EdgeID) {
+	tail32 := make([]uint32, len(tail))
+	for i, eid := range tail {
+		tail32[i] = uint32(eid)
+	}
+	w.EmitTrace(w.Tick, w.SimTime, &trace.VehicleReroute{
+		VehicleID: uint32(v.ID),
+		AtIndex:   uint32(atIndex),
+		NewTail:   tail32,
+	})
+}
+
+// sameTail reports whether two edge sequences are identical.
+func sameTail(a, b []network.EdgeID) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func (w *World) trySpawn(r SpawnRequest) {
 	// Sample a per-driver speed preference: Normal(mean=1.0, σ=0.015),
 	// clamped to [0.95, 1.05]. The clamp basically never fires (≈3σ each
 	// side covers 99.7%), so the distribution is effectively a tight
@@ -857,17 +972,36 @@ func (w *World) trySpawn(r SpawnRequest) {
 		gapFactor = gapFactorMax
 	}
 
-	// Spawn at this driver's cruising speed (factor * edge limit) so they
-	// don't immediately decelerate. IDM regulates from there.
+	// Decide GPS membership deterministically against the configured share.
+	hasGPS := w.rng.Float64() < w.GpsShare
+
+	// GPS vehicles route on live congestion cost; others on free-flow time.
+	var route []network.EdgeID
+	var err error
+	if hasGPS {
+		route, err = w.Router.RouteCost(r.OriginNode, r.DestNode, func(eid network.EdgeID) float64 {
+			return w.Cong.Cost(w.Net, eid)
+		})
+	} else {
+		route, err = w.Router.Route(r.OriginNode, r.DestNode)
+	}
+	if err != nil || len(route) == 0 {
+		return
+	}
+
+	// Spawn at this driver's cruising speed so they don't immediately brake.
 	v := Vehicle{
-		ID:          w.nextID,
-		Route:       route,
-		Edge:        route[0],
-		Lane:        0,
-		S:           0,
-		V:           w.Net.Edges[route[0]].SpeedLimit * factor,
-		SpeedFactor: factor,
-		GapFactor:   gapFactor,
+		ID:             w.nextID,
+		Route:          route,
+		Edge:           route[0],
+		Lane:           0,
+		S:              0,
+		V:              w.Net.Edges[route[0]].SpeedLimit * factor,
+		SpeedFactor:    factor,
+		GapFactor:      gapFactor,
+		HasGPS:         hasGPS,
+		DestNode:       r.DestNode,
+		LastRerouteSec: w.SimTime,
 	}
 	w.nextID++
 	w.Vehicles = append(w.Vehicles, v)

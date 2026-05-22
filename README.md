@@ -77,6 +77,23 @@ The YAML schema is documented inline in `configs/signals.example.yaml`.
 A missing or invalid signals file causes `trafficsim` to exit with a
 clear error rather than silently producing zero overrides.
 
+### GPS rerouting
+
+By default every vehicle has GPS and re-routes around congestion. Each edge
+tracks the smoothed average speed of the vehicles on it, which feeds a
+travel-time routing cost; when a vehicle enters a new edge it re-evaluates the
+remaining path to its destination and switches to a meaningfully faster route
+if one exists. Tune the share of GPS-equipped vehicles with `--gps-share`
+(0..1, default 1.0):
+
+```
+./trafficsim run --gps-share 0.5 --spawn-rate 20 extract.osm.pbf   # half the fleet
+./trafficsim run --gps-share 0 --spawn-rate 20 extract.osm.pbf     # static routing
+```
+
+Reroutes are recorded in the trace as `VehicleReroute` events, so `tracereplay`
+follows the path each vehicle actually took.
+
 ### Notes for Windows
 
 - Built binaries end in `.exe`. The commands above work in PowerShell
@@ -102,6 +119,13 @@ Tick budget is 50 ms at 20 Hz. Current per-tick benchmarks on a 40x40 grid
 
 All three are well under the 50 ms budget, leaving headroom for real-world
 network complexity and additional features.
+
+> These figures predate GPS rerouting (now on by default), which adds a
+> per-tick congestion update and periodic per-vehicle A* reroutes. With it
+> enabled, live per-tick cost is higher and more workload-dependent (it scales
+> with congestion, not just vehicle count), but still comfortably within the
+> 50 ms budget. Re-run the benchmark for current numbers, or use `--gps-share 0`
+> to measure static routing.
 
 Run benchmarks yourself:
 ```
