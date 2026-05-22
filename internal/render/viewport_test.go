@@ -36,6 +36,21 @@ func TestNextSeverity_Cycles(t *testing.T) {
 	}
 }
 
+func TestSeverityName(t *testing.T) {
+	cases := map[uint8]string{
+		snapshot.SevNone:      "none",
+		snapshot.SevSlowdown:  "slowdown",
+		snapshot.SevLaneClose: "lane closed",
+		snapshot.SevFullClose: "fully closed",
+		uint8(99):             "none", // unknown falls back to none
+	}
+	for sev, want := range cases {
+		if got := severityName(sev); got != want {
+			t.Fatalf("severityName(%d) = %q, want %q", sev, got, want)
+		}
+	}
+}
+
 func TestHitTestEdge(t *testing.T) {
 	net := &network.Network{
 		Nodes: []network.Node{

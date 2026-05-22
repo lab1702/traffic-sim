@@ -2,10 +2,12 @@ package render
 
 import (
 	"fmt"
+	"image/color"
 	"sort"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
+	"github.com/hajimehoshi/ebiten/v2/vector"
 
 	"github.com/lab1702/traffic-sim/internal/network"
 	"github.com/lab1702/traffic-sim/internal/snapshot"
@@ -124,6 +126,70 @@ func DrawSelectionPanel(screen *ebiten.Image, net *network.Network, snap snapsho
 
 	for i, line := range lines {
 		ebitenutil.DebugPrintAt(screen, line, 8, startY+i*hudLineHeight)
+	}
+}
+
+// severityName maps a snapshot.Sev* value to a human label for the edge panel
+// and the incident legend.
+func severityName(sev uint8) string {
+	switch sev {
+	case snapshot.SevSlowdown:
+		return "slowdown"
+	case snapshot.SevLaneClose:
+		return "lane closed"
+	case snapshot.SevFullClose:
+		return "fully closed"
+	default:
+		return "none"
+	}
+}
+
+// DrawEdgePanel renders the selected edge's id, current incident level, and a
+// little context, mirroring DrawSelectionPanel. The level is read from the
+// snapshot so it reflects live state (re-clicking the same edge updates it).
+func DrawEdgePanel(screen *ebiten.Image, net *network.Network, snap snapshot.Snapshot, id network.EdgeID, startY int) {
+	if int(id) >= len(net.Edges) {
+		return
+	}
+	e := &net.Edges[id]
+	sev := uint8(snapshot.SevNone)
+	for _, inc := range snap.Incidents {
+		if inc.EdgeID == uint32(id) {
+			sev = inc.Severity
+			break
+		}
+	}
+	lines := []string{
+		fmt.Sprintf("Edge #%d", id),
+		fmt.Sprintf("  incident: %s", severityName(sev)),
+		fmt.Sprintf("  %.0f m, limit %.0f m/s, %d lane(s)", e.Length, e.SpeedLimit, len(e.Lanes)),
+	}
+	for i, line := range lines {
+		ebitenutil.DebugPrintAt(screen, line, 8, startY+i*hudLineHeight)
+	}
+}
+
+// DrawIncidentLegend draws a color key for the incident overlay, anchored to the
+// bottom-left of the screen. The swatch colors match drawIncidents exactly so
+// the key matches what's painted on the map.
+func DrawIncidentLegend(screen *ebiten.Image, screenHeight int) {
+	rows := []struct {
+		clr   color.RGBA
+		label string
+	}{
+		{color.RGBA{240, 180, 0, 220}, "slowdown"},
+		{color.RGBA{240, 120, 0, 230}, "lane closed"},
+		{color.RGBA{230, 40, 40, 240}, "fully closed"},
+	}
+	const sw = 10 // swatch size, px
+	x := 8
+	// Stack the rows upward from near the bottom edge, with a header above them.
+	yTop := screenHeight - 8 - len(rows)*hudLineHeight
+	ebitenutil.DebugPrintAt(screen, "incidents:", x, yTop-hudLineHeight)
+	for i, r := range rows {
+		y := yTop + i*hudLineHeight
+		vector.DrawFilledRect(screen, float32(x), float32(y)+2, sw, sw, r.clr, false)
+		ebitenutil.DebugPrintAt(screen, r.label, x+sw+6, y)
 	}
 }
 

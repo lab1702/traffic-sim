@@ -138,6 +138,13 @@ type Viewport struct {
 	hasSelection bool
 	selectedID   network.IntersectionID
 
+	// hasEdgeSelection / selectedEdge track an edge the user Shift+clicked, so
+	// its current incident level can be highlighted and shown in a panel. At
+	// most one of hasSelection (intersection) and hasEdgeSelection (edge) is
+	// true at a time.
+	hasEdgeSelection bool
+	selectedEdge     network.EdgeID
+
 	// OnSetMode, if non-nil, is invoked when the user presses N/Y/R/O
 	// while an intersection is selected. The callback must be non-blocking
 	// and goroutine-safe; the typical wiring is to push onto a channel
@@ -233,26 +240,34 @@ func (v *Viewport) Update() error {
 		}
 	} else {
 		if v.dragging && !v.movedSinceDown {
-			// Shift+click cycles an incident on the nearest edge; plain click
-			// selects an intersection.
+			// Shift+click selects an edge and cycles its incident; plain click
+			// selects an intersection. The two selections are mutually exclusive.
 			if shiftHeld() {
-				if eid, ok := v.hitTestEdge(mx, my); ok && v.OnIncident != nil {
-					v.OnIncident(uint32(eid), nextSeverity(v.severityOf(eid)))
+				if eid, ok := v.hitTestEdge(mx, my); ok {
+					v.selectedEdge = eid
+					v.hasEdgeSelection = true
+					v.hasSelection = false
+					if v.OnIncident != nil {
+						v.OnIncident(uint32(eid), nextSeverity(v.severityOf(eid)))
+					}
 				}
 			} else if id, ok := v.hitTestIntersection(mx, my); ok {
 				v.selectedID = id
 				v.hasSelection = true
+				v.hasEdgeSelection = false
 			} else {
 				v.hasSelection = false
+				v.hasEdgeSelection = false
 			}
 		}
 		v.dragging = false
 	}
 	v.prevMouseX, v.prevMouseY = mx, my
 
-	// Right click clears the selection.
+	// Right click clears any selection.
 	if ebiten.IsMouseButtonPressed(ebiten.MouseButtonRight) {
 		v.hasSelection = false
+		v.hasEdgeSelection = false
 	}
 
 	// Hotkeys while something is selected.
@@ -422,6 +437,7 @@ func (v *Viewport) Draw(screen *ebiten.Image) {
 	v.drawRoadBands(screen)
 
 	snap := v.Buf.Read()
+	v.drawEdgeSelection(screen)
 	v.drawIncidents(screen, snap)
 
 	// Blink phase for flash modes: on for 500ms, off for 500ms (1 Hz).
@@ -553,9 +569,13 @@ func (v *Viewport) Draw(screen *ebiten.Image) {
 	viewHeightM := float64(v.Height) / v.zoom
 	stats := computeSpeedStats(snap.Vehicles)
 	DrawHUD(screen, snap.SimTime, len(snap.Vehicles), len(snap.Incidents), viewWidthM, viewHeightM, stats)
+	DrawIncidentLegend(screen, v.Height)
 	if v.hasSelection {
 		// HUD lines start at y=8; selection panel starts just below them.
 		DrawSelectionPanel(screen, v.Net, snap, v.selectedID, 8+hudLineCount*hudLineHeight+8)
+	}
+	if v.hasEdgeSelection {
+		DrawEdgePanel(screen, v.Net, snap, v.selectedEdge, 8+hudLineCount*hudLineHeight+8)
 	}
 }
 
@@ -601,6 +621,31 @@ func (v *Viewport) drawRoadBands(screen *ebiten.Image) {
 		drawOpts.ColorScale.Reset()
 		drawOpts.ColorScale.ScaleWithColor(clr)
 		vector.StrokePath(screen, path, strokeOpts, drawOpts)
+	}
+}
+
+// drawEdgeSelection strokes the selected edge in the selection color, a few
+// pixels wider than the incident overlay, so it reads as a highlight halo even
+// when the edge also carries a severity color. Uses the From/To node fallback
+// for edges with <2 geometry points, like hitTestEdge / drawIncidents.
+func (v *Viewport) drawEdgeSelection(screen *ebiten.Image) {
+	if !v.hasEdgeSelection || int(v.selectedEdge) >= len(v.Net.Edges) {
+		return
+	}
+	e := &v.Net.Edges[v.selectedEdge]
+	pts := e.Geometry
+	if len(pts) < 2 {
+		pts = []network.Point{v.Net.Nodes[e.From].Pos, v.Net.Nodes[e.To].Pos}
+	}
+	clr := color.RGBA{180, 180, 255, 255}
+	w := float32(e.Width*v.zoom) + 5
+	if w < minRoadStrokePx+5 {
+		w = minRoadStrokePx + 5
+	}
+	for j := 0; j+1 < len(pts); j++ {
+		x1, y1 := v.toScreen(pts[j].X, pts[j].Y)
+		x2, y2 := v.toScreen(pts[j+1].X, pts[j+1].Y)
+		vector.StrokeLine(screen, x1, y1, x2, y2, w, clr, true)
 	}
 }
 

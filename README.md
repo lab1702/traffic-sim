@@ -107,9 +107,11 @@ an edge** to cycle its incident severity:
   GPS-equipped vehicles reroute around it.
 
 Incidents stay until you clear them (cycle back to `none`). The active count is
-shown in the HUD. Each change is written to the trace as an `IncidentSet` event,
-so `tracereplay` shows incidents appearing and clearing at the same moments they
-did live.
+shown in the HUD, with a color legend (bottom-left) for the overlay colors.
+Shift+clicking an edge also selects it: the edge is highlighted and a panel shows
+its current incident level. Each change is written to the trace as an
+`IncidentSet` event, so `tracereplay` shows incidents appearing and clearing at
+the same moments they did live.
 
 Incidents are a viewer-only (interactive) feature; `--headless` runs have none.
 A fully-closed edge that a non-GPS vehicle is already committed to will queue it
