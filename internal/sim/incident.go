@@ -70,16 +70,30 @@ func (w *World) closedLaneFor(eid network.EdgeID) (uint8, bool) {
 }
 
 // incidentStopDistance returns (distance from the vehicle's front bumper to
-// the incident obstacle, true) when the vehicle is blocked by an incident on
-// its current edge — a full closure (all lanes) or a lane closure of the
-// vehicle's lane. The obstacle sits at the edge's downstream end. Mirrors
-// stopDistanceForRed's shape so Step can fold it into the virtual-leader set.
+// the incident obstacle, true) when the vehicle is blocked by an incident.
+// The obstacle sits at the current edge's downstream end. Two cases:
+//
+//   - The current edge is closed — a full closure (all lanes) or a lane
+//     closure of the vehicle's lane: the vehicle (already on the edge) stops at
+//     the far end.
+//   - The next route edge is a full closure: an entry block. The vehicle stops
+//     at the current edge's end (the entrance to the closed edge) so it never
+//     drives into/through it. A lane closure on the next edge is NOT blocked —
+//     its open lanes still carry traffic.
+//
+// Mirrors stopDistanceForRed's shape so Step can fold it into the virtual-leader
+// set.
 func (w *World) incidentStopDistance(v *Vehicle) (float64, bool) {
 	sev := w.Incidents[v.Edge]
 	blocked := sev == FullClose
 	if sev == LaneClose {
 		if cl, ok := w.closedLaneFor(v.Edge); ok && v.Lane == cl {
 			blocked = true
+		}
+	}
+	if !blocked && v.RouteIdx+1 < len(v.Route) {
+		if w.Incidents[v.Route[v.RouteIdx+1]] == FullClose {
+			blocked = true // entry block: don't cross into a fully-closed edge
 		}
 	}
 	if !blocked {
