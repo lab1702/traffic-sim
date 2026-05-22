@@ -120,6 +120,13 @@ Tick budget is 50 ms at 20 Hz. Current per-tick benchmarks on a 40x40 grid
 All three are well under the 50 ms budget, leaving headroom for real-world
 network complexity and additional features.
 
+> These figures predate GPS rerouting (now on by default), which adds a
+> per-tick congestion update and periodic per-vehicle A* reroutes. With it
+> enabled, live per-tick cost is higher and more workload-dependent (it scales
+> with congestion, not just vehicle count), but still comfortably within the
+> 50 ms budget. Re-run the benchmark for current numbers, or use `--gps-share 0`
+> to measure static routing.
+
 Run benchmarks yourself:
 ```
 go test ./internal/sim/ -bench=. -benchtime=2s -run=^$
