@@ -149,6 +149,20 @@ func TestWorld_FullClose_GPSReroutes(t *testing.T) {
 	}
 }
 
+func TestPublishSnapshot_IncludesIncidents(t *testing.T) {
+	net := incidentTestNet()
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	w.Incidents[0] = Slowdown
+
+	w.publishSnapshot()
+	snap := w.SnapshotBuf.Read()
+	if len(snap.Incidents) != 1 ||
+		snap.Incidents[0].EdgeID != 0 ||
+		snap.Incidents[0].Severity != snapshot.SevSlowdown {
+		t.Fatalf("snapshot incidents = %+v, want one Slowdown on edge 0", snap.Incidents)
+	}
+}
+
 func TestWorld_FullClose_VehicleStopsBeforeEnd(t *testing.T) {
 	// One 1-lane edge; a car well upstream must brake to a stop at the
 	// FullClose obstacle (edge end) instead of running off the edge. Uses

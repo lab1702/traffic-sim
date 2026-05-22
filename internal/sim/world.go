@@ -1142,9 +1142,15 @@ func (w *World) publishSnapshot() {
 			})
 		}
 	}
+	incidents := make([]snapshot.IncidentView, 0, len(w.Incidents))
+	for eid, sev := range w.Incidents {
+		incidents = append(incidents, snapshot.IncidentView{
+			EdgeID: uint32(eid), Severity: uint8(sev),
+		})
+	}
 	w.SnapshotBuf.Publish(snapshot.Snapshot{
 		Tick: w.Tick, SimTime: w.SimTime,
-		Vehicles: views, Signals: sigs, Bounds: w.Net.Bounds,
+		Vehicles: views, Signals: sigs, Incidents: incidents, Bounds: w.Net.Bounds,
 	})
 }
 
