@@ -127,6 +127,21 @@ func DrawSelectionPanel(screen *ebiten.Image, net *network.Network, snap snapsho
 	}
 }
 
+// severityName maps a snapshot.Sev* value to a human label for the edge panel
+// and the incident legend.
+func severityName(sev uint8) string {
+	switch sev {
+	case snapshot.SevSlowdown:
+		return "slowdown"
+	case snapshot.SevLaneClose:
+		return "lane closed"
+	case snapshot.SevFullClose:
+		return "fully closed"
+	default:
+		return "none"
+	}
+}
+
 func modeNameOf(mode uint8) string {
 	switch mode {
 	case modeNormal:
