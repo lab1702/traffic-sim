@@ -69,6 +69,15 @@ type World struct {
 	// Cong tracks live per-edge congestion and supplies routing costs.
 	Cong *Congestion
 
+	// Incidents maps an edge to its active incident severity. Absent key means
+	// no incident. Owned by the sim goroutine; read by publishSnapshot.
+	Incidents map[network.EdgeID]Severity
+
+	// IncidentControl delivers runtime incident commands from the UI. Step
+	// drains it non-blocking at the top of each tick, like Control. Nil
+	// disables.
+	IncidentControl <-chan IncidentEvent
+
 	// GpsShare is the fraction of spawned vehicles given GPS rerouting, in
 	// [0,1]. Defaults to 1.0 (every vehicle) in NewWorld; overridden from the
 	// --gps-share flag.
@@ -156,6 +165,7 @@ func NewWorld(net *network.Network, spawner Spawner, overrides map[network.Inter
 		EmitTrace:    func(uint64, float64, trace.Event) {},
 		rng:          rand.New(rand.NewPCG(0xCAFE, 0xBEEF)),
 		Cong:         NewCongestion(net, ewmaHalfLifeSec, DefaultDt),
+		Incidents:    make(map[network.EdgeID]Severity),
 		GpsShare:     1.0,
 	}
 }
@@ -632,6 +642,18 @@ func (w *World) Step() {
 			select {
 			case ev := <-w.Control:
 				w.applyControl(ev)
+			default:
+				i = 64
+			}
+		}
+	}
+
+	// 0a-bis. Drain pending incident commands from the UI, like Control.
+	if w.IncidentControl != nil {
+		for i := 0; i < 64; i++ {
+			select {
+			case ev := <-w.IncidentControl:
+				w.applyIncident(ev)
 			default:
 				i = 64
 			}
