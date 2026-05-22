@@ -2,10 +2,12 @@ package render
 
 import (
 	"fmt"
+	"image/color"
 	"sort"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
+	"github.com/hajimehoshi/ebiten/v2/vector"
 
 	"github.com/lab1702/traffic-sim/internal/network"
 	"github.com/lab1702/traffic-sim/internal/snapshot"
@@ -164,6 +166,30 @@ func DrawEdgePanel(screen *ebiten.Image, net *network.Network, snap snapshot.Sna
 	}
 	for i, line := range lines {
 		ebitenutil.DebugPrintAt(screen, line, 8, startY+i*hudLineHeight)
+	}
+}
+
+// DrawIncidentLegend draws a color key for the incident overlay, anchored to the
+// bottom-left of the screen. The swatch colors match drawIncidents exactly so
+// the key matches what's painted on the map.
+func DrawIncidentLegend(screen *ebiten.Image, screenHeight int) {
+	rows := []struct {
+		clr   color.RGBA
+		label string
+	}{
+		{color.RGBA{240, 180, 0, 220}, "slowdown"},
+		{color.RGBA{240, 120, 0, 230}, "lane closed"},
+		{color.RGBA{230, 40, 40, 240}, "fully closed"},
+	}
+	const sw = 10 // swatch size, px
+	x := 8
+	// Stack the rows upward from near the bottom edge, with a header above them.
+	yTop := screenHeight - 8 - len(rows)*hudLineHeight
+	ebitenutil.DebugPrintAt(screen, "incidents:", x, yTop-hudLineHeight)
+	for i, r := range rows {
+		y := yTop + i*hudLineHeight
+		vector.DrawFilledRect(screen, float32(x), float32(y)+2, sw, sw, r.clr, false)
+		ebitenutil.DebugPrintAt(screen, r.label, x+sw+6, y)
 	}
 }
 
