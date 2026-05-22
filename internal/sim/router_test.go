@@ -135,3 +135,68 @@ func TestRouter_BannedTurnNoDetour(t *testing.T) {
 		t.Fatalf("want ErrNoRoute (only path is banned), got nil")
 	}
 }
+
+// buildDetourGraph: 0->2 direct (100m) plus a longer detour 0->1->2 (60+60m).
+// Free-flow, the direct edge wins; under a cost that inflates it, the detour
+// should win.
+func buildDetourGraph() *network.Network {
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 1, Pos: network.Point{X: 50, Y: 50}},
+		{ID: 2, Pos: network.Point{X: 100, Y: 0}},
+	}
+	edges := []network.Edge{
+		{ID: 0, From: 0, To: 2, Length: 100, SpeedLimit: 10},
+		{ID: 1, From: 0, To: 1, Length: 60, SpeedLimit: 10},
+		{ID: 2, From: 1, To: 2, Length: 60, SpeedLimit: 10},
+	}
+	return &network.Network{Nodes: nodes, Edges: edges}
+}
+
+func TestRouter_RouteCostAvoidsExpensiveEdge(t *testing.T) {
+	net := buildDetourGraph()
+	r := NewRouter(net)
+
+	// Free-flow: the direct edge 0 wins.
+	free, err := r.Route(0, 2)
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if len(free) != 1 || free[0] != 0 {
+		t.Fatalf("free-flow want [0], got %v", free)
+	}
+
+	// Inflate the direct edge; the detour must win.
+	cost := func(eid network.EdgeID) float64 {
+		if eid == 0 {
+			return 1000
+		}
+		e := &net.Edges[eid]
+		return e.Length / e.SpeedLimit
+	}
+	got, err := r.RouteCost(0, 2, cost)
+	if err != nil {
+		t.Fatalf("RouteCost: %v", err)
+	}
+	if len(got) != 2 || got[0] != 1 || got[1] != 2 {
+		t.Fatalf("RouteCost want [1 2], got %v", got)
+	}
+}
+
+func TestRouter_RouteUnchanged(t *testing.T) {
+	net := buildLineGraph()
+	r := NewRouter(net)
+	got, err := r.Route(0, 3)
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	want := []network.EdgeID{0, 1, 2}
+	if len(got) != len(want) {
+		t.Fatalf("want %v, got %v", want, got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("step %d: want %d, got %d", i, want[i], got[i])
+		}
+	}
+}

@@ -60,9 +60,27 @@ type searchState struct {
 	ArrivedVia network.EdgeID
 }
 
-// Route returns the edge IDs to traverse from src to dst, respecting any
-// turn restrictions on the intermediate intersections.
+// Route returns the edge IDs to traverse from src to dst using free-flow
+// travel time (length / speed limit) as the cost, respecting any turn
+// restrictions on the intermediate intersections. Behavior is identical to
+// before RouteCost was introduced; it now delegates to RouteCost.
 func (r *Router) Route(src, dst network.NodeID) ([]network.EdgeID, error) {
+	return r.RouteCost(src, dst, func(eid network.EdgeID) float64 {
+		e := &r.net.Edges[eid]
+		speed := e.SpeedLimit
+		if speed < 0.1 {
+			speed = 0.1
+		}
+		return e.Length / speed
+	})
+}
+
+// RouteCost is Route with a caller-supplied per-edge cost function. cost(eid)
+// must return a positive traversal cost (e.g. travel time). The A* heuristic
+// is straight-line distance / max speed, which stays admissible as long as
+// cost never implies a speed above that max — Congestion.Cost guarantees this
+// via its free-flow ceiling.
+func (r *Router) RouteCost(src, dst network.NodeID, cost func(network.EdgeID) float64) ([]network.EdgeID, error) {
 	if src == dst {
 		return nil, nil
 	}
@@ -102,10 +120,8 @@ func (r *Router) Route(src, dst network.NodeID) ([]network.EdgeID, error) {
 			fromBans = nodeBans[cur.state.ArrivedVia]
 		}
 
-		// Prohibit U-turns at intermediate nodes UNLESS the U-turn is
-		// the only non-banned option (e.g., dead-end streets). Vehicles
-		// at the origin have ArrivedVia=noEdge and can pick any outgoing
-		// edge — a true U-turn requires an arrival edge to flip from.
+		// Prohibit U-turns at intermediate nodes UNLESS the U-turn is the only
+		// non-banned option (e.g., dead-end streets).
 		uTurnsAllowed := cur.state.ArrivedVia == noEdge
 		if !uTurnsAllowed {
 			uTurnsAllowed = true
@@ -129,12 +145,8 @@ func (r *Router) Route(src, dst network.NodeID) ([]network.EdgeID, error) {
 				continue
 			}
 			e := &r.net.Edges[eid]
-			speed := e.SpeedLimit
-			if speed < 0.1 {
-				speed = 0.1
-			}
 			next := searchState{Node: e.To, ArrivedVia: eid}
-			tentative := gScore[cur.state] + e.Length/speed
+			tentative := gScore[cur.state] + cost(eid)
 			if existing, ok := gScore[next]; ok && tentative >= existing {
 				continue
 			}
