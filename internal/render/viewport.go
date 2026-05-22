@@ -138,6 +138,13 @@ type Viewport struct {
 	hasSelection bool
 	selectedID   network.IntersectionID
 
+	// hasEdgeSelection / selectedEdge track an edge the user Shift+clicked, so
+	// its current incident level can be highlighted and shown in a panel. At
+	// most one of hasSelection (intersection) and hasEdgeSelection (edge) is
+	// true at a time.
+	hasEdgeSelection bool
+	selectedEdge     network.EdgeID
+
 	// OnSetMode, if non-nil, is invoked when the user presses N/Y/R/O
 	// while an intersection is selected. The callback must be non-blocking
 	// and goroutine-safe; the typical wiring is to push onto a channel
@@ -233,26 +240,34 @@ func (v *Viewport) Update() error {
 		}
 	} else {
 		if v.dragging && !v.movedSinceDown {
-			// Shift+click cycles an incident on the nearest edge; plain click
-			// selects an intersection.
+			// Shift+click selects an edge and cycles its incident; plain click
+			// selects an intersection. The two selections are mutually exclusive.
 			if shiftHeld() {
-				if eid, ok := v.hitTestEdge(mx, my); ok && v.OnIncident != nil {
-					v.OnIncident(uint32(eid), nextSeverity(v.severityOf(eid)))
+				if eid, ok := v.hitTestEdge(mx, my); ok {
+					v.selectedEdge = eid
+					v.hasEdgeSelection = true
+					v.hasSelection = false
+					if v.OnIncident != nil {
+						v.OnIncident(uint32(eid), nextSeverity(v.severityOf(eid)))
+					}
 				}
 			} else if id, ok := v.hitTestIntersection(mx, my); ok {
 				v.selectedID = id
 				v.hasSelection = true
+				v.hasEdgeSelection = false
 			} else {
 				v.hasSelection = false
+				v.hasEdgeSelection = false
 			}
 		}
 		v.dragging = false
 	}
 	v.prevMouseX, v.prevMouseY = mx, my
 
-	// Right click clears the selection.
+	// Right click clears any selection.
 	if ebiten.IsMouseButtonPressed(ebiten.MouseButtonRight) {
 		v.hasSelection = false
+		v.hasEdgeSelection = false
 	}
 
 	// Hotkeys while something is selected.
