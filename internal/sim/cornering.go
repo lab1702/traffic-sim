@@ -71,6 +71,11 @@ func (w *World) computeDesiredSpeed(v *Vehicle) float64 {
 		factor = 1.0
 	}
 	v0 := edge.SpeedLimit * factor
+	if w.Incidents[v.Edge] == Slowdown {
+		if cap := edge.SpeedLimit * incidentSlowdownFactor; cap < v0 {
+			v0 = cap
+		}
+	}
 	if v.RouteIdx+1 >= len(v.Route) {
 		return v0 // no next edge: nothing to slow for
 	}

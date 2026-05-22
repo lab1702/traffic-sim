@@ -116,3 +116,18 @@ func TestIncidentStopDistance_Blocks(t *testing.T) {
 		t.Fatal("Slowdown should not block")
 	}
 }
+
+func TestComputeDesiredSpeed_SlowdownCap(t *testing.T) {
+	net := incidentTestNet() // 10 m/s limit
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	v := &Vehicle{Edge: 0, Lane: 0, S: 0, Route: []network.EdgeID{0}}
+
+	if got := w.computeDesiredSpeed(v); math.Abs(got-10) > 1e-9 {
+		t.Fatalf("no incident: v0=%v want 10", got)
+	}
+	w.Incidents[0] = Slowdown
+	want := 10.0 * incidentSlowdownFactor
+	if got := w.computeDesiredSpeed(v); math.Abs(got-want) > 1e-9 {
+		t.Fatalf("slowdown: v0=%v want %v", got, want)
+	}
+}
