@@ -611,10 +611,13 @@ func (v *Viewport) drawIncidents(screen *ebiten.Image, snap snapshot.Snapshot) {
 		if int(inc.EdgeID) >= len(v.Net.Edges) {
 			continue
 		}
-		e := &v.Net.Edges[inc.EdgeID]
-		g := e.Geometry
-		if len(g) < 2 {
+		if inc.Severity == snapshot.SevNone {
 			continue
+		}
+		e := &v.Net.Edges[inc.EdgeID]
+		pts := e.Geometry
+		if len(pts) < 2 {
+			pts = []network.Point{v.Net.Nodes[e.From].Pos, v.Net.Nodes[e.To].Pos}
 		}
 		var clr color.RGBA
 		switch inc.Severity {
@@ -629,9 +632,9 @@ func (v *Viewport) drawIncidents(screen *ebiten.Image, snap snapshot.Snapshot) {
 		if w < minRoadStrokePx+2 {
 			w = minRoadStrokePx + 2
 		}
-		for j := 0; j+1 < len(g); j++ {
-			x1, y1 := v.toScreen(g[j].X, g[j].Y)
-			x2, y2 := v.toScreen(g[j+1].X, g[j+1].Y)
+		for j := 0; j+1 < len(pts); j++ {
+			x1, y1 := v.toScreen(pts[j].X, pts[j].Y)
+			x2, y2 := v.toScreen(pts[j+1].X, pts[j+1].Y)
 			vector.StrokeLine(screen, x1, y1, x2, y2, w, clr, true)
 		}
 	}
