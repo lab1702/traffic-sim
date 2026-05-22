@@ -78,8 +78,8 @@ func (r *Router) Route(src, dst network.NodeID) ([]network.EdgeID, error) {
 // RouteCost is Route with a caller-supplied per-edge cost function. cost(eid)
 // must return a positive traversal cost (e.g. travel time). The A* heuristic
 // is straight-line distance / max speed, which stays admissible as long as
-// cost never implies a speed above that max — Congestion.Cost guarantees this
-// via its free-flow ceiling.
+// cost never implies a speed above that max — a cost closure built on
+// Congestion.Cost guarantees this via its free-flow ceiling.
 func (r *Router) RouteCost(src, dst network.NodeID, cost func(network.EdgeID) float64) ([]network.EdgeID, error) {
 	if src == dst {
 		return nil, nil
@@ -121,7 +121,9 @@ func (r *Router) RouteCost(src, dst network.NodeID, cost func(network.EdgeID) fl
 		}
 
 		// Prohibit U-turns at intermediate nodes UNLESS the U-turn is the only
-		// non-banned option (e.g., dead-end streets).
+		// non-banned option (e.g., dead-end streets). Vehicles at the origin
+		// have ArrivedVia=noEdge and can pick any outgoing edge — a true U-turn
+		// requires an arrival edge to flip from.
 		uTurnsAllowed := cur.state.ArrivedVia == noEdge
 		if !uTurnsAllowed {
 			uTurnsAllowed = true
