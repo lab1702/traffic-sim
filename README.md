@@ -94,6 +94,27 @@ if one exists. Tune the share of GPS-equipped vehicles with `--gps-share`
 Reroutes are recorded in the trace as `VehicleReroute` events, so `tracereplay`
 follows the path each vehicle actually took.
 
+### Incidents (interactive)
+
+In the live viewer you can inject road incidents on the fly. **Shift + left-click
+an edge** to cycle its incident severity:
+
+`none → slowdown → lane closed → fully closed → none`
+
+- **Slowdown** — traffic crawls through the edge (desired speed capped).
+- **Lane closed** — the curb lane is blocked; vehicles merge out of it.
+- **Fully closed** — every lane is blocked; through-traffic queues and
+  GPS-equipped vehicles reroute around it.
+
+Incidents stay until you clear them (cycle back to `none`). The active count is
+shown in the HUD. Each change is written to the trace as an `IncidentSet` event,
+so `tracereplay` shows incidents appearing and clearing at the same moments they
+did live.
+
+Incidents are a viewer-only (interactive) feature; `--headless` runs have none.
+A fully-closed edge that a non-GPS vehicle is already committed to will queue it
+until the existing stuck-vehicle timeout clears it.
+
 ### Notes for Windows
 
 - Built binaries end in `.exe`. The commands above work in PowerShell
