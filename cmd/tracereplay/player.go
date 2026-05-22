@@ -145,6 +145,14 @@ func (p *player) apply(hdr trace.Header, ev trace.Event) {
 		}
 	case *trace.VehicleDespawn:
 		delete(p.vehicles, e.VehicleID)
+	case *trace.VehicleReroute:
+		rv := p.vehicles[e.VehicleID]
+		if rv == nil || int(e.AtIndex) > len(rv.route) {
+			return
+		}
+		tail := make([]uint32, len(e.NewTail))
+		copy(tail, e.NewTail)
+		rv.route = append(rv.route[:e.AtIndex:e.AtIndex], tail...)
 	case *trace.SignalPhase:
 		st := p.signalStates[e.IntersectionID]
 		if st == nil {

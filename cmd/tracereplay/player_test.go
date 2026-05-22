@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"github.com/lab1702/traffic-sim/internal/network"
+	"github.com/lab1702/traffic-sim/internal/snapshot"
+	"github.com/lab1702/traffic-sim/internal/trace"
 )
 
 // TestNetHashMismatch covers the SimStart check that warns when the
@@ -45,4 +47,34 @@ func TestNetHashMismatch(t *testing.T) {
 			t.Errorf("returned traceHash = %x, want %x", traceH, loaded^0xDEADBEEF)
 		}
 	})
+}
+
+func TestPlayer_AppliesReroute(t *testing.T) {
+	net := &network.Network{
+		Nodes: []network.Node{{ID: 0}, {ID: 1}, {ID: 2}, {ID: 3}},
+		Edges: []network.Edge{
+			{ID: 0, From: 0, To: 1, Length: 100, SpeedLimit: 10},
+			{ID: 1, From: 1, To: 3, Length: 100, SpeedLimit: 10},
+			{ID: 2, From: 1, To: 2, Length: 100, SpeedLimit: 10},
+			{ID: 3, From: 2, To: 3, Length: 100, SpeedLimit: 10},
+		},
+	}
+	p := newPlayer(net, nil, snapshot.New(), 1.0)
+	hdr := trace.Header{}
+	p.apply(hdr, &trace.VehicleSpawn{VehicleID: 7, Route: []uint32{0, 1}, OriginNode: 0, DestNode: 3})
+	p.apply(hdr, &trace.VehicleReroute{VehicleID: 7, AtIndex: 1, NewTail: []uint32{2, 3}})
+
+	rv := p.vehicles[7]
+	if rv == nil {
+		t.Fatalf("vehicle missing after spawn")
+	}
+	want := []uint32{0, 2, 3}
+	if len(rv.route) != len(want) {
+		t.Fatalf("route %v, want %v", rv.route, want)
+	}
+	for i := range want {
+		if rv.route[i] != want[i] {
+			t.Fatalf("route[%d]=%d, want %d", i, rv.route[i], want[i])
+		}
+	}
 }
