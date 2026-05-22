@@ -163,6 +163,87 @@ func TestPublishSnapshot_IncludesIncidents(t *testing.T) {
 	}
 }
 
+func TestWorld_LaneClose_CarsMergeOut(t *testing.T) {
+	// 2-lane edge, 1000m. A car in the closed curb lane (0) must merge into
+	// the open lane (1) under LaneClose and then proceed normally.
+	net := &network.Network{
+		Nodes: []network.Node{
+			{ID: 0, Pos: network.Point{X: 0, Y: 0}},
+			{ID: 1, Pos: network.Point{X: 1000, Y: 0}},
+		},
+		Edges: []network.Edge{
+			{ID: 0, From: 0, To: 1, Length: 1000, SpeedLimit: 15,
+				Lanes: []network.Lane{{Index: 0}, {Index: 1}}},
+		},
+	}
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	w.Incidents[0] = LaneClose // closes curb lane 0
+	w.Vehicles = []Vehicle{{ID: 1, Route: []network.EdgeID{0}, Edge: 0, Lane: 0, S: 100, V: 12}}
+	w.nextID = 2
+
+	for i := 0; i < 30; i++ { // 1.5s — plenty for one lane change
+		w.Step()
+		if len(w.Vehicles) == 0 {
+			break
+		}
+	}
+	if len(w.Vehicles) == 0 {
+		t.Fatal("car despawned unexpectedly during merge-out")
+	}
+	v := &w.Vehicles[0]
+	if v.Lane == 0 {
+		t.Fatalf("car should have merged out of the closed curb lane, still in lane %d", v.Lane)
+	}
+	if v.V < 1.0 {
+		t.Fatalf("after merging to the open lane the car should keep moving, V=%.2f", v.V)
+	}
+}
+
+func TestWorld_Incident_DrainOnClear(t *testing.T) {
+	// Single 1-lane edge. A FullClose stops the car near the edge end; after
+	// clearing the incident, the car resumes and completes (despawns).
+	net := &network.Network{
+		Nodes: []network.Node{
+			{ID: 0, Pos: network.Point{X: 0, Y: 0}},
+			{ID: 1, Pos: network.Point{X: 200, Y: 0}},
+		},
+		Edges: []network.Edge{
+			{ID: 0, From: 0, To: 1, Length: 200, SpeedLimit: 15,
+				Lanes: []network.Lane{{Index: 0}}},
+		},
+	}
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	w.Incidents[0] = FullClose
+	w.Vehicles = []Vehicle{{ID: 1, Route: []network.EdgeID{0}, Edge: 0, S: 20, V: 15}}
+	w.nextID = 2
+
+	// Phase 1: car approaches and stops at the closure (well under stuckTimeoutSec=60s).
+	for i := 0; i < 400; i++ {
+		w.Step()
+		if len(w.Vehicles) == 0 {
+			t.Fatal("car despawned while the edge was fully closed")
+		}
+	}
+	if v := &w.Vehicles[0]; v.V > 1.0 {
+		t.Fatalf("car should be stopped at the closure before clearing, V=%.2f", v.V)
+	}
+
+	// Phase 2: clear the incident; the car must resume and complete its trip.
+	w.applyIncident(IncidentEvent{EdgeID: 0, Severity: SeverityNone})
+	completed := false
+	for i := 0; i < 200; i++ {
+		w.Step()
+		if len(w.Vehicles) == 0 {
+			completed = true
+			break
+		}
+	}
+	if !completed {
+		t.Fatalf("after clearing the closure the car should resume and despawn; still present at S=%.2f V=%.2f",
+			w.Vehicles[0].S, w.Vehicles[0].V)
+	}
+}
+
 func TestWorld_FullClose_VehicleStopsBeforeEnd(t *testing.T) {
 	// One 1-lane edge; a car well upstream must brake to a stop at the
 	// FullClose obstacle (edge end) instead of running off the edge. Uses
