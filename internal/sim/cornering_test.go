@@ -182,6 +182,85 @@ func TestPolylineWalk(t *testing.T) {
 	}
 }
 
+func TestCornerSpeed(t *testing.T) {
+	if v := cornerSpeed(math.Inf(1)); !math.IsInf(v, 1) {
+		t.Errorf("infinite radius: want +Inf, got %.3f", v)
+	}
+	if v := cornerSpeed(0.001); v != minCornerSpeed {
+		t.Errorf("tiny radius: want floor %.2f, got %.3f", minCornerSpeed, v)
+	}
+	want := math.Sqrt(cornerLatAccel * 12)
+	if v := cornerSpeed(12); math.Abs(v-want) > 1e-9 {
+		t.Errorf("R=12: want %.3f, got %.3f", want, v)
+	}
+}
+
+func TestTurnRadius(t *testing.T) {
+	// Straight two-edge path -> +Inf.
+	straight := &network.Network{Edges: []network.Edge{
+		{ID: 0, Geometry: []network.Point{{X: 0, Y: 0}, {X: 100, Y: 0}}},
+		{ID: 1, Geometry: []network.Point{{X: 100, Y: 0}, {X: 200, Y: 0}}},
+	}}
+	if r := turnRadius(straight, 0, 1); !math.IsInf(r, 1) {
+		t.Errorf("straight path: want +Inf radius, got %.3f", r)
+	}
+
+	// 90° elbow with 15m sample arms -> right-triangle circumradius ~10.6m.
+	elbow := &network.Network{Edges: []network.Edge{
+		{ID: 0, Geometry: []network.Point{{X: 0, Y: 0}, {X: 100, Y: 0}}},
+		{ID: 1, Geometry: []network.Point{{X: 100, Y: 0}, {X: 100, Y: -100}}},
+	}}
+	// Right angle at node, legs both 15 m -> circumradius = hypotenuse/2 = 15√2/2.
+	want := 15 * math.Sqrt2 / 2
+	if r := turnRadius(elbow, 0, 1); math.Abs(r-want) > 0.5 {
+		t.Errorf("90° elbow: want ~%.2f, got %.2f", want, r)
+	}
+
+	// Jagged-but-straight: a short angled end stub on edge 0, but the road is
+	// straight over the 15m sample. The corner speed must exceed a 40km/h
+	// (11.2 m/s) limit so no false slowdown happens (artifact regression).
+	jagged := &network.Network{Edges: []network.Edge{
+		{ID: 0, Geometry: []network.Point{{X: 0, Y: 0}, {X: 98, Y: 0}, {X: 100, Y: 1.5}}},
+		{ID: 1, Geometry: []network.Point{{X: 100, Y: 1.5}, {X: 200, Y: 1.5}}},
+	}}
+	if vs := cornerSpeed(turnRadius(jagged, 0, 1)); vs < 11.2 {
+		t.Errorf("jagged-but-straight: corner speed %.2f should exceed 40km/h (no false slowdown)", vs)
+	}
+
+	// Edge with insufficient geometry -> +Inf (no constraint).
+	bare := &network.Network{Edges: []network.Edge{
+		{ID: 0, Geometry: []network.Point{{X: 0, Y: 0}}}, // single point
+		{ID: 1, Geometry: []network.Point{{X: 0, Y: 0}, {X: 100, Y: 0}}},
+	}}
+	if r := turnRadius(bare, 0, 1); !math.IsInf(r, 1) {
+		t.Errorf("single-point fromEdge: want +Inf, got %.3f", r)
+	}
+}
+
+func TestTurnRadius_SweepingVsTight(t *testing.T) {
+	// Shallow bend: large radius -> high corner speed (above a 40km/h limit).
+	shallow := &network.Network{Edges: []network.Edge{
+		{ID: 0, Geometry: []network.Point{{X: 0, Y: 0}, {X: 100, Y: 0}}},
+		{ID: 1, Geometry: []network.Point{{X: 100, Y: 0}, {X: 200, Y: -20}}},
+	}}
+	// Tight 90° corner: small radius -> low corner speed.
+	tight := &network.Network{Edges: []network.Edge{
+		{ID: 0, Geometry: []network.Point{{X: 0, Y: 0}, {X: 100, Y: 0}}},
+		{ID: 1, Geometry: []network.Point{{X: 100, Y: 0}, {X: 100, Y: -100}}},
+	}}
+	sV := cornerSpeed(turnRadius(shallow, 0, 1))
+	tV := cornerSpeed(turnRadius(tight, 0, 1))
+	if sV <= tV {
+		t.Errorf("sweeping (%.2f) should allow a higher speed than tight (%.2f)", sV, tV)
+	}
+	if sV < 11.2 {
+		t.Errorf("shallow bend corner speed %.2f should exceed 40km/h (barely slows)", sV)
+	}
+	if tV >= 11.2 {
+		t.Errorf("tight 90° corner speed %.2f should be below 40km/h (clearly slows)", tV)
+	}
+}
+
 // TestWorld_DoesNotBrakeForStraight: same path layout but no real turn
 // at the junction (edges arranged collinearly). Vehicle should cruise at
 // speed limit throughout.

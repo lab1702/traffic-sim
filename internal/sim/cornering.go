@@ -154,3 +154,46 @@ func pointForwardFromStart(geom []network.Point, dist float64) network.Point {
 	}
 	return geom[len(geom)-1]
 }
+
+// Comfortable cornering parameters. A turn's safe speed comes from the lateral
+// acceleration a driver tolerates while rounding a curve of the estimated
+// radius: v = sqrt(cornerLatAccel * R).
+const (
+	cornerLatAccel   = 3.0  // m/s^2, comfortable lateral acceleration
+	cornerSampleDist = 15.0 // m, radius sampling arm length on each side
+	minCornerSpeed   = 2.5  // m/s (~9 km/h), floor so hairpins crawl, not stop
+)
+
+// turnRadius estimates the radius (m) of the turn from fromEdge onto toEdge by
+// fitting a circle through a point cornerSampleDist back along fromEdge, the
+// shared junction node, and a point cornerSampleDist forward along toEdge.
+// Returns +Inf when either edge lacks geometry or the path is straight. The
+// sample arms make the estimate robust to short, jagged OSM end-segments.
+func turnRadius(net *network.Network, fromEdge, toEdge network.EdgeID) float64 {
+	fg := net.Edges[fromEdge].Geometry
+	tg := net.Edges[toEdge].Geometry
+	if len(fg) < 2 || len(tg) < 2 {
+		return math.Inf(1)
+	}
+	before := pointBackFromEnd(fg, cornerSampleDist)
+	node := fg[len(fg)-1] // == tg[0], the shared junction
+	after := pointForwardFromStart(tg, cornerSampleDist)
+	return circumradius(before, node, after)
+}
+
+// cornerSpeed returns the comfortable speed (m/s) for a turn of radius R using
+// the lateral-acceleration model, floored at minCornerSpeed. R == +Inf (a
+// straight road) passes through as +Inf — no constraint.
+func cornerSpeed(R float64) float64 {
+	if math.IsInf(R, 1) {
+		return math.Inf(1)
+	}
+	if R < 0 {
+		return math.Inf(1) // invalid radius: treat as unconstrained
+	}
+	v := math.Sqrt(cornerLatAccel * R)
+	if v < minCornerSpeed {
+		return minCornerSpeed
+	}
+	return v
+}
