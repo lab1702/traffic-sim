@@ -156,13 +156,25 @@ still use them.
 | Constant         | Value      | Meaning                                      |
 |------------------|------------|----------------------------------------------|
 | `cornerLatAccel` | 3.0 m/s²   | comfortable lateral acceleration (`a_lat`)   |
-| `cornerBrakeDecel` | 2.0 m/s² | planning deceleration for the approach (`a_brake`) |
+| `cornerBrakeDecel` | 1.0 m/s² | planning deceleration for the approach (`a_brake`) |
 | `cornerSampleDist` | 15.0 m   | radius sampling arm length                    |
 | `minCornerSpeed` | 2.5 m/s    | floor (~9 km/h) for hairpins                  |
 
+`cornerBrakeDecel` is intentionally low. IDM's leaderless (free-flow) term
+brakes weakly — it only produces strong deceleration when `v ≫ v0`, which
+saturates toward the panic clamp. A larger `a_brake` drops the kinematic
+profile late and steeply, so IDM both spikes (hard catch-up) *and* fails to
+reach the corner speed in time. `1.0` makes the profile ramp earlier and
+gently; the vehicle eases down at ~1.5–1.6 m/s² peak and arrives at the corner
+speed. Verified by `TestWorld_CornerBrakingIsGentle` (peak > −4 m/s²) and
+`TestWorld_BrakesForSharpTurn` (reaches the corner speed). Because the model is
+radius-based, this gentle anticipation only happens at genuine sharp corners —
+straight roads and gentle bends get no slowdown at all.
+
 Resulting feel on a 40 km/h (11.2 m/s) road: only turns with effective radius
 < ~42 m slow at all; tight 90° (R≈11 m) → ~20 km/h; open turn (R≈20 m) →
-~28 km/h; sweeping (R≥42 m) → no slowdown.
+~28 km/h; sweeping (R≥42 m) → no slowdown. (`a_brake` shapes only the approach
+ramp, not these final corner speeds, which come from `cornerLatAccel`.)
 
 ## Testing
 

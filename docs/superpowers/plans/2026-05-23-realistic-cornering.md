@@ -418,7 +418,10 @@ In `internal/sim/cornering.go`:
 // cornerBrakeDecel is the planning deceleration (m/s^2) for the smooth approach
 // profile: the desired speed eases down so the vehicle reaches the corner speed
 // at the corner braking at roughly this rate, instead of slamming the brakes.
-const cornerBrakeDecel = 2.0
+// Kept low: IDM's leaderless free-term brakes weakly, so a larger value drops
+// the profile too late/steep and forces a hard catch-up. (Place it inside the
+// existing corner-constants `const (...)` block.)
+const cornerBrakeDecel = 1.0
 ```
 
 ```go
