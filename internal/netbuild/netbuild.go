@@ -219,9 +219,17 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 	// arterial purely because of edge-ordering accident.
 	sortIncomingByPriority(intersections, osmWayOfEdge, feat)
 
+	// Resolve opposing approaches (which approaches form a through road).
+	// Runs BEFORE resolveControls so the class-based fallback can tell a
+	// through road from a terminating stem. Needs edge geometry; build a
+	// partial *Network containing just edges.
+	partialNet := &network.Network{Edges: edges}
+	resolveOpposing(intersections, partialNet)
+
 	// Resolve per-approach right-of-way controls. Runs after the priority
-	// sort so each IncomingControl[i] aligns with the final sorted
-	// position of Incoming[i].
+	// sort (so each IncomingControl[i] aligns with the final sorted position
+	// of Incoming[i]) and after resolveOpposing (so the fallback can read
+	// x.Opposing).
 	osmToNetReverse := make(map[network.NodeID]osm.NodeID, len(osmToNet))
 	for k, v := range osmToNet {
 		osmToNetReverse[v] = k
@@ -231,11 +239,6 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 		return o, ok
 	}
 	resolveControls(intersections, feat, osmWayOfEdge, osmNodeOf, edges)
-
-	// Resolve opposing approaches for left-turn yield logic. Needs
-	// edge geometry; build a partial *Network containing just edges.
-	partialNet := &network.Network{Edges: edges}
-	resolveOpposing(intersections, partialNet)
 
 	// 6b. Resolve OSM turn restriction relations to BannedTurns on the
 	// intersections (writes through pointers into the slice).

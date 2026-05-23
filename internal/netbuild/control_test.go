@@ -9,8 +9,8 @@ import (
 )
 
 // TestNetbuild_Fallback_UnequalClass: a primary road meets a residential
-// road. The residential approach gets ControlStop; the primary approaches
-// stay ControlNone.
+// road. The unsigned minor approach gives way (ControlYield); the primary
+// approaches stay ControlNone.
 func TestNetbuild_Fallback_UnequalClass(t *testing.T) {
 	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
 		1: mkNode(1, 40.0, -74.0010),
@@ -35,7 +35,7 @@ func TestNetbuild_Fallback_UnequalClass(t *testing.T) {
 	if len(x.IncomingControl) != len(x.Incoming) {
 		t.Fatalf("IncomingControl length %d != Incoming length %d", len(x.IncomingControl), len(x.Incoming))
 	}
-	var sawStop, sawNone bool
+	var sawYield, sawNone bool
 	for i, eid := range x.Incoming {
 		c := x.IncomingControl[i]
 		hw := highwayOfEdge(net, eid, feat)
@@ -46,14 +46,14 @@ func TestNetbuild_Fallback_UnequalClass(t *testing.T) {
 			}
 			sawNone = true
 		case "residential":
-			if c != network.ControlStop {
-				t.Errorf("residential approach (edge %d) should be Stop, got %v", eid, c)
+			if c != network.ControlYield {
+				t.Errorf("residential approach (edge %d) should be Yield, got %v", eid, c)
 			}
-			sawStop = true
+			sawYield = true
 		}
 	}
-	if !sawStop || !sawNone {
-		t.Error("expected to see both Stop and None controls at unequal-class fallback intersection")
+	if !sawYield || !sawNone {
+		t.Error("expected to see both Yield and None controls at unequal-class fallback intersection")
 	}
 }
 
@@ -604,11 +604,12 @@ func TestNetbuild_InteriorNodeStop(t *testing.T) {
 	// Identify each approach by its geometric direction relative to the
 	// intersection and by the highway class of its source way. The interior
 	// stop tag is on the W primary approach specifically — the E primary
-	// must stay ControlNone, and service approaches get class-fallback Stop.
+	// must stay ControlNone, and the unsigned minor service approaches get
+	// class-fallback Yield.
 	wantApproach(t, net, feat, x, "primary", "W", network.ControlStop)
 	wantApproach(t, net, feat, x, "primary", "E", network.ControlNone)
-	wantApproach(t, net, feat, x, "service", "N", network.ControlStop)
-	wantApproach(t, net, feat, x, "service", "S", network.ControlStop)
+	wantApproach(t, net, feat, x, "service", "N", network.ControlYield)
+	wantApproach(t, net, feat, x, "service", "S", network.ControlYield)
 }
 
 // approachDir returns "N"/"S"/"E"/"W" for the approach edge based on which
@@ -736,11 +737,12 @@ func TestNetbuild_InteriorNodeGiveWay(t *testing.T) {
 	x := net.Intersections[0]
 
 	// Interior give_way is on the W primary approach. E primary stays None
-	// (no sign on its segment); service approaches get class-fallback Stop.
+	// (no sign on its segment); unsigned minor service approaches get
+	// class-fallback Yield.
 	wantApproach(t, net, feat, x, "primary", "W", network.ControlYield)
 	wantApproach(t, net, feat, x, "primary", "E", network.ControlNone)
-	wantApproach(t, net, feat, x, "service", "N", network.ControlStop)
-	wantApproach(t, net, feat, x, "service", "S", network.ControlStop)
+	wantApproach(t, net, feat, x, "service", "N", network.ControlYield)
+	wantApproach(t, net, feat, x, "service", "S", network.ControlYield)
 }
 
 // TestNetbuild_InteriorNodeOverridesIntersectionNode: intersection node
