@@ -38,6 +38,39 @@ func TestNetbuild_Fallback_EqualClassTThroughFlows(t *testing.T) {
 	wantApproach(t, net, feat, x, "residential", "S", network.ControlYield)
 }
 
+// TestNetbuild_Fallback_BentThroughRoadFlows: a primary road that BENDS ~25°
+// at the junction (one arm arrives from the WSW, the other from the ESE) with a
+// residential stem joining from the south. The bent main road still continues
+// through the junction, so both of its arms must keep priority (ControlNone)
+// and only the stem yields. Previously resolveOpposing's coarse 22.5° axis
+// buckets failed to pair the two bent arms, so applyClassFallback saw no
+// through road and made the whole junction an all-way stop — halting
+// straight-through traffic on the main road.
+func TestNetbuild_Fallback_BentThroughRoadFlows(t *testing.T) {
+	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
+		2: mkNode(2, 40.0000, -74.0000),  // junction
+		1: mkNode(1, 39.9998, -74.0012),  // W arm: west + slightly south
+		3: mkNode(3, 39.9998, -73.9988),  // E arm: east + slightly south
+		4: mkNode(4, 39.9990, -74.0000),  // S residential stem
+	}}
+	feat.Ways = []*osm.Way{
+		mkWay(10, "primary", false, 1, 2, 3),  // bent through road (W-E)
+		mkWay(20, "residential", false, 4, 2), // S minor stem
+	}
+
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(net.Intersections) != 1 {
+		t.Fatalf("want 1 intersection, got %d", len(net.Intersections))
+	}
+	x := net.Intersections[0]
+	wantApproach(t, net, feat, x, "primary", "W", network.ControlNone)
+	wantApproach(t, net, feat, x, "primary", "E", network.ControlNone)
+	wantApproach(t, net, feat, x, "residential", "S", network.ControlYield)
+}
+
 // TestNetbuild_Fallback_EqualClassSpurThroughFlows: a residential road runs
 // straight W-E and a same-class one-way spur leaves to the south (outgoing
 // only — no cross traffic arrives). The through road must flow (ControlNone),

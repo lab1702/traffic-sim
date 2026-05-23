@@ -416,56 +416,61 @@ func applyStopAllOrMinor(x *network.Intersection, tags osm.Tags, classOfEdge fun
 	}
 }
 
-// resolveOpposing populates x.Opposing for each intersection. Two
-// approaches are opposing iff:
+// oppositeThreshold is the minimum |Δarrival-heading| for two approaches to
+// count as opposing ends of one road continuing through a junction. π − π/4 =
+// 135° admits a through road that bends up to 45° at the junction while still
+// rejecting a symmetric Y (≈120° arms) and any perpendicular cross street
+// (≈90°). Using an angular tolerance instead of fixed axis buckets is what
+// makes through-road detection robust to a main road that curves as a side
+// road joins — without it the two arms can land in adjacent buckets, leaving
+// the junction with no detected through road and demoting it to an all-way
+// stop that halts straight-through traffic.
+const oppositeThreshold = math.Pi - math.Pi/4
+
+// resolveOpposing populates x.Opposing for each intersection. Two approaches
+// are opposing iff they are mutually each other's most-nearly-opposite approach
+// (largest |Δarrival-heading|) and that separation exceeds oppositeThreshold —
+// i.e. they form the two ends of one road continuing roughly straight through
+// the junction. Requiring a mutual match keeps the relation symmetric, so
+// Opposing[Opposing[i]] == i.
 //
-//  1. Their arrival headings fold to the same axis bucket (same
-//     8-bucket / 22.5° resolution as DefaultSignalConfig in sim).
-//  2. AND their arrival headings are > π/2 apart (excludes
-//     same-direction misalignment at Y-junctions and skewed forks).
-//
-// If a bucket has more than two members (degenerate star geometry),
-// each approach pairs with whichever bucket-mate has the largest
-// |Δheading|, i.e. the one most nearly opposite.
-//
-// Receives a *network.Network containing at least Edges so it can
-// call network.ArrivalHeading.
+// Receives a *network.Network containing at least Edges so it can call
+// network.ArrivalHeading.
 func resolveOpposing(xs []network.Intersection, net *network.Network) {
-	const numBuckets = 8
 	for i := range xs {
 		x := &xs[i]
-		if len(x.Opposing) != len(x.Incoming) {
-			x.Opposing = make([]int8, len(x.Incoming))
+		n := len(x.Incoming)
+		if len(x.Opposing) != n {
+			x.Opposing = make([]int8, n)
 		}
 		for k := range x.Opposing {
 			x.Opposing[k] = -1
 		}
-		headings := make([]float64, len(x.Incoming))
-		buckets := make([]int, len(x.Incoming))
+		headings := make([]float64, n)
 		for j, eid := range x.Incoming {
-			h := network.ArrivalHeading(net, eid)
-			headings[j] = h
-			ax := math.Mod(h, math.Pi)
-			if ax < 0 {
-				ax += math.Pi
-			}
-			buckets[j] = int(math.Round(ax*numBuckets/math.Pi)) % numBuckets
+			headings[j] = network.ArrivalHeading(net, eid)
 		}
+		// best[j] is the approach most nearly opposite j, or -1 if none is
+		// more than oppositeThreshold away.
+		best := make([]int, n)
 		for j := range x.Incoming {
-			best := -1
-			bestDelta := math.Pi / 2
+			best[j] = -1
+			bestDelta := oppositeThreshold
 			for k := range x.Incoming {
-				if k == j || buckets[k] != buckets[j] {
+				if k == j {
 					continue
 				}
 				d := math.Abs(angleDiff(headings[j], headings[k]))
 				if d > bestDelta {
 					bestDelta = d
-					best = k
+					best[j] = k
 				}
 			}
-			if best >= 0 {
-				x.Opposing[j] = int8(best)
+		}
+		// Keep only mutual matches so Opposing stays symmetric.
+		for j := range x.Incoming {
+			if k := best[j]; k >= 0 && best[k] == j {
+				x.Opposing[j] = int8(k)
 			}
 		}
 	}
