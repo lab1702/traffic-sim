@@ -23,3 +23,6 @@ Thumbs.db
 # Local sim outputs
 *.trace
 /traces/
+
+# Claude Code local settings (personal, per-machine)
+.claude/settings.local.json
