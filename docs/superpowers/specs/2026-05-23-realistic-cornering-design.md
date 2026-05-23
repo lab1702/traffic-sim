@@ -122,9 +122,14 @@ the lane-change logic, the snapshot/renderer, or the trace format.
 1. `v0 := edge.SpeedLimit · driverFactor` (unchanged).
 2. Apply the `Slowdown` incident cap if present (unchanged).
 3. If there is no next route edge, return `v0` (unchanged).
-4. `R := turnRadius(net, v.Edge, nextEdge)`; `v_safe := cornerSpeed(R)`.
-5. If `v_safe` is `+Inf` or `≥ v0`, return `v0` (gentle/straight: no slowdown).
-6. `d := edge.Length − v.S`; return `min(v0, √(v_safe² + 2·a_brake·d))`.
+4. `R, deflection := turnGeometry(net, v.Edge, nextEdge)` — radius and deflection
+   angle from the same three sample points.
+5. **Gate:** if `deflection < minCornerAngle` (~40°), return `v0`. Drivers don't
+   lift for slight bends; without this gate the radius model slows for
+   deflections as gentle as ~21° on a 40 km/h road, which look straight on
+   screen. Genuine sharp turns (≥ ~40°) still slow.
+6. `v_safe := cornerSpeed(R)`; if `v_safe` is `+Inf` or `≥ v0`, return `v0`.
+7. `d := edge.Length − v.S`; return `min(v0, √(v_safe² + 2·a_brake·d))`.
 
 ## Components
 
@@ -159,6 +164,7 @@ still use them.
 | `cornerBrakeDecel` | 1.0 m/s² | planning deceleration for the approach (`a_brake`) |
 | `cornerSampleDist` | 15.0 m   | radius sampling arm length                    |
 | `minCornerSpeed` | 2.5 m/s    | floor (~9 km/h) for hairpins                  |
+| `minCornerAngle` | 40°        | gate — bends gentler than this keep full speed |
 
 `cornerBrakeDecel` is intentionally low. IDM's leaderless (free-flow) term
 brakes weakly — it only produces strong deceleration when `v ≫ v0`, which
