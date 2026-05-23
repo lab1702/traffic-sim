@@ -6,62 +6,11 @@ import (
 	"github.com/lab1702/traffic-sim/internal/network"
 )
 
-// cornerSpeedCap returns the maximum comfortable speed (m/s) for a turn
-// whose heading change has absolute value absAngleRad. Returns +Inf for
-// transitions that are effectively straight (angle below straightCutoff)
-// — meaning "no cap".
-//
-// Tuning anchors:
-//   - below 15° → +Inf (cruise)
-//   - 90°       → 5 m/s (~18 km/h, ~11 mph)
-//   - 180°      → 2.5 m/s (~9 km/h)
-//   - 15°..90°  → linear interp from 30 m/s to 5 m/s
-//   - 90°..180° → linear interp from 5 m/s to 2.5 m/s
-func cornerSpeedCap(absAngleRad float64) float64 {
-	const (
-		straightCutoff = 15.0 * math.Pi / 180
-		capUpper       = 30.0 // m/s at the cutoff (effectively no cap on urban roads)
-		capAt90        = 5.0
-		capAt180       = 2.5
-	)
-	if absAngleRad < straightCutoff {
-		return math.Inf(1)
-	}
-	if absAngleRad <= math.Pi/2 {
-		t := (absAngleRad - straightCutoff) / (math.Pi/2 - straightCutoff)
-		return capUpper + t*(capAt90-capUpper)
-	}
-	t := (absAngleRad - math.Pi/2) / (math.Pi - math.Pi/2)
-	return capAt90 + t*(capAt180-capAt90)
-}
-
-// cornerBrakingDecel is the comfortable deceleration we assume when
-// braking for an upcoming corner. Real-world urban driving is closer to
-// 2-3 m/s² for "non-urgent" stops; we pick the upper end to keep cars
-// behaving briskly without slamming the brakes.
-const cornerBrakingDecel = 2.5
-
-// cornerReactionBuf is the lookahead time (seconds) added on top of the
-// pure braking distance, so vehicles start to slow a beat before they
-// strictly must.
-const cornerReactionBuf = 2.0
-
-// shouldApplyCornerCap reports whether a vehicle traveling at speed v
-// needs to begin braking now to reach cap by distToCorner. Returns true
-// if we're at or below the cap already (so the cap stays applied through
-// the corner).
-func shouldApplyCornerCap(v, cap, distToCorner float64) bool {
-	if v <= cap {
-		return true
-	}
-	brakeDist := (v*v - cap*cap) / (2 * cornerBrakingDecel)
-	return distToCorner < brakeDist+v*cornerReactionBuf
-}
-
-// computeDesiredSpeed returns the v0 (desired speed) for IDM given the
-// current vehicle state and route. It's the current edge's speed limit,
-// optionally reduced by the corner-speed cap for the upcoming turn when
-// the vehicle is within braking distance.
+// computeDesiredSpeed returns the v0 (desired speed) for IDM. It is the current
+// edge's speed limit (scaled by the driver's preference and any Slowdown
+// incident), optionally reduced for an upcoming turn. The turn reduction uses a
+// radius-based comfortable speed and a smooth kinematic approach profile so the
+// vehicle eases into the corner rather than braking hard far upstream.
 func (w *World) computeDesiredSpeed(v *Vehicle) float64 {
 	edge := &w.Net.Edges[v.Edge]
 	// Per-driver speed preference. A zero factor means a hand-constructed
@@ -80,14 +29,19 @@ func (w *World) computeDesiredSpeed(v *Vehicle) float64 {
 		return v0 // no next edge: nothing to slow for
 	}
 	nextEdge := v.Route[v.RouteIdx+1]
-	angle := math.Abs(network.TurnAngle(w.Net, v.Edge, nextEdge))
-	cap := cornerSpeedCap(angle)
-	if math.IsInf(cap, 1) || cap >= v0 {
-		return v0
+	vSafe := cornerSpeed(turnRadius(w.Net, v.Edge, nextEdge))
+	if math.IsInf(vSafe, 1) || vSafe >= v0 {
+		return v0 // straight or gentle turn: no slowdown
 	}
-	distToCorner := edge.Length - v.S
-	if shouldApplyCornerCap(v.V, cap, distToCorner) {
-		return cap
+	// Kinematic approach: the max speed from which we can still decelerate at
+	// cornerBrakeDecel to reach vSafe by the corner (distance d ahead). Far from
+	// the corner this exceeds v0 (no effect); it eases to vSafe as d -> 0.
+	d := edge.Length - v.S
+	if d < 0 {
+		d = 0
+	}
+	if v0corner := math.Sqrt(vSafe*vSafe + 2*cornerBrakeDecel*d); v0corner < v0 {
+		return v0corner
 	}
 	return v0
 }
@@ -162,6 +116,10 @@ const (
 	cornerLatAccel   = 3.0  // m/s^2, comfortable lateral acceleration
 	cornerSampleDist = 15.0 // m, radius sampling arm length on each side
 	minCornerSpeed   = 2.5  // m/s (~9 km/h), floor so hairpins crawl, not stop
+	// cornerBrakeDecel is the planning deceleration (m/s^2) for the smooth
+	// approach profile: the desired speed eases down so the vehicle reaches the
+	// corner speed at the corner braking at roughly this rate, not slamming.
+	cornerBrakeDecel = 1.0
 )
 
 // turnRadius estimates the radius (m) of the turn from fromEdge onto toEdge by
