@@ -206,7 +206,6 @@ func TestWorld_DoesNotBrakeForStraight(t *testing.T) {
 	w.Vehicles = []Vehicle{
 		{ID: 1, Route: []network.EdgeID{0, 1}, Edge: 0, S: 100, V: 15},
 	}
-	w.nextID = 2
 
 	for i := 0; i < 50; i++ {
 		w.Step()
@@ -249,6 +248,9 @@ func TestWorld_CornerBrakingIsGentle(t *testing.T) {
 		if a := w.Vehicles[0].A; a < minA {
 			minA = a
 		}
+	}
+	if minA == 0.0 {
+		t.Fatal("vehicle never decelerated; test did not exercise corner braking")
 	}
 	if minA < -4.0 {
 		t.Errorf("corner braking too hard: peak decel %.2f m/s² (want > -4.0; MaxBraking is -%.1f)", minA, MaxBraking)
