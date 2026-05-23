@@ -78,6 +78,12 @@ type World struct {
 	// disables.
 	IncidentControl <-chan IncidentEvent
 
+	// reverseEdge maps a directed edge to its opposite-direction twin (same node
+	// pair, swapped) when one exists. Built once in NewWorld. Lets applyIncident
+	// mark both directions of a two-way road, so a "closed" road is closed both
+	// ways. One-way edges have no entry.
+	reverseEdge map[network.EdgeID]network.EdgeID
+
 	// GpsShare is the fraction of spawned vehicles given GPS rerouting, in
 	// [0,1]. Defaults to 1.0 (every vehicle) in NewWorld; overridden from the
 	// --gps-share flag.
@@ -166,6 +172,7 @@ func NewWorld(net *network.Network, spawner Spawner, overrides map[network.Inter
 		rng:          rand.New(rand.NewPCG(0xCAFE, 0xBEEF)),
 		Cong:         NewCongestion(net, ewmaHalfLifeSec, DefaultDt),
 		Incidents:    make(map[network.EdgeID]Severity),
+		reverseEdge:  buildReverseEdges(net),
 		GpsShare:     1.0,
 	}
 }

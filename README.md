@@ -101,6 +101,9 @@ an edge** to cycle its incident severity:
 
 `none → slowdown → lane closed → fully closed → none`
 
+On a two-way road the incident applies to both directions, so a closed road is
+closed both ways.
+
 - **Slowdown** — traffic crawls through the edge (desired speed capped).
 - **Lane closed** — the curb lane is blocked; vehicles merge out of it.
 - **Fully closed** — every lane is blocked. GPS-equipped vehicles reroute around
