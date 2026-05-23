@@ -256,3 +256,59 @@ func TestWorld_CornerBrakingIsGentle(t *testing.T) {
 		t.Errorf("corner braking too hard: peak decel %.2f m/s² (want > -4.0; MaxBraking is -%.1f)", minA, MaxBraking)
 	}
 }
+
+func TestTurnGeometry_Deflection(t *testing.T) {
+	straight := &network.Network{Edges: []network.Edge{
+		{ID: 0, Geometry: []network.Point{{X: 0, Y: 0}, {X: 100, Y: 0}}},
+		{ID: 1, Geometry: []network.Point{{X: 100, Y: 0}, {X: 200, Y: 0}}},
+	}}
+	if _, defl := turnGeometry(straight, 0, 1); defl > 0.01 {
+		t.Errorf("straight: want deflection ~0, got %.3f rad", defl)
+	}
+	elbow := &network.Network{Edges: []network.Edge{
+		{ID: 0, Geometry: []network.Point{{X: 0, Y: 0}, {X: 100, Y: 0}}},
+		{ID: 1, Geometry: []network.Point{{X: 100, Y: 0}, {X: 100, Y: -100}}},
+	}}
+	if _, defl := turnGeometry(elbow, 0, 1); math.Abs(defl-math.Pi/2) > 0.02 {
+		t.Errorf("90° elbow: want deflection ~π/2, got %.3f rad", defl)
+	}
+	rad := 30.0 * math.Pi / 180
+	bend := &network.Network{Edges: []network.Edge{
+		{ID: 0, Geometry: []network.Point{{X: 0, Y: 0}, {X: 100, Y: 0}}},
+		{ID: 1, Geometry: []network.Point{{X: 100, Y: 0}, {X: 100 + 100*math.Cos(-rad), Y: 100 * math.Sin(-rad)}}},
+	}}
+	if _, defl := turnGeometry(bend, 0, 1); math.Abs(defl-rad) > 0.02 {
+		t.Errorf("30° bend: want deflection ~%.3f, got %.3f rad", rad, defl)
+	}
+}
+
+// TestComputeDesiredSpeed_GentleBendGate: bends gentler than minCornerAngle keep
+// full speed; sharp ones still slow.
+func TestComputeDesiredSpeed_GentleBendGate(t *testing.T) {
+	mk := func(angleDeg float64) *network.Network {
+		rad := angleDeg * math.Pi / 180
+		return &network.Network{
+			Nodes: []network.Node{{ID: 0}, {ID: 1}, {ID: 2}},
+			Edges: []network.Edge{
+				{ID: 0, From: 0, To: 1, Length: 100, SpeedLimit: 11.2,
+					Lanes: []network.Lane{{Index: 0}}, Geometry: []network.Point{{X: 0, Y: 0}, {X: 100, Y: 0}}},
+				{ID: 1, From: 1, To: 2, Length: 100, SpeedLimit: 11.2,
+					Lanes: []network.Lane{{Index: 0}}, Geometry: []network.Point{{X: 100, Y: 0}, {X: 100 + 100*math.Cos(-rad), Y: 100 * math.Sin(-rad)}}},
+			},
+		}
+	}
+	// Vehicle near the corner (d≈1m) so any slowdown would be fully engaged.
+	mkVeh := func() *Vehicle { return &Vehicle{Edge: 0, S: 99, V: 11.2, Route: []network.EdgeID{0, 1}} }
+
+	net30 := mk(30) // below the ~40° gate
+	w30 := NewWorld(net30, NewRandomOD(net30, 0, 0), nil)
+	if got := w30.computeDesiredSpeed(mkVeh()); got < 11.2-1e-9 {
+		t.Errorf("30° bend (below gate) should not slow: got v0=%.3f, want 11.2", got)
+	}
+
+	net60 := mk(60) // above the gate
+	w60 := NewWorld(net60, NewRandomOD(net60, 0, 0), nil)
+	if got := w60.computeDesiredSpeed(mkVeh()); got >= 11.2 {
+		t.Errorf("60° bend (above gate) should slow: got v0=%.3f, want < 11.2", got)
+	}
+}

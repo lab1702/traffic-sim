@@ -29,9 +29,13 @@ func (w *World) computeDesiredSpeed(v *Vehicle) float64 {
 		return v0 // no next edge: nothing to slow for
 	}
 	nextEdge := v.Route[v.RouteIdx+1]
-	vSafe := cornerSpeed(turnRadius(w.Net, v.Edge, nextEdge))
+	radius, deflection := turnGeometry(w.Net, v.Edge, nextEdge)
+	if deflection < minCornerAngle {
+		return v0 // bend too gentle to slow for (drivers don't lift for slight bends)
+	}
+	vSafe := cornerSpeed(radius)
 	if math.IsInf(vSafe, 1) || vSafe >= v0 {
-		return v0 // straight or gentle turn: no slowdown
+		return v0 // turn imposes no meaningful speed constraint
 	}
 	// Kinematic approach: the max speed from which we can still decelerate at
 	// cornerBrakeDecel to reach vSafe by the corner (distance d ahead). Far from
@@ -120,23 +124,45 @@ const (
 	// approach profile: the desired speed eases down so the vehicle reaches the
 	// corner speed at the corner braking at roughly this rate, not slamming.
 	cornerBrakeDecel = 1.0
+	// minCornerAngle gates the slowdown: bends whose deflection (measured over
+	// the sample arms) is gentler than this keep full speed. Drivers don't lift
+	// for slight bends; the radius model alone would slow for deflections as
+	// small as ~21° on a 40 km/h road, which look straight on screen. ~40° is
+	// "a turn you'd actually slow for."
+	minCornerAngle = 40.0 * math.Pi / 180 // radians
 )
 
-// turnRadius estimates the radius (m) of the turn from fromEdge onto toEdge by
-// fitting a circle through a point cornerSampleDist back along fromEdge, the
-// shared junction node, and a point cornerSampleDist forward along toEdge.
-// Returns +Inf when either edge lacks geometry or the path is straight. The
-// sample arms make the estimate robust to short, jagged OSM end-segments.
-func turnRadius(net *network.Network, fromEdge, toEdge network.EdgeID) float64 {
+// turnGeometry samples three points — cornerSampleDist back along fromEdge, the
+// shared junction node, and cornerSampleDist forward along toEdge — and returns
+// the turn's fitted radius (m) and its deflection angle (radians, absolute).
+// Radius is +Inf and deflection 0 when geometry is insufficient or the path is
+// straight. The sample arms make both robust to short, jagged OSM end-segments.
+func turnGeometry(net *network.Network, fromEdge, toEdge network.EdgeID) (radius, deflection float64) {
 	fg := net.Edges[fromEdge].Geometry
 	tg := net.Edges[toEdge].Geometry
 	if len(fg) < 2 || len(tg) < 2 {
-		return math.Inf(1)
+		return math.Inf(1), 0
 	}
 	before := pointBackFromEnd(fg, cornerSampleDist)
 	node := fg[len(fg)-1] // == tg[0], the shared junction
 	after := pointForwardFromStart(tg, cornerSampleDist)
-	return circumradius(before, node, after)
+	radius = circumradius(before, node, after)
+	inH := math.Atan2(node.Y-before.Y, node.X-before.X)
+	outH := math.Atan2(after.Y-node.Y, after.X-node.X)
+	d := outH - inH
+	for d > math.Pi {
+		d -= 2 * math.Pi
+	}
+	for d <= -math.Pi {
+		d += 2 * math.Pi
+	}
+	return radius, math.Abs(d)
+}
+
+// turnRadius returns just the fitted radius for the turn (see turnGeometry).
+func turnRadius(net *network.Network, fromEdge, toEdge network.EdgeID) float64 {
+	r, _ := turnGeometry(net, fromEdge, toEdge)
+	return r
 }
 
 // cornerSpeed returns the comfortable speed (m/s) for a turn of radius R using
