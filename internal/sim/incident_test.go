@@ -437,3 +437,92 @@ func TestWorld_FullClose_GPSNoAlternativeQueues(t *testing.T) {
 		t.Fatalf("route should be unchanged [0 1] (no alternative), got %v", r)
 	}
 }
+
+func TestWorld_FullClose_ClosesBothDirections(t *testing.T) {
+	// Two-way road A(0)<->B(1): edge 0 = A->B, edge 1 = B->A (reverse twin),
+	// same band. Marking the road (clicking edge 0) must block BOTH directions.
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 0}},
+		{ID: 1, Pos: network.Point{X: 200, Y: 0}},
+	}
+	edges := []network.Edge{
+		{ID: 0, From: 0, To: 1, Length: 200, SpeedLimit: 15, Lanes: []network.Lane{{Index: 0}}},
+		{ID: 1, From: 1, To: 0, Length: 200, SpeedLimit: 15, Lanes: []network.Lane{{Index: 0}}},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges}
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+
+	w.applyIncident(IncidentEvent{EdgeID: 0, Severity: FullClose})
+
+	if w.Incidents[0] != FullClose {
+		t.Fatalf("clicked edge 0 should be FullClose, got %d", w.Incidents[0])
+	}
+	if w.Incidents[1] != FullClose {
+		t.Fatalf("reverse twin edge 1 should also be FullClose, got %d", w.Incidents[1])
+	}
+
+	// A car travelling the other way (on the twin, edge 1) must not traverse the
+	// now-closed road: it is caught on the closed edge and stops before the end,
+	// rather than driving all the way through and despawning (the old bug).
+	w.Vehicles = []Vehicle{{ID: 1, Route: []network.EdgeID{1}, Edge: 1, S: 20, V: 15}}
+	w.nextID = 2
+	for i := 0; i < 200; i++ {
+		w.Step()
+		if len(w.Vehicles) == 0 {
+			t.Fatal("twin-direction car traversed the closed road (should be blocked)")
+		}
+	}
+	if v := &w.Vehicles[0]; v.S >= 200 {
+		t.Fatalf("twin-direction car reached the far end (S=%.1f); should be stopped short", v.S)
+	}
+}
+
+func TestApplyIncident_MirrorsToReverseTwin(t *testing.T) {
+	// Edges 0(A->B) and 1(B->A) are a two-way pair; edge 2(B->C) is one-way.
+	nodes := []network.Node{{ID: 0}, {ID: 1}, {ID: 2}}
+	edges := []network.Edge{
+		{ID: 0, From: 0, To: 1, Length: 100, SpeedLimit: 10, Lanes: []network.Lane{{Index: 0}}},
+		{ID: 1, From: 1, To: 0, Length: 100, SpeedLimit: 10, Lanes: []network.Lane{{Index: 0}}},
+		{ID: 2, From: 1, To: 2, Length: 100, SpeedLimit: 10, Lanes: []network.Lane{{Index: 0}}},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges}
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	var events int
+	w.EmitTrace = func(_ uint64, _ float64, e trace.Event) {
+		if _, ok := e.(*trace.IncidentSet); ok {
+			events++
+		}
+	}
+
+	// Two-way: setting edge 0 mirrors to its twin edge 1; two trace events.
+	w.applyIncident(IncidentEvent{EdgeID: 0, Severity: LaneClose})
+	if w.Incidents[0] != LaneClose || w.Incidents[1] != LaneClose {
+		t.Fatalf("both directions should be LaneClose: e0=%d e1=%d", w.Incidents[0], w.Incidents[1])
+	}
+	if events != 2 {
+		t.Fatalf("two-way set should emit 2 events, got %d", events)
+	}
+
+	// Clearing via the twin (edge 1) clears both.
+	events = 0
+	w.applyIncident(IncidentEvent{EdgeID: 1, Severity: SeverityNone})
+	if _, ok0 := w.Incidents[0]; ok0 {
+		t.Fatal("clearing should remove edge 0 (the twin)")
+	}
+	if _, ok1 := w.Incidents[1]; ok1 {
+		t.Fatal("clearing should remove edge 1")
+	}
+	if events != 2 {
+		t.Fatalf("two-way clear should emit 2 events, got %d", events)
+	}
+
+	// One-way edge 2 has no twin: only itself, one event.
+	events = 0
+	w.applyIncident(IncidentEvent{EdgeID: 2, Severity: FullClose})
+	if w.Incidents[2] != FullClose {
+		t.Fatal("one-way edge 2 should be FullClose")
+	}
+	if events != 1 {
+		t.Fatalf("one-way set should emit 1 event, got %d", events)
+	}
+}

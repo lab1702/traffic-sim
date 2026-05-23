@@ -122,13 +122,44 @@ func (w *World) applyIncident(ev IncidentEvent) {
 			"edge_id", uint32(ev.EdgeID), "severity", uint8(ev.Severity))
 		return
 	}
-	if ev.Severity == SeverityNone {
-		delete(w.Incidents, ev.EdgeID)
+	// An incident is a property of the physical road: apply it to the clicked
+	// edge and, for a two-way road, its reverse twin, so both directions are
+	// affected (a closed road is closed both ways). One-way edges have no twin.
+	w.setIncidentEdge(ev.EdgeID, ev.Severity)
+	if twin, ok := w.reverseEdge[ev.EdgeID]; ok {
+		w.setIncidentEdge(twin, ev.Severity)
+	}
+}
+
+// setIncidentEdge sets or clears the incident on a single directed edge and
+// records it in the trace.
+func (w *World) setIncidentEdge(eid network.EdgeID, sev Severity) {
+	if sev == SeverityNone {
+		delete(w.Incidents, eid)
 	} else {
-		w.Incidents[ev.EdgeID] = ev.Severity
+		w.Incidents[eid] = sev
 	}
 	w.EmitTrace(w.Tick, w.SimTime, &trace.IncidentSet{
-		EdgeID:   uint32(ev.EdgeID),
-		Severity: uint8(ev.Severity),
+		EdgeID:   uint32(eid),
+		Severity: uint8(sev),
 	})
+}
+
+// buildReverseEdges indexes each directed edge to its opposite-direction twin
+// (same node pair, swapped From/To), when one exists. Used so an incident marks
+// both directions of a two-way road. One-way edges are absent from the result.
+func buildReverseEdges(net *network.Network) map[network.EdgeID]network.EdgeID {
+	byEnds := make(map[[2]network.NodeID]network.EdgeID, len(net.Edges))
+	for i := range net.Edges {
+		e := &net.Edges[i]
+		byEnds[[2]network.NodeID{e.From, e.To}] = network.EdgeID(i)
+	}
+	rev := make(map[network.EdgeID]network.EdgeID)
+	for i := range net.Edges {
+		e := &net.Edges[i]
+		if twin, ok := byEnds[[2]network.NodeID{e.To, e.From}]; ok {
+			rev[network.EdgeID(i)] = twin
+		}
+	}
+	return rev
 }
