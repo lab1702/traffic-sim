@@ -12,13 +12,17 @@ import (
 // Runs after sortIncomingByPriority, so IncomingControl[i] is the rule
 // for the approach now at Incoming[i] (final sorted position).
 //
+// Nodes that merely continue one road (fewer than three distinct
+// neighbors, no signal) are skipped entirely and stay uncontrolled — a
+// way-join is not a junction.
+//
 // Resolution order (first rule that applies wins for a given approach):
 //  1. stop=all on the intersection node      -> AllWayStop everywhere.
 //  2. stop=minor on the intersection node    -> Stop on every approach
 //     whose highway class is strictly lower-priority than the best.
-//  3. Class-based fallback:
-//     unequal classes -> lower gets Stop
-//     equal classes   -> AllWayStop everywhere
+//  3. Class-based fallback (terminating road yields): the through road
+//     keeps priority (None); terminating stems and lower-class approaches
+//     Yield; a genuine equal-class crossing or ambiguous Y is AllWayStop.
 //
 // Task 13 adds rule for highway=stop / highway=give_way on the
 // intersection node.
@@ -58,6 +62,21 @@ func resolveControls(
 
 	for i := range xs {
 		x := &xs[i]
+
+		// A node connecting only two distinct neighbors is a way-join — one
+		// physical road continuing through a tag boundary (speed/name/bridge/
+		// surface change) or around a bend, not a real junction. It carries
+		// no cross traffic, so it must impose no right-of-way control:
+		// otherwise the equal-class fallback below makes it an all-way stop
+		// and cars halt at an invisible point on a straight road. Signalled
+		// nodes are exempt (a mid-block / pedestrian signal legitimately
+		// stops a two-approach node). Genuine junctions, merges, and diverges
+		// always touch ≥3 distinct neighbors. Leave IncomingControl at its
+		// ControlNone default and skip the resolution chain.
+		if !x.HasSignal && distinctNeighbors(x, edges) < 3 {
+			continue
+		}
+
 		var nodeTags osm.Tags
 		var xOSMID osm.NodeID
 		if osmID, ok := osmNodeOf(x.NodeID); ok {
@@ -77,12 +96,44 @@ func resolveControls(
 	}
 }
 
-// applyClassFallback sets IncomingControl based on functional class only.
-// Unequal classes: best (lowest priority value) stays ControlNone,
-// strictly higher (lower-priority) approaches get ControlStop.
-// Equal classes: every approach becomes ControlAllWayStop.
+// distinctNeighbors counts the distinct other-endpoint nodes reachable
+// across all edges incident to the intersection (incoming edges' From
+// nodes plus outgoing edges' To nodes). A pure road continuation touches
+// exactly two; a genuine junction, merge, or diverge touches three or
+// more. Self-loops (an edge that starts and ends at the node) are ignored.
+func distinctNeighbors(x *network.Intersection, edges []network.Edge) int {
+	nb := make(map[network.NodeID]struct{}, 4)
+	for _, eid := range x.Incoming {
+		if int(eid) < len(edges) {
+			nb[edges[eid].From] = struct{}{}
+		}
+	}
+	for _, eid := range x.Outgoing {
+		if int(eid) < len(edges) {
+			nb[edges[eid].To] = struct{}{}
+		}
+	}
+	delete(nb, x.NodeID)
+	return len(nb)
+}
+
+// applyClassFallback assigns right-of-way for an unsigned junction using the
+// "terminating road yields" model. The road that continues straight through
+// the junction (the through road) keeps priority; roads that terminate at it,
+// and lower-class roads, give way. An all-way stop is reserved for the one
+// case with genuine, class-symmetric conflict: two or more equal-class through
+// roads actually crossing (or an ambiguous equal-class junction with no
+// through road at all).
+//
+// "Through" is read from x.Opposing, populated by resolveOpposing before this
+// runs: an approach with an opposing partner is part of a road that continues
+// across the junction; one without is a stem.
+//
+// Explicit OSM signage (handled by the apply* functions that run after this)
+// still overrides these defaults.
 func applyClassFallback(x *network.Intersection, classOfEdge func(network.EdgeID) int) {
-	if len(x.Incoming) == 0 {
+	n := len(x.Incoming)
+	if n == 0 {
 		return
 	}
 	best := classOfEdge(x.Incoming[0])
@@ -91,24 +142,56 @@ func applyClassFallback(x *network.Intersection, classOfEdge func(network.EdgeID
 			best = c
 		}
 	}
-	allEqual := true
-	for _, eid := range x.Incoming {
+
+	isBest := make([]bool, n)
+	through := make([]bool, n)
+	nBest, nThrough := 0, 0
+	for j, eid := range x.Incoming {
 		if classOfEdge(eid) != best {
-			allEqual = false
-			break
+			continue
+		}
+		isBest[j] = true
+		nBest++
+		// A best-class approach is "through" when it has an opposing partner
+		// that is itself best-class — i.e. its road continues straight across
+		// the junction rather than terminating at it.
+		if p := x.Opposing[j]; p >= 0 && int(p) < n && classOfEdge(x.Incoming[p]) == best {
+			through[j] = true
+			nThrough++
 		}
 	}
-	if allEqual {
+
+	// A single best-class approach (e.g. a higher-class stem) simply has
+	// priority over everything else.
+	if nBest <= 1 {
+		for j := range x.IncomingControl {
+			if isBest[j] {
+				x.IncomingControl[j] = network.ControlNone
+			} else {
+				x.IncomingControl[j] = network.ControlYield
+			}
+		}
+		return
+	}
+
+	// nThrough counts approaches in through pairs; nThrough/2 is the number of
+	// crossing axes. Two or more axes (a real equal-class crossing), or no
+	// through road among several equal arms (an ambiguous Y), is the only case
+	// that warrants an all-way stop.
+	if nThrough/2 >= 2 || nThrough == 0 {
 		for j := range x.IncomingControl {
 			x.IncomingControl[j] = network.ControlAllWayStop
 		}
 		return
 	}
-	for j, eid := range x.Incoming {
-		if classOfEdge(eid) == best {
+
+	// Exactly one through road of the best class: it keeps priority; every
+	// terminating best-class stem and every lower-class approach yields.
+	for j := range x.IncomingControl {
+		if through[j] {
 			x.IncomingControl[j] = network.ControlNone
 		} else {
-			x.IncomingControl[j] = network.ControlStop
+			x.IncomingControl[j] = network.ControlYield
 		}
 	}
 }
