@@ -58,6 +58,21 @@ func resolveControls(
 
 	for i := range xs {
 		x := &xs[i]
+
+		// A node connecting only two distinct neighbors is a way-join — one
+		// physical road continuing through a tag boundary (speed/name/bridge/
+		// surface change) or around a bend, not a real junction. It carries
+		// no cross traffic, so it must impose no right-of-way control:
+		// otherwise the equal-class fallback below makes it an all-way stop
+		// and cars halt at an invisible point on a straight road. Signalled
+		// nodes are exempt (a mid-block / pedestrian signal legitimately
+		// stops a two-approach node). Genuine junctions, merges, and diverges
+		// always touch ≥3 distinct neighbors. Leave IncomingControl at its
+		// ControlNone default and skip the resolution chain.
+		if !x.HasSignal && distinctNeighbors(x, edges) < 3 {
+			continue
+		}
+
 		var nodeTags osm.Tags
 		var xOSMID osm.NodeID
 		if osmID, ok := osmNodeOf(x.NodeID); ok {
@@ -75,6 +90,27 @@ func resolveControls(
 		applyNodeLevelSign(x, nodeTags, wayByID, osmWayOfEdge, edgeFromOSM, xOSMID)
 		applyInteriorNodeSign(x, wayByID, osmWayOfEdge, edgeFromOSM, xOSMID, feat.Nodes)
 	}
+}
+
+// distinctNeighbors counts the distinct other-endpoint nodes reachable
+// across all edges incident to the intersection (incoming edges' From
+// nodes plus outgoing edges' To nodes). A pure road continuation touches
+// exactly two; a genuine junction, merge, or diverge touches three or
+// more. Self-loops (an edge that starts and ends at the node) are ignored.
+func distinctNeighbors(x *network.Intersection, edges []network.Edge) int {
+	nb := make(map[network.NodeID]struct{}, 4)
+	for _, eid := range x.Incoming {
+		if int(eid) < len(edges) {
+			nb[edges[eid].From] = struct{}{}
+		}
+	}
+	for _, eid := range x.Outgoing {
+		if int(eid) < len(edges) {
+			nb[edges[eid].To] = struct{}{}
+		}
+	}
+	delete(nb, x.NodeID)
+	return len(nb)
 }
 
 // applyClassFallback sets IncomingControl based on functional class only.
