@@ -134,6 +134,54 @@ func TestWorld_BrakesForSharpTurn(t *testing.T) {
 	}
 }
 
+func TestCircumradius(t *testing.T) {
+	// Collinear points -> +Inf (a straight road has no curvature constraint).
+	got := circumradius(
+		network.Point{X: 0, Y: 0},
+		network.Point{X: 10, Y: 0},
+		network.Point{X: 20, Y: 0})
+	if !math.IsInf(got, 1) {
+		t.Errorf("collinear: want +Inf, got %.3f", got)
+	}
+	// Right isosceles triangle, right angle at the apex, legs 15: for a right
+	// triangle the circumradius is half the hypotenuse = 15*sqrt(2)/2 (~10.6).
+	got = circumradius(
+		network.Point{X: -15, Y: 0},
+		network.Point{X: 0, Y: 0},
+		network.Point{X: 0, Y: -15})
+	want := 15 * math.Sqrt2 / 2
+	if math.Abs(got-want) > 0.1 {
+		t.Errorf("right-angle circumradius: want %.3f, got %.3f", want, got)
+	}
+}
+
+func TestPolylineWalk(t *testing.T) {
+	// Single long segment: interpolate within it.
+	geom := []network.Point{{X: 0, Y: 0}, {X: 100, Y: 0}}
+	if p := pointBackFromEnd(geom, 15); math.Abs(p.X-85) > 1e-9 || math.Abs(p.Y) > 1e-9 {
+		t.Errorf("pointBackFromEnd 15m: got (%.3f,%.3f) want (85,0)", p.X, p.Y)
+	}
+	if p := pointForwardFromStart(geom, 15); math.Abs(p.X-15) > 1e-9 || math.Abs(p.Y) > 1e-9 {
+		t.Errorf("pointForwardFromStart 15m: got (%.3f,%.3f) want (15,0)", p.X, p.Y)
+	}
+	// Shorter than dist: clamp to the far endpoint.
+	short := []network.Point{{X: 0, Y: 0}, {X: 5, Y: 0}}
+	if p := pointBackFromEnd(short, 15); math.Abs(p.X) > 1e-9 {
+		t.Errorf("pointBackFromEnd short edge: got X=%.3f want 0 (clamp to start)", p.X)
+	}
+	if p := pointForwardFromStart(short, 15); math.Abs(p.X-5) > 1e-9 {
+		t.Errorf("pointForwardFromStart short edge: got X=%.3f want 5 (clamp to end)", p.X)
+	}
+	// Multi-segment: walk across a vertex.
+	multi := []network.Point{{X: 0, Y: 0}, {X: 10, Y: 0}, {X: 20, Y: 0}}
+	if p := pointBackFromEnd(multi, 15); math.Abs(p.X-5) > 1e-9 {
+		t.Errorf("pointBackFromEnd across vertex: got X=%.3f want 5", p.X)
+	}
+	if p := pointForwardFromStart(multi, 15); math.Abs(p.X-15) > 1e-9 {
+		t.Errorf("pointForwardFromStart across vertex: got X=%.3f want 15", p.X)
+	}
+}
+
 // TestWorld_DoesNotBrakeForStraight: same path layout but no real turn
 // at the junction (edges arranged collinearly). Vehicle should cruise at
 // speed limit throughout.
