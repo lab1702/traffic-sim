@@ -59,6 +59,31 @@ func ParseSignalMode(s string) (SignalMode, bool) {
 	return ModeNormal, false
 }
 
+// PlanKind selects how a signal's phases are sequenced.
+type PlanKind uint8
+
+const (
+	// PlanFixed cycles phases on fixed timers via Advance. Default; the
+	// behavior of every hand-built SignalConfig literal and of --signals
+	// YAML overrides.
+	PlanFixed PlanKind = iota
+	// PlanSemiActuated rests in the major phase and serves minor phases on
+	// detector demand via AdvanceActuated. Emitted by DefaultSignalConfig.
+	PlanSemiActuated
+)
+
+// Semi-actuated tuning (seconds / meters). See
+// docs/superpowers/specs/2026-06-05-semi-actuated-signals-design.md for the
+// rationale behind each value.
+const (
+	actMajorMinGreen   = 15.0 // major holds >= this before yielding to a call
+	actMinGreen        = 7.0  // minor-phase minimum green once served
+	actPassage         = 3.0  // green ends this long after the passage zone clears
+	actMaxGreen        = 40.0 // minor-phase ceiling (max-out under steady demand)
+	actCallDistance    = 60.0 // a vehicle within this of the stop line calls a phase
+	actPassageDistance = 25.0 // a vehicle within this holds (extends) the green
+)
+
 // SignalConfig is the per-intersection plan: ordered phases that repeat.
 type SignalConfig struct {
 	// IntersectionID is set when this config is applied to a specific
@@ -69,6 +94,21 @@ type SignalConfig struct {
 
 	// InitialMode is the mode the signal starts in. Defaults to ModeNormal.
 	InitialMode SignalMode
+
+	// Plan selects fixed-time (default) vs semi-actuated sequencing.
+	Plan PlanKind
+
+	// MajorPhase is the index into Phases that rests in green under
+	// PlanSemiActuated (the arterial axis). Ignored for PlanFixed.
+	MajorPhase int
+
+	// Semi-actuated timings (seconds). Zero values are filled with the
+	// act* defaults in NewSignalState, so an actuated config need only set
+	// Plan and MajorPhase. Ignored for PlanFixed.
+	MinGreen      float64 // minor-phase minimum green
+	MajorMinGreen float64 // major-phase minimum green before it may yield
+	Passage       float64 // gap time: green ends this long after the zone clears
+	MaxGreen      float64 // minor-phase maximum green
 }
 
 // SignalPhase describes which approaches get green for how long, plus the
@@ -90,9 +130,28 @@ type SignalState struct {
 	Elapsed  float64 // seconds within current phase
 	IsYellow bool
 	Mode     SignalMode // Normal/FlashA/FlashB/Off
+
+	// passageGap is seconds since the current minor phase's passage zone was
+	// last occupied. Used by AdvanceActuated for gap-out; reset on every
+	// phase change. Unused under PlanFixed.
+	passageGap float64
 }
 
 func NewSignalState(c SignalConfig) *SignalState {
+	if c.Plan == PlanSemiActuated {
+		if c.MinGreen == 0 {
+			c.MinGreen = actMinGreen
+		}
+		if c.MajorMinGreen == 0 {
+			c.MajorMinGreen = actMajorMinGreen
+		}
+		if c.Passage == 0 {
+			c.Passage = actPassage
+		}
+		if c.MaxGreen == 0 {
+			c.MaxGreen = actMaxGreen
+		}
+	}
 	return &SignalState{Config: c, Mode: c.InitialMode}
 }
 
@@ -139,6 +198,94 @@ func (s *SignalState) Advance(dt float64) {
 			s.PhaseIdx = (s.PhaseIdx + 1) % len(s.Config.Phases)
 		}
 	}
+}
+
+// AdvanceActuated advances a semi-actuated signal by dt seconds. called[i] and
+// occupied[i] report whether phase i has a vehicle within the call / passage
+// zone this tick — pure functions of vehicle positions, so the machine stays
+// deterministic. The major phase rests in green until some minor phase is
+// called; a minor phase holds for at least MinGreen, extends while a vehicle
+// occupies its passage zone, and terminates on gap-out (Passage seconds after
+// the zone clears) or max-out (MaxGreen). Yellow runs YellowDur, then
+// nextActuatedPhase chooses the successor. Non-normal modes (flash/off) are a
+// no-op, exactly like Advance.
+//
+// The caller (World) sizes called and occupied to len(Config.Phases); the minor
+// branch indexes occupied[PhaseIdx] directly on that contract.
+func (s *SignalState) AdvanceActuated(dt float64, called, occupied []bool) {
+	if s.Mode != ModeNormal || len(s.Config.Phases) == 0 {
+		return
+	}
+	s.Elapsed += dt
+
+	if s.IsYellow {
+		if s.Elapsed < s.Config.Phases[s.PhaseIdx].YellowDur {
+			return
+		}
+		s.Elapsed = 0
+		s.passageGap = 0
+		s.IsYellow = false
+		s.PhaseIdx = s.nextActuatedPhase(s.PhaseIdx, called)
+		return
+	}
+
+	// Green, major (rest) phase.
+	if s.PhaseIdx == s.Config.MajorPhase {
+		if s.Elapsed < s.Config.MajorMinGreen {
+			return
+		}
+		if anyCalledMinor(called, s.Config.MajorPhase) {
+			s.toYellow()
+			return
+		}
+		// Rest: hold green indefinitely. Pin Elapsed so it neither drifts
+		// upward without bound nor max-outs (the major street has no cap).
+		s.Elapsed = s.Config.MajorMinGreen
+		return
+	}
+
+	// Green, minor (actuated) phase.
+	if s.PhaseIdx < len(occupied) && occupied[s.PhaseIdx] {
+		s.passageGap = 0
+	} else {
+		s.passageGap += dt
+	}
+	maxedOut := s.Elapsed >= s.Config.MaxGreen
+	gappedOut := s.Elapsed >= s.Config.MinGreen && s.passageGap >= s.Config.Passage
+	if maxedOut || gappedOut {
+		s.toYellow()
+	}
+}
+
+// toYellow ends the current green and starts its trailing yellow.
+func (s *SignalState) toYellow() {
+	s.IsYellow = true
+	s.Elapsed = 0
+	s.passageGap = 0
+}
+
+// nextActuatedPhase returns the phase to run after the current one ends: the
+// first called minor phase in cyclic order after curr, or MajorPhase when
+// nothing is called (the controller returns to the major street and rests).
+func (s *SignalState) nextActuatedPhase(curr int, called []bool) int {
+	n := len(s.Config.Phases)
+	for off := 1; off <= n; off++ {
+		p := (curr + off) % n
+		if p != s.Config.MajorPhase && p < len(called) && called[p] {
+			return p
+		}
+	}
+	return s.Config.MajorPhase
+}
+
+// anyCalledMinor reports whether any phase other than major has a call.
+func anyCalledMinor(called []bool, major int) bool {
+	for i, c := range called {
+		if i != major && c {
+			return true
+		}
+	}
+	return false
 }
 
 // GreenFor returns true if the given incoming-edge position is permitted
@@ -254,7 +401,47 @@ func DefaultSignalConfig(incoming []network.EdgeID, net *network.Network) Signal
 			YellowDur:  3,
 		})
 	}
-	return SignalConfig{Phases: phases}
+
+	// A single-axis signal (one phase) has nothing to actuate — it is a
+	// permanent green. Leave it PlanFixed.
+	if len(phases) <= 1 {
+		return SignalConfig{Phases: phases}
+	}
+
+	// Multi-phase signals are semi-actuated: the arterial axis rests in green
+	// and the minor phases are served on detector demand. Timings are filled
+	// from the act* defaults by NewSignalState.
+	return SignalConfig{
+		Phases:     phases,
+		Plan:       PlanSemiActuated,
+		MajorPhase: majorPhase(phases, incoming, net),
+	}
+}
+
+// majorPhase picks the phase that rests in green: the axis carrying the
+// highest-priority road, scored by max RoadClass.Priority() over the phase's
+// green approaches, tie-broken by highest SpeedLimit, then lowest phase index.
+func majorPhase(phases []SignalPhase, incoming []network.EdgeID, net *network.Network) int {
+	best, bestPri, bestSpd := 0, -1, -1.0
+	for i, p := range phases {
+		pri, spd := -1, -1.0
+		for _, pos := range p.GreenEdges {
+			if pos < 0 || pos >= len(incoming) {
+				continue
+			}
+			e := &net.Edges[incoming[pos]]
+			if pr := e.Class.Priority(); pr > pri {
+				pri = pr
+			}
+			if e.SpeedLimit > spd {
+				spd = e.SpeedLimit
+			}
+		}
+		if pri > bestPri || (pri == bestPri && spd > bestSpd) {
+			best, bestPri, bestSpd = i, pri, spd
+		}
+	}
+	return best
 }
 
 // arrivalHeading wraps network.ArrivalHeading for backwards compatibility
