@@ -77,6 +77,24 @@ The YAML schema is documented inline in `configs/signals.example.yaml`.
 A missing or invalid signals file causes `trafficsim` to exit with a
 clear error rather than silently producing zero overrides.
 
+### Actuated signals
+
+Auto-generated signals are **semi-actuated**, not fixed-time. At each
+multi-leg intersection the higher-class axis (the arterial) is the *major*
+phase and rests in green; the side-street *minor* phases are served only on
+demand. A vehicle within a detection zone of the stop line places a call;
+the controller switches to that phase after the major street has had its
+minimum green, holds it for a minimum green, extends it while vehicles keep
+arriving (passage/gap-out), and caps it at a maximum green so a busy side
+street can't starve the arterial. With no side-street traffic the arterial
+holds green indefinitely instead of cycling to an empty approach.
+
+This is the default for every auto-generated signal. A `--signals` override
+pins an intersection to an explicit **fixed-time** plan (the override schema
+is unchanged). Actuation is deterministic — detection is a pure function of
+vehicle positions — so the `--seed` trace-determinism guarantee still holds.
+Single-leg signals stay a permanent green (nothing to actuate).
+
 ### GPS rerouting
 
 By default every vehicle has GPS and re-routes around congestion. Each edge

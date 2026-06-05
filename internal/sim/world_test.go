@@ -99,8 +99,8 @@ func TestWorld_IDMFollowingMaintainsGap(t *testing.T) {
 
 	// Two vehicles on edge 0, leader 50m ahead, both starting at speed.
 	w.Vehicles = []Vehicle{
-		{ID: 1, Route: []network.EdgeID{0, 1, 2}, Edge: 0, S: 10, V: 5},  // follower
-		{ID: 2, Route: []network.EdgeID{0, 1, 2}, Edge: 0, S: 60, V: 5},  // leader
+		{ID: 1, Route: []network.EdgeID{0, 1, 2}, Edge: 0, S: 10, V: 5}, // follower
+		{ID: 2, Route: []network.EdgeID{0, 1, 2}, Edge: 0, S: 60, V: 5}, // leader
 	}
 	w.nextID = 3
 
@@ -396,11 +396,11 @@ func TestWorld_SnapshotEmitsSignalPerApproach(t *testing.T) {
 	// from N, E, S, W (and 4 outgoing back to those nodes — needed so
 	// the intersection has degree-8 in the graph).
 	nodes := []network.Node{
-		{ID: 0, Pos: network.Point{X: 0, Y: 100}},   // N
-		{ID: 1, Pos: network.Point{X: 100, Y: 0}},   // E
-		{ID: 2, Pos: network.Point{X: 0, Y: -100}},  // S
-		{ID: 3, Pos: network.Point{X: -100, Y: 0}},  // W
-		{ID: 4, Pos: network.Point{X: 0, Y: 0}},     // center
+		{ID: 0, Pos: network.Point{X: 0, Y: 100}},  // N
+		{ID: 1, Pos: network.Point{X: 100, Y: 0}},  // E
+		{ID: 2, Pos: network.Point{X: 0, Y: -100}}, // S
+		{ID: 3, Pos: network.Point{X: -100, Y: 0}}, // W
+		{ID: 4, Pos: network.Point{X: 0, Y: 0}},    // center
 	}
 	mkEdge := func(id, from, to int) network.Edge {
 		return network.Edge{
@@ -546,10 +546,10 @@ func TestWorld_FlashRedYields(t *testing.T) {
 		}
 	}
 	edges := []network.Edge{
-		mkEdge(0, 0, 4), // N -> C
-		mkEdge(1, 1, 4), // E -> C
-		mkEdge(2, 2, 4), // S -> C
-		mkEdge(3, 3, 4), // W -> C
+		mkEdge(0, 0, 4),                                                    // N -> C
+		mkEdge(1, 1, 4),                                                    // E -> C
+		mkEdge(2, 2, 4),                                                    // S -> C
+		mkEdge(3, 3, 4),                                                    // W -> C
 		mkEdge(4, 4, 0), mkEdge(5, 4, 1), mkEdge(6, 4, 2), mkEdge(7, 4, 3), // outbound (unused but needed for compaction)
 	}
 	xs := []network.Intersection{
@@ -813,10 +813,10 @@ func TestWorld_StuckAtYieldNotDespawned(t *testing.T) {
 	// Two incoming edges into an unsignalized intersection. Incoming[0]
 	// (priority road) and Incoming[1] (yield road).
 	nodes := []network.Node{
-		{ID: 0, Pos: network.Point{X: -100, Y: 0}},  // W (priority origin)
-		{ID: 1, Pos: network.Point{X: 0, Y: -100}},  // S (yield origin)
-		{ID: 2, Pos: network.Point{X: 0, Y: 0}},     // center
-		{ID: 3, Pos: network.Point{X: 100, Y: 0}},   // E (downstream of priority)
+		{ID: 0, Pos: network.Point{X: -100, Y: 0}}, // W (priority origin)
+		{ID: 1, Pos: network.Point{X: 0, Y: -100}}, // S (yield origin)
+		{ID: 2, Pos: network.Point{X: 0, Y: 0}},    // center
+		{ID: 3, Pos: network.Point{X: 100, Y: 0}},  // E (downstream of priority)
 	}
 	mkEdge := func(id, from, to int) network.Edge {
 		return network.Edge{
@@ -833,9 +833,9 @@ func TestWorld_StuckAtYieldNotDespawned(t *testing.T) {
 	}
 	xs := []network.Intersection{
 		{
-			ID:        0,
-			NodeID:    2,
-			Incoming:  []network.EdgeID{0, 1}, // 0 = priority, 1 = yield
+			ID:       0,
+			NodeID:   2,
+			Incoming: []network.EdgeID{0, 1}, // 0 = priority, 1 = yield
 			IncomingControl: ctrls(
 				network.ControlNone,  // priority approach
 				network.ControlYield, // yield approach
@@ -1031,11 +1031,11 @@ func TestWorld_YieldSign_NoMandatoryStop(t *testing.T) {
 // at staggered times depart in arrival order.
 func TestWorld_AllWayStop_FIFO(t *testing.T) {
 	nodes := []network.Node{
-		{ID: 0, Pos: network.Point{X: -100, Y: 0}},   // W origin
-		{ID: 1, Pos: network.Point{X: 100, Y: 0}},    // E origin
-		{ID: 2, Pos: network.Point{X: 0, Y: -100}},   // S origin
-		{ID: 3, Pos: network.Point{X: 0, Y: 0}},      // center
-		{ID: 4, Pos: network.Point{X: 0, Y: 100}},    // N dest (outbound)
+		{ID: 0, Pos: network.Point{X: -100, Y: 0}}, // W origin
+		{ID: 1, Pos: network.Point{X: 100, Y: 0}},  // E origin
+		{ID: 2, Pos: network.Point{X: 0, Y: -100}}, // S origin
+		{ID: 3, Pos: network.Point{X: 0, Y: 0}},    // center
+		{ID: 4, Pos: network.Point{X: 0, Y: 100}},  // N dest (outbound)
 	}
 	mkEdge := func(id, from, to int) network.Edge {
 		return network.Edge{
@@ -1242,11 +1242,11 @@ func TestWorld_AllWayStop_StoppedSinceClears(t *testing.T) {
 // for the gap to clear.
 func TestWorld_StopSign_GapAcceptance(t *testing.T) {
 	nodes := []network.Node{
-		{ID: 0, Pos: network.Point{X: -100, Y: 0}},  // W priority origin
-		{ID: 1, Pos: network.Point{X: 0, Y: -100}},  // S stop origin
-		{ID: 2, Pos: network.Point{X: 0, Y: 0}},     // center
-		{ID: 3, Pos: network.Point{X: 100, Y: 0}},   // E priority destination
-		{ID: 4, Pos: network.Point{X: 0, Y: 100}},   // N stop destination
+		{ID: 0, Pos: network.Point{X: -100, Y: 0}}, // W priority origin
+		{ID: 1, Pos: network.Point{X: 0, Y: -100}}, // S stop origin
+		{ID: 2, Pos: network.Point{X: 0, Y: 0}},    // center
+		{ID: 3, Pos: network.Point{X: 100, Y: 0}},  // E priority destination
+		{ID: 4, Pos: network.Point{X: 0, Y: 100}},  // N stop destination
 	}
 	mkEdge := func(id, from, to int) network.Edge {
 		return network.Edge{
@@ -1675,8 +1675,8 @@ func TestWorld_LeftTurn_SignaledGreen_YieldsToOpposing(t *testing.T) {
 		{ID: 0, Pos: network.Point{X: 0, Y: 100}},
 		{ID: 1, Pos: network.Point{X: 0, Y: -100}},
 		{ID: 2, Pos: network.Point{X: 0, Y: 0}},
-		{ID: 3, Pos: network.Point{X: 100, Y: 0}},  // E destination (A's left)
-		{ID: 4, Pos: network.Point{X: 0, Y: 200}},  // N destination (B's through)
+		{ID: 3, Pos: network.Point{X: 100, Y: 0}}, // E destination (A's left)
+		{ID: 4, Pos: network.Point{X: 0, Y: 200}}, // N destination (B's through)
 	}
 	mkEdge := func(id, from, to int) network.Edge {
 		return network.Edge{
@@ -1752,8 +1752,8 @@ func TestWorld_LeftTurn_SignaledRed_NotAffected(t *testing.T) {
 		{ID: 0, Pos: network.Point{X: 0, Y: 100}},
 		{ID: 1, Pos: network.Point{X: 0, Y: -100}},
 		{ID: 2, Pos: network.Point{X: 0, Y: 0}},
-		{ID: 3, Pos: network.Point{X: 100, Y: 0}},  // E destination (A's left)
-		{ID: 4, Pos: network.Point{X: 0, Y: 200}},  // N destination
+		{ID: 3, Pos: network.Point{X: 100, Y: 0}}, // E destination (A's left)
+		{ID: 4, Pos: network.Point{X: 0, Y: 200}}, // N destination
 	}
 	mkEdge := func(id, from, to int) network.Edge {
 		return network.Edge{
@@ -2192,8 +2192,8 @@ func TestWorld_Impatience_LeftTurnShrinksGap(t *testing.T) {
 		{ID: 0, Pos: network.Point{X: 0, Y: 100}},
 		{ID: 1, Pos: network.Point{X: 0, Y: -100}},
 		{ID: 2, Pos: network.Point{X: 0, Y: 0}},
-		{ID: 3, Pos: network.Point{X: 100, Y: 0}},  // E destination (A's left)
-		{ID: 4, Pos: network.Point{X: 0, Y: 200}},  // N destination (B's through)
+		{ID: 3, Pos: network.Point{X: 100, Y: 0}}, // E destination (A's left)
+		{ID: 4, Pos: network.Point{X: 0, Y: 200}}, // N destination (B's through)
 	}
 	mkEdge := func(id, from, to int) network.Edge {
 		return network.Edge{
@@ -2808,5 +2808,158 @@ func TestWorld_Reroute_KeepsRouteOnNoPath(t *testing.T) {
 	}
 	if events != 0 {
 		t.Fatalf("emitted reroute event despite no-route: %d", events)
+	}
+}
+
+// signalCross builds a 4-leg signalized intersection: inbound edges 0(N) 1(E)
+// 2(S) 3(W) into center node 4, outbound 4(C->N) 5(C->E) 6(C->S) 7(C->W). The
+// E–W axis is primary (arterial), N–S residential, so DefaultSignalConfig makes
+// E–W the major (rest) phase and N–S the actuated minor phase.
+func signalCross() *network.Network {
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 200}},  // N
+		{ID: 1, Pos: network.Point{X: 200, Y: 0}},  // E
+		{ID: 2, Pos: network.Point{X: 0, Y: -200}}, // S
+		{ID: 3, Pos: network.Point{X: -200, Y: 0}}, // W
+		{ID: 4, Pos: network.Point{X: 0, Y: 0}},    // center
+	}
+	mk := func(id, from, to int, cls network.RoadClass) network.Edge {
+		return network.Edge{
+			ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: 200, SpeedLimit: 13.4, Class: cls,
+			Lanes:    []network.Lane{{Index: 0}},
+			Geometry: []network.Point{nodes[from].Pos, nodes[to].Pos},
+		}
+	}
+	edges := []network.Edge{
+		mk(0, 0, 4, network.ClassResidential), // N -> C (minor)
+		mk(1, 1, 4, network.ClassPrimary),     // E -> C (major)
+		mk(2, 2, 4, network.ClassResidential), // S -> C (minor)
+		mk(3, 3, 4, network.ClassPrimary),     // W -> C (major)
+		mk(4, 4, 0, network.ClassResidential), // C -> N
+		mk(5, 4, 1, network.ClassPrimary),     // C -> E
+		mk(6, 4, 2, network.ClassResidential), // C -> S
+		mk(7, 4, 3, network.ClassPrimary),     // C -> W
+	}
+	xs := []network.Intersection{{
+		ID: 0, NodeID: 4,
+		Incoming:  []network.EdgeID{0, 1, 2, 3},
+		Outgoing:  []network.EdgeID{4, 5, 6, 7},
+		HasSignal: true,
+	}}
+	return &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+}
+
+// TestWorld_ArterialRests: with traffic only on the major (E–W) street and an
+// empty side street, the semi-actuated signal holds the major green for the
+// whole run — no spurious cycling — and a major-street vehicle crosses without
+// being stopped at the line. The old fixed-time plan would have cycled to the
+// empty side street every ~33s.
+func TestWorld_ArterialRests(t *testing.T) {
+	net := signalCross()
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	st := w.SignalStates[0]
+	if st.Config.Plan != PlanSemiActuated {
+		t.Fatalf("expected semi-actuated auto signal, got plan %d", st.Config.Plan)
+	}
+	major := st.Config.MajorPhase
+
+	// A through vehicle on the E approach (edge 1 -> edge 7, E to W).
+	w.Vehicles = []Vehicle{{ID: 1, Route: []network.EdgeID{1, 7}, Edge: 1, S: 0, V: 13.4}}
+	w.nextID = 2
+
+	minV := math.Inf(1)
+	for i := 0; i < 6000; i++ { // 300 s
+		w.Step()
+		if st.PhaseIdx != major || st.IsYellow {
+			t.Fatalf("tick %d: signal left the major rest phase (phase=%d yellow=%v) with no side demand",
+				i, st.PhaseIdx, st.IsYellow)
+		}
+		if len(w.Vehicles) > 0 && !w.Vehicles[0].Despawned && w.Vehicles[0].Edge == 1 {
+			if v := w.Vehicles[0].V; v < minV {
+				minV = v
+			}
+		}
+	}
+	if minV < 5.0 {
+		t.Errorf("major-street vehicle was slowed to %.2f m/s on a resting green (should cruise)", minV)
+	}
+}
+
+// TestWorld_SideStreetServedOnDemand: a single vehicle on the side street is
+// detected, served with a green within a bounded time, and clears the
+// intersection; the signal then returns to the major street.
+func TestWorld_SideStreetServedOnDemand(t *testing.T) {
+	net := signalCross()
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	st := w.SignalStates[0]
+	major := st.Config.MajorPhase
+
+	// Vehicle on the N approach (edge 0, minor phase), going straight through
+	// to S (edge 6). Start near the stop line so it sits in the detector zone.
+	w.Vehicles = []Vehicle{{ID: 1, Route: []network.EdgeID{0, 6}, Edge: 0, S: 150, V: 0}}
+	w.nextID = 2
+	minorPos := 0 // N approach is Incoming position 0
+
+	servedTick, clearedTick := -1, -1
+	for i := 0; i < 4000; i++ { // 200 s, well over MajorMinGreen+Yellow+MaxGreen
+		w.Step()
+		if servedTick < 0 && st.GreenFor(minorPos) && !st.IsYellow && st.PhaseIdx != major {
+			servedTick = i
+		}
+		if servedTick >= 0 && clearedTick < 0 &&
+			(len(w.Vehicles) == 0 || w.Vehicles[0].Despawned || w.Vehicles[0].Edge != 0) {
+			clearedTick = i
+		}
+	}
+	if servedTick < 0 {
+		t.Fatalf("side-street vehicle was never given a green")
+	}
+	if clearedTick < 0 {
+		t.Fatalf("side-street vehicle never cleared the intersection after being served")
+	}
+	// After the vehicle clears, the call drops and the controller should rest
+	// in the major phase again.
+	rested := false
+	for i := 0; i < 2000; i++ {
+		w.Step()
+		if st.PhaseIdx == major && !st.IsYellow {
+			rested = true
+			break
+		}
+	}
+	if !rested {
+		t.Errorf("signal did not return to the major rest phase after the side street cleared")
+	}
+}
+
+// TestWorld_SemiActuatedDeterminism: two worlds with identical inputs produce
+// identical signal phase sequences — the detector scan must be a pure function
+// of vehicle positions (no map-iteration nondeterminism).
+func TestWorld_SemiActuatedDeterminism(t *testing.T) {
+	run := func() []signalLast {
+		net := signalCross()
+		w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+		w.Vehicles = []Vehicle{
+			{ID: 1, Route: []network.EdgeID{0, 6}, Edge: 0, S: 120, V: 5},
+			{ID: 2, Route: []network.EdgeID{1, 7}, Edge: 1, S: 40, V: 10},
+		}
+		w.nextID = 3
+		seq := make([]signalLast, 0, 2000)
+		for i := 0; i < 2000; i++ {
+			w.Step()
+			st := w.SignalStates[0]
+			seq = append(seq, signalLast{idx: st.PhaseIdx, yellow: st.IsYellow})
+		}
+		return seq
+	}
+	a, b := run(), run()
+	if len(a) != len(b) {
+		t.Fatalf("length mismatch: %d vs %d", len(a), len(b))
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			t.Fatalf("signal sequence diverged at tick %d: %+v vs %+v", i, a[i], b[i])
+		}
 	}
 }

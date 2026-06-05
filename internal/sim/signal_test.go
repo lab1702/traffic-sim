@@ -262,6 +262,197 @@ func TestDefaultSignalConfig_TWithBend(t *testing.T) {
 	}
 }
 
+// actuatedCfg is a 2-phase semi-actuated config: phase 0 = major (rest),
+// phase 1 = minor (actuated). YellowDur 3s; timings default via NewSignalState.
+func actuatedCfg() SignalConfig {
+	return SignalConfig{
+		Phases: []SignalPhase{
+			{GreenEdges: []int{0}, YellowDur: 3},
+			{GreenEdges: []int{1}, YellowDur: 3},
+		},
+		Plan:       PlanSemiActuated,
+		MajorPhase: 0,
+	}
+}
+
+// stepActuated advances s for `secs` seconds in DefaultDt steps with constant
+// detector inputs, returning whether the minor phase (phase 1) was ever green.
+func stepActuated(s *SignalState, secs float64, called, occupied []bool) (sawMinorGreen bool) {
+	for t := 0.0; t < secs; t += DefaultDt {
+		s.AdvanceActuated(DefaultDt, called, occupied)
+		if s.PhaseIdx == 1 && !s.IsYellow {
+			sawMinorGreen = true
+		}
+	}
+	return sawMinorGreen
+}
+
+// TestActuated_MajorRests: with no calls the major phase holds green
+// indefinitely (the old fixed-time plan would have cycled to the side street).
+func TestActuated_MajorRests(t *testing.T) {
+	s := NewSignalState(actuatedCfg())
+	none := []bool{false, false}
+	if stepActuated(s, 300, none, none) {
+		t.Fatalf("minor phase was served with no demand")
+	}
+	if s.PhaseIdx != 0 || s.IsYellow {
+		t.Errorf("major should rest green: phase=%d yellow=%v", s.PhaseIdx, s.IsYellow)
+	}
+}
+
+// TestActuated_ServesCall: a side-street call switches the signal after the
+// major min-green + yellow, serves the minor phase, then returns to the major
+// street once the call clears.
+func TestActuated_ServesCall(t *testing.T) {
+	s := NewSignalState(actuatedCfg())
+	calling := []bool{false, true} // vehicle waiting on the minor approach
+	if !stepActuated(s, actMajorMinGreen+10, calling, calling) {
+		t.Fatalf("minor phase never served despite a standing call")
+	}
+	// Call clears (vehicle has crossed); controller should return to major.
+	none := []bool{false, false}
+	returned := false
+	for t2 := 0.0; t2 < 60; t2 += DefaultDt {
+		s.AdvanceActuated(DefaultDt, none, none)
+		if s.PhaseIdx == 0 && !s.IsYellow {
+			returned = true
+			break
+		}
+	}
+	if !returned {
+		t.Errorf("did not return to the major phase after the call cleared")
+	}
+}
+
+// TestActuated_GapOut: a minor green held by passage-zone occupancy terminates
+// exactly Passage seconds after the zone clears (not before).
+func TestActuated_GapOut(t *testing.T) {
+	s := NewSignalState(actuatedCfg())
+	s.PhaseIdx = 1 // start in the minor green directly
+	occ := []bool{false, true}
+	// Occupy past MinGreen; must not gap out while occupied.
+	for t2 := 0.0; t2 < 10; t2 += DefaultDt {
+		s.AdvanceActuated(DefaultDt, occ, occ)
+	}
+	if s.IsYellow || s.PhaseIdx != 1 {
+		t.Fatalf("gapped out while passage zone occupied: phase=%d yellow=%v", s.PhaseIdx, s.IsYellow)
+	}
+	// Clear the zone; expect termination after ~Passage seconds.
+	none := []bool{false, false}
+	elapsed := 0.0
+	for t2 := 0.0; t2 < 10; t2 += DefaultDt {
+		s.AdvanceActuated(DefaultDt, none, none)
+		elapsed += DefaultDt
+		if s.IsYellow {
+			break
+		}
+	}
+	if elapsed < actPassage-0.1 || elapsed > actPassage+0.1 {
+		t.Errorf("gap-out took %.2fs, want ~%.1fs (Passage)", elapsed, actPassage)
+	}
+}
+
+// TestActuated_MaxOut: continuous demand cannot hold a minor green past
+// MaxGreen — the side street must yield the arterial eventually.
+func TestActuated_MaxOut(t *testing.T) {
+	s := NewSignalState(actuatedCfg())
+	s.PhaseIdx = 1
+	occ := []bool{false, true} // zone occupied every tick
+	elapsed := 0.0
+	for t2 := 0.0; t2 < actMaxGreen+10; t2 += DefaultDt {
+		s.AdvanceActuated(DefaultDt, occ, occ)
+		elapsed += DefaultDt
+		if s.IsYellow {
+			break
+		}
+	}
+	if elapsed < actMaxGreen-0.1 || elapsed > actMaxGreen+0.1 {
+		t.Errorf("max-out took %.2fs, want ~%.1fs (MaxGreen)", elapsed, actMaxGreen)
+	}
+}
+
+// TestNextActuatedPhase: serve called minor phases in cyclic order; fall back
+// to the major phase when nothing is called.
+func TestNextActuatedPhase(t *testing.T) {
+	s := NewSignalState(SignalConfig{
+		Phases:     []SignalPhase{{}, {}, {}},
+		Plan:       PlanSemiActuated,
+		MajorPhase: 0,
+	})
+	if got := s.nextActuatedPhase(0, []bool{false, false, true}); got != 2 {
+		t.Errorf("from major with phase 2 called: got %d, want 2", got)
+	}
+	if got := s.nextActuatedPhase(0, []bool{false, false, false}); got != 0 {
+		t.Errorf("no calls: got %d, want major 0", got)
+	}
+	if got := s.nextActuatedPhase(2, []bool{false, true, false}); got != 1 {
+		t.Errorf("from phase 2 with phase 1 called: got %d, want 1 (wrap past major)", got)
+	}
+}
+
+// TestDefaultSignalConfig_SemiActuated: a 4-leg cross with a primary E–W axis
+// and residential N–S axis becomes semi-actuated with the arterial as major.
+func TestDefaultSignalConfig_SemiActuated(t *testing.T) {
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: 0, Y: 100}},  // N
+		{ID: 1, Pos: network.Point{X: 100, Y: 0}},  // E
+		{ID: 2, Pos: network.Point{X: 0, Y: -100}}, // S
+		{ID: 3, Pos: network.Point{X: -100, Y: 0}}, // W
+		{ID: 4, Pos: network.Point{X: 0, Y: 0}},    // center
+	}
+	mkEdge := func(id, from, to int, cls network.RoadClass) network.Edge {
+		return network.Edge{
+			ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: 100, SpeedLimit: 10, Class: cls,
+			Geometry: []network.Point{nodes[from].Pos, nodes[to].Pos},
+		}
+	}
+	net := &network.Network{
+		Nodes: nodes,
+		Edges: []network.Edge{
+			mkEdge(0, 0, 4, network.ClassResidential), // N -> C
+			mkEdge(1, 1, 4, network.ClassPrimary),     // E -> C (arterial)
+			mkEdge(2, 2, 4, network.ClassResidential), // S -> C
+			mkEdge(3, 3, 4, network.ClassPrimary),     // W -> C (arterial)
+		},
+	}
+	incoming := []network.EdgeID{0, 1, 2, 3}
+	cfg := DefaultSignalConfig(incoming, net)
+
+	if cfg.Plan != PlanSemiActuated {
+		t.Fatalf("multi-phase signal should be semi-actuated, got plan %d", cfg.Plan)
+	}
+	// The major phase must carry the primary (E/W) approaches.
+	major := cfg.Phases[cfg.MajorPhase]
+	hasPrimary := false
+	for _, pos := range major.GreenEdges {
+		if pos == 1 || pos == 3 {
+			hasPrimary = true
+		}
+	}
+	if !hasPrimary {
+		t.Errorf("major phase %d does not contain a primary approach: %v", cfg.MajorPhase, major.GreenEdges)
+	}
+	// Timings default through NewSignalState.
+	s := NewSignalState(cfg)
+	if s.Config.MinGreen != actMinGreen || s.Config.MajorMinGreen != actMajorMinGreen ||
+		s.Config.Passage != actPassage || s.Config.MaxGreen != actMaxGreen {
+		t.Errorf("actuation timings not defaulted: %+v", s.Config)
+	}
+}
+
+// TestDefaultSignalConfig_SingleLeg: a one-approach signal has nothing to
+// actuate and stays fixed-time (permanent green).
+func TestDefaultSignalConfig_SingleLeg(t *testing.T) {
+	net := &network.Network{Edges: []network.Edge{
+		{ID: 0, Geometry: []network.Point{{X: 0, Y: 0}, {X: 100, Y: 0}}},
+	}}
+	cfg := DefaultSignalConfig([]network.EdgeID{0}, net)
+	if cfg.Plan != PlanFixed {
+		t.Errorf("single-leg signal should be PlanFixed, got %d", cfg.Plan)
+	}
+}
+
 func TestParseSignalMode(t *testing.T) {
 	cases := []struct {
 		in   string

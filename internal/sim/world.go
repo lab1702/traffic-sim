@@ -16,6 +16,33 @@ type signalLast struct {
 	yellow bool
 }
 
+// detectorEdge identifies which semi-actuated signal and phase an incoming
+// edge feeds, so the per-tick detector scan can attribute a vehicle on that
+// edge to a phase's call/occupancy in O(1).
+type detectorEdge struct {
+	sigIdx   int // index into World.SignalStates
+	phaseIdx int // index into that signal's Config.Phases
+}
+
+// registerDetectorEdges records, for a semi-actuated signal, the incoming edge
+// feeding each phase. DefaultSignalConfig partitions approaches by axis, so one
+// edge feeds exactly one phase; the GreenEdges positions index x.Incoming.
+// No-op for fixed-time signals (overrides, single-phase) — they are not
+// actuated and need no detection.
+func registerDetectorEdges(det map[network.EdgeID]detectorEdge, s *SignalState, x *network.Intersection, sigIdx int) {
+	if s == nil || s.Config.Plan != PlanSemiActuated {
+		return
+	}
+	for pi := range s.Config.Phases {
+		for _, pos := range s.Config.Phases[pi].GreenEdges {
+			if pos < 0 || pos >= len(x.Incoming) {
+				continue
+			}
+			det[x.Incoming[pos]] = detectorEdge{sigIdx: sigIdx, phaseIdx: pi}
+		}
+	}
+}
+
 // ControlEvent is a runtime command from the UI to the sim. Today only
 // signal-mode changes; extend with new fields/variants as needed.
 type ControlEvent struct {
@@ -25,18 +52,23 @@ type ControlEvent struct {
 
 // World owns mutable simulation state. Only the sim goroutine touches it.
 type World struct {
-	Net     *network.Network
-	Router  *Router
-	Spawner Spawner
+	Net      *network.Network
+	Router   *Router
+	Spawner  Spawner
 	Vehicles []Vehicle
-	Tick    uint64
-	SimTime float64
-	dt      float64
+	Tick     uint64
+	SimTime  float64
+	dt       float64
 
 	nextID VehicleID
 
 	// SignalStates is indexed by IntersectionID; nil entries mean no signal.
 	SignalStates []*SignalState
+
+	// detectorEdges maps an incoming EdgeID of a semi-actuated signal to the
+	// signal-state index and phase that edge feeds. Built once in NewWorld so
+	// the per-tick detector scan only touches edges that actuate a signal.
+	detectorEdges map[network.EdgeID]detectorEdge
 
 	// xByNodeID is a NodeID -> Intersection index for O(1) lookup during tick.
 	xByNodeID map[network.NodeID]*network.Intersection
@@ -140,6 +172,7 @@ func turnSignalFor(net *network.Network, v *Vehicle) int8 {
 
 func NewWorld(net *network.Network, spawner Spawner, overrides map[network.IntersectionID]SignalConfig) *World {
 	sigs := make([]*SignalState, len(net.Intersections))
+	detectors := make(map[network.EdgeID]detectorEdge)
 	xByNode := make(map[network.NodeID]*network.Intersection, len(net.Intersections))
 	for i := range net.Intersections {
 		x := &net.Intersections[i]
@@ -158,22 +191,24 @@ func NewWorld(net *network.Network, spawner Spawner, overrides map[network.Inter
 			} else {
 				sigs[x.ID] = NewSignalState(DefaultSignalConfig(x.Incoming, net))
 			}
+			registerDetectorEdges(detectors, sigs[x.ID], x, int(x.ID))
 		}
 	}
 	return &World{
-		Net:          net,
-		Router:       NewRouter(net),
-		Spawner:      spawner,
-		dt:           DefaultDt,
-		SignalStates: sigs,
-		xByNodeID:    xByNode,
-		SnapshotBuf:  snapshot.New(),
-		EmitTrace:    func(uint64, float64, trace.Event) {},
-		rng:          rand.New(rand.NewPCG(0xCAFE, 0xBEEF)),
-		Cong:         NewCongestion(net, ewmaHalfLifeSec, DefaultDt),
-		Incidents:    make(map[network.EdgeID]Severity),
-		reverseEdge:  buildReverseEdges(net),
-		GpsShare:     1.0,
+		Net:           net,
+		Router:        NewRouter(net),
+		Spawner:       spawner,
+		dt:            DefaultDt,
+		SignalStates:  sigs,
+		detectorEdges: detectors,
+		xByNodeID:     xByNode,
+		SnapshotBuf:   snapshot.New(),
+		EmitTrace:     func(uint64, float64, trace.Event) {},
+		rng:           rand.New(rand.NewPCG(0xCAFE, 0xBEEF)),
+		Cong:          NewCongestion(net, ewmaHalfLifeSec, DefaultDt),
+		Incidents:     make(map[network.EdgeID]Severity),
+		reverseEdge:   buildReverseEdges(net),
+		GpsShare:      1.0,
 	}
 }
 
@@ -639,6 +674,48 @@ func (w *World) entitledToProceed(v *Vehicle, byEdge map[network.EdgeID][]int) b
 	return true
 }
 
+// scanDetectors computes this tick's per-phase detector inputs for every
+// semi-actuated signal. The returned slices are indexed by SignalStates index;
+// called[i]/occupied[i] are nil for nil or fixed-time signals and per-phase
+// bool slices otherwise. called[i][p] is true when some approach feeding phase
+// p has a vehicle within actCallDistance of the stop line; occupied[i][p] uses
+// actPassageDistance. Both are pure functions of vehicle positions.
+//
+// One pass over vehicles, gated by detectorEdges so only actuated approaches
+// are considered — O(vehicles) with a tiny constant, dwarfed by the IDM and
+// routing work later in the tick.
+func (w *World) scanDetectors() (called, occupied [][]bool) {
+	called = make([][]bool, len(w.SignalStates))
+	occupied = make([][]bool, len(w.SignalStates))
+	if len(w.detectorEdges) == 0 {
+		return called, occupied
+	}
+	for i, s := range w.SignalStates {
+		if s != nil && s.Config.Plan == PlanSemiActuated {
+			called[i] = make([]bool, len(s.Config.Phases))
+			occupied[i] = make([]bool, len(s.Config.Phases))
+		}
+	}
+	for vi := range w.Vehicles {
+		v := &w.Vehicles[vi]
+		if v.Despawned {
+			continue
+		}
+		de, ok := w.detectorEdges[v.Edge]
+		if !ok {
+			continue
+		}
+		d := w.Net.Edges[v.Edge].Length - v.S
+		if d <= actCallDistance {
+			called[de.sigIdx][de.phaseIdx] = true
+		}
+		if d <= actPassageDistance {
+			occupied[de.sigIdx][de.phaseIdx] = true
+		}
+	}
+	return called, occupied
+}
+
 // Step advances the sim by one tick (DefaultDt seconds).
 func (w *World) Step() {
 	// 0a. Drain any pending UI control events. Non-blocking; if the
@@ -667,9 +744,18 @@ func (w *World) Step() {
 		}
 	}
 
-	// 0b. Advance all signal phases.
-	for _, s := range w.SignalStates {
-		if s != nil {
+	// 0b. Advance all signal phases. Semi-actuated signals first need this
+	// tick's detector occupancy: for each actuated approach edge, whether a
+	// vehicle sits within the call / passage zone of the stop line. Detection
+	// is a pure function of current positions, preserving determinism.
+	called, occupied := w.scanDetectors()
+	for i, s := range w.SignalStates {
+		if s == nil {
+			continue
+		}
+		if s.Config.Plan == PlanSemiActuated {
+			s.AdvanceActuated(w.dt, called[i], occupied[i])
+		} else {
 			s.Advance(w.dt)
 		}
 	}
