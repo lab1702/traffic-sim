@@ -390,6 +390,105 @@ func TestNextActuatedPhase(t *testing.T) {
 	}
 }
 
+// TestNextActuatedPhase_NoSelfReturn: a phase that just ran must never be
+// re-selected as its own successor, even when it is the only phase still
+// called. Re-serving it would blink yellow and return to the same green,
+// never yielding to the conflicting (major) movement — the cross street is
+// starved. Regression for the "blinks yellow then back to green, cross never
+// gets through" bug.
+func TestNextActuatedPhase_NoSelfReturn(t *testing.T) {
+	// 2-phase: major=0, minor=1. In the minor green with traffic on BOTH
+	// roads (both called); after the minor ends it must go to the major,
+	// not back to itself.
+	s2 := NewSignalState(SignalConfig{
+		Phases:     []SignalPhase{{}, {}},
+		Plan:       PlanSemiActuated,
+		MajorPhase: 0,
+	})
+	if got := s2.nextActuatedPhase(1, []bool{true, true}); got != 0 {
+		t.Errorf("2-phase, minor still called: got %d, want major 0 (no self-return)", got)
+	}
+	// 3-phase: from minor phase 1, with only phase 1 still called, must fall
+	// through to the major rather than repeat phase 1.
+	s3 := NewSignalState(SignalConfig{
+		Phases:     []SignalPhase{{}, {}, {}},
+		Plan:       PlanSemiActuated,
+		MajorPhase: 0,
+	})
+	if got := s3.nextActuatedPhase(1, []bool{false, true, false}); got != 0 {
+		t.Errorf("3-phase, only current minor called: got %d, want major 0 (no self-return)", got)
+	}
+	// Even the major phase must not pick itself: from the major with no minor
+	// called, it returns the major by fallthrough (not by self-selection), and
+	// with a minor called it serves that minor.
+	if got := s3.nextActuatedPhase(0, []bool{true, false, false}); got != 0 {
+		t.Errorf("major with no minor called: got %d, want major 0", got)
+	}
+}
+
+// TestActuated_MinorYieldsToMajor_UnderSteadyDemand: with continuous demand on
+// BOTH the minor and major approaches, the minor phase must not hold green
+// forever by re-serving itself. After the minor maxes out it must hand the
+// green to the major (which then holds its own min-green). This is the
+// end-to-end form of the no-self-return bug.
+func TestActuated_MinorYieldsToMajor_UnderSteadyDemand(t *testing.T) {
+	s := NewSignalState(actuatedCfg())
+	s.PhaseIdx = 1 // start in the minor green
+	both := []bool{true, true}
+	sawMajorGreen := false
+	for t2 := 0.0; t2 < actMaxGreen+actMinGreen+30; t2 += DefaultDt {
+		s.AdvanceActuated(DefaultDt, both, both)
+		if s.PhaseIdx == 0 && !s.IsYellow {
+			sawMajorGreen = true
+			break
+		}
+	}
+	if !sawMajorGreen {
+		t.Errorf("minor phase never yielded to the major despite steady demand on both roads (self-return starvation)")
+	}
+}
+
+// TestDefaultSignalConfig_SinglePhaseHasNoYellow: a signal whose approaches all
+// fold onto one axis (a single phase) is a permanent green — it has no
+// conflicting movement to clear for. Its phase must carry YellowDur 0, or
+// Advance wraps phase 0 onto itself and the approach flashes yellow→green every
+// cycle for no reason.
+func TestDefaultSignalConfig_SinglePhaseHasNoYellow(t *testing.T) {
+	// A road passing straight through a signalized node: two collinear
+	// approaches (east- and west-bound) fold onto one axis → one phase.
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: -100, Y: 0}}, // west end
+		{ID: 1, Pos: network.Point{X: 100, Y: 0}},  // east end
+		{ID: 2, Pos: network.Point{X: 0, Y: 0}},    // signal node
+	}
+	mkEdge := func(id, from, to int) network.Edge {
+		return network.Edge{
+			ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: 100, SpeedLimit: 10,
+			Geometry: []network.Point{nodes[from].Pos, nodes[to].Pos},
+		}
+	}
+	net := &network.Network{
+		Nodes: nodes,
+		Edges: []network.Edge{mkEdge(0, 0, 2), mkEdge(1, 1, 2)},
+	}
+	cfg := DefaultSignalConfig([]network.EdgeID{0, 1}, net)
+	if len(cfg.Phases) != 1 {
+		t.Fatalf("two collinear approaches should fold to one phase, got %d", len(cfg.Phases))
+	}
+	if cfg.Phases[0].YellowDur != 0 {
+		t.Errorf("single-phase signal must have YellowDur 0 (permanent green), got %v", cfg.Phases[0].YellowDur)
+	}
+	// Advance for many cycles: it must never show yellow.
+	s := NewSignalState(cfg)
+	for t2 := 0.0; t2 < 300; t2 += DefaultDt {
+		s.Advance(DefaultDt)
+		if s.IsYellow {
+			t.Fatalf("single-phase signal flashed yellow at t=%.2f", t2)
+		}
+	}
+}
+
 // TestDefaultSignalConfig_SemiActuated: a 4-leg cross with a primary E–W axis
 // and residential N–S axis becomes semi-actuated with the arterial as major.
 func TestDefaultSignalConfig_SemiActuated(t *testing.T) {

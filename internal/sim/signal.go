@@ -265,11 +265,22 @@ func (s *SignalState) toYellow() {
 }
 
 // nextActuatedPhase returns the phase to run after the current one ends: the
-// first called minor phase in cyclic order after curr, or MajorPhase when
-// nothing is called (the controller returns to the major street and rests).
+// first called minor phase in cyclic order after curr, or MajorPhase when no
+// other minor phase is called (the controller returns to the major street and
+// rests).
+//
+// The search runs off in [1, n) — it deliberately stops before n so it never
+// wraps back to curr itself ((curr+n)%n == curr). A phase that just ran its
+// green must yield to a conflicting movement before it may run again, even if
+// it is still the only phase with a standing call: re-serving it immediately
+// would blink yellow and return to the same green, starving the cross street
+// (and defeating the minor phase's max-out, which exists precisely so a busy
+// side street cannot hold the arterial down). When curr is the lone caller the
+// loop falls through to MajorPhase, giving the major street its turn; the call
+// is served again on the next cycle.
 func (s *SignalState) nextActuatedPhase(curr int, called []bool) int {
 	n := len(s.Config.Phases)
-	for off := 1; off <= n; off++ {
+	for off := 1; off < n; off++ {
 		p := (curr + off) % n
 		if p != s.Config.MajorPhase && p < len(called) && called[p] {
 			return p
@@ -402,9 +413,15 @@ func DefaultSignalConfig(incoming []network.EdgeID, net *network.Network) Signal
 		})
 	}
 
-	// A single-axis signal (one phase) has nothing to actuate — it is a
-	// permanent green. Leave it PlanFixed.
+	// A single-axis signal (one phase) has nothing to actuate and nothing to
+	// stop for — it is a permanent green. Leave it PlanFixed, and clear the
+	// trailing yellow: with one phase, Advance wraps phase 0 back onto itself,
+	// so a non-zero YellowDur makes the approach flash yellow→green every
+	// cycle for no reason (there is no conflicting movement to clear for).
 	if len(phases) <= 1 {
+		if len(phases) == 1 {
+			phases[0].YellowDur = 0
+		}
 		return SignalConfig{Phases: phases}
 	}
 
