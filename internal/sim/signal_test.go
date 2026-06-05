@@ -262,6 +262,62 @@ func TestDefaultSignalConfig_TWithBend(t *testing.T) {
 	}
 }
 
+// TestDefaultSignalConfig_TWithSharpBend: like TestDefaultSignalConfig_TWithBend
+// but the through road kinks ~30° at the junction — well within the range real
+// OSM through roads bend, yet far enough that fixed axis buckets land the two
+// through legs in different buckets and split them into separate phases. The
+// angular-tolerance pairing must still keep both through directions on one phase
+// so they get green together instead of one direction at a time.
+func TestDefaultSignalConfig_TWithSharpBend(t *testing.T) {
+	// West leg arrives heading 0° (due east). East leg arrives heading 150°
+	// (30° off straight-opposite) — separation 150° > 135°, so they are the
+	// two ends of one through road. Stub arrives from the north (heading -90°).
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: -100, Y: 0}},   // west end
+		{ID: 1, Pos: network.Point{X: 86.6, Y: -50}}, // east end (kinked)
+		{ID: 2, Pos: network.Point{X: 0, Y: 100}},    // stub end
+		{ID: 3, Pos: network.Point{X: 0, Y: 0}},      // intersection
+	}
+	mkEdge := func(id, from, to int) network.Edge {
+		return network.Edge{
+			ID: network.EdgeID(id), From: network.NodeID(from), To: network.NodeID(to),
+			Length: 100, SpeedLimit: 10,
+			Geometry: []network.Point{nodes[from].Pos, nodes[to].Pos},
+		}
+	}
+	net := &network.Network{
+		Nodes: nodes,
+		Edges: []network.Edge{
+			mkEdge(0, 0, 3), // W -> C, arrival heading 0°
+			mkEdge(1, 1, 3), // E -> C, arrival heading 150°
+			mkEdge(2, 2, 3), // stub -> C, arrival heading -90°
+		},
+	}
+	incoming := []network.EdgeID{0, 1, 2}
+
+	cfg := DefaultSignalConfig(incoming, net)
+	if len(cfg.Phases) != 2 {
+		t.Fatalf("bent through road + stub must produce 2 phases, got %d", len(cfg.Phases))
+	}
+	phaseOf := func(pos int) int {
+		for i, p := range cfg.Phases {
+			for _, gp := range p.GreenEdges {
+				if gp == pos {
+					return i
+				}
+			}
+		}
+		return -1
+	}
+	pW, pE, pStub := phaseOf(0), phaseOf(1), phaseOf(2)
+	if pW != pE {
+		t.Errorf("bent through-road approaches (W=%d, E=%d) must share a phase", pW, pE)
+	}
+	if pW == pStub {
+		t.Errorf("stub (phase %d) must differ from through road (phase %d)", pStub, pW)
+	}
+}
+
 // actuatedCfg is a 2-phase semi-actuated config: phase 0 = major (rest),
 // phase 1 = minor (actuated). YellowDur 3s; timings default via NewSignalState.
 func actuatedCfg() SignalConfig {

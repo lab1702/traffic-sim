@@ -373,41 +373,76 @@ func DefaultSignalConfig(incoming []network.EdgeID, net *network.Network) Signal
 		}}}
 	}
 
-	// Bucket each approach by its arrival-heading folded to [0, π).
-	// Two approaches whose arrival directions differ by ~180° (opposite
-	// directions on the same road) share an axis and thus a bucket.
-	// 8 buckets = 22.5° resolution: tolerant of slight road misalignment,
-	// strict enough to keep perpendicular approaches in different phases.
+	// Group approaches into phases by pairing the two ends of each road that
+	// continues through the junction, so both directions of a through road get
+	// green together. Two legs share a phase iff they are mutually each other's
+	// most-nearly-opposite approach and their arrival headings differ by more
+	// than oppositeThreshold (135°). This is the same angular-tolerance test
+	// netbuild.resolveOpposing uses to detect through roads.
 	//
-	// The axis space is circular (0 and π are the same axis), so we
-	// snap to the nearest bucket center and wrap with `% numBuckets`.
-	// Otherwise a road with a slight bend at the intersection — e.g. a
-	// T where the through halves arrive at headings 0.01 and π - 0.01 —
-	// straddles the 0/π boundary, lands in buckets 0 and 7, and the
-	// through-road approaches wrongly get separate phases.
-	const numBuckets = 8
-	groups := make(map[int][]int)
+	// We pair by angular tolerance rather than snapping to fixed axis buckets
+	// because real through roads bend at the junction: a T whose through legs
+	// arrive at, say, 0° and 150° (a 30° kink) belongs on one axis, but fixed
+	// 22.5° buckets land those legs in different buckets and split them into
+	// separate phases — so the through road goes green one direction at a time
+	// instead of both at once. The 135° tolerance keeps a road bending up to
+	// ~45° together while still rejecting a perpendicular cross street (~90°).
+	// A leg with no opposing partner (the stub of a T) gets its own phase.
+	const oppositeThreshold = math.Pi - math.Pi/4 // 135°
+	n := len(incoming)
+	headings := make([]float64, n)
 	for j, eid := range incoming {
-		h := arrivalHeading(net, eid)
-		h = math.Mod(h, math.Pi)
-		if h < 0 {
-			h += math.Pi
+		headings[j] = arrivalHeading(net, eid)
+	}
+	// best[j] is the approach most nearly opposite j, or -1 if none is more
+	// than oppositeThreshold away.
+	best := make([]int, n)
+	for j := 0; j < n; j++ {
+		best[j] = -1
+		bestDelta := oppositeThreshold
+		for k := 0; k < n; k++ {
+			if k == j {
+				continue
+			}
+			if d := headingSeparation(headings[j], headings[k]); d > bestDelta {
+				best[j], bestDelta = k, d
+			}
 		}
-		b := int(math.Round(h*float64(numBuckets)/math.Pi)) % numBuckets
-		groups[b] = append(groups[b], j)
 	}
-
-	// Deterministic phase ordering: sort buckets ascending.
-	keys := make([]int, 0, len(groups))
-	for k := range groups {
-		keys = append(keys, k)
+	// Each leg joins its mutual most-opposite partner, else stands alone.
+	// Represent each phase by the lowest leg index in it for stable ordering.
+	rep := make([]int, n)
+	for j := 0; j < n; j++ {
+		rep[j] = j
+		if k := best[j]; k >= 0 && best[k] == j && k < j {
+			rep[j] = k
+		}
 	}
-	sort.Ints(keys)
+	order := make([]int, 0, n)
+	groups := make(map[int][]int)
+	for j := 0; j < n; j++ {
+		r := rep[j]
+		if _, ok := groups[r]; !ok {
+			order = append(order, r)
+		}
+		groups[r] = append(groups[r], j)
+	}
+	// Order phases by each group's folded arrival-heading axis (heading mod π),
+	// ascending — the same axis ordering the previous bucket scheme used, so a
+	// well-aligned cross street produces the same phase order (EW before NS).
+	axis := func(r int) float64 {
+		a := math.Mod(headings[r], math.Pi)
+		if a < 0 {
+			a += math.Pi
+		}
+		return a
+	}
+	sort.SliceStable(order, func(i, j int) bool { return axis(order[i]) < axis(order[j]) })
 
-	phases := make([]SignalPhase, 0, len(keys))
-	for _, k := range keys {
+	phases := make([]SignalPhase, 0, len(order))
+	for _, r := range order {
 		phases = append(phases, SignalPhase{
-			GreenEdges: groups[k],
+			GreenEdges: groups[r],
 			GreenDur:   30,
 			YellowDur:  3,
 		})
@@ -466,6 +501,17 @@ func majorPhase(phases []SignalPhase, incoming []network.EdgeID, net *network.Ne
 // so the call sites read tersely.
 func arrivalHeading(net *network.Network, eid network.EdgeID) float64 {
 	return network.ArrivalHeading(net, eid)
+}
+
+// headingSeparation returns the absolute angular separation between two
+// headings (radians), normalized to [0, π]. 0 = same direction, π = exactly
+// opposite (two ends of a straight road continuing through a junction).
+func headingSeparation(a, b float64) float64 {
+	d := math.Mod(math.Abs(a-b), 2*math.Pi)
+	if d > math.Pi {
+		d = 2*math.Pi - d
+	}
+	return d
 }
 
 func phaseAllPositions(n int) []int {
