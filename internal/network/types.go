@@ -94,6 +94,11 @@ type Edge struct {
 	SpeedLimit float64 // m/s
 	Width      float64 // meters (total road width)
 	Class      RoadClass
+	// Roundabout marks a circulating segment of a roundabout ring
+	// (junction=roundabout/circular). The right-of-way model gives such
+	// edges priority at ring nodes (they never stop) and makes entering
+	// approaches yield to them.
+	Roundabout bool
 	Geometry   []Point // polyline including endpoints
 }
 

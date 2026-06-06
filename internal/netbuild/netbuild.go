@@ -104,6 +104,7 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 	for _, w := range feat.Ways {
 		segs := splitAtIntersections(w, isIntersection)
 		dir := onewayDirection(w)
+		rab := isRoundabout(w)
 		hwType := highwayType(w)
 		def := defaultsFor(hwType)
 		class := classOf(hwType)
@@ -154,7 +155,7 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 				edges = append(edges, network.Edge{
 					ID: network.EdgeID(len(edges)), From: fromID, To: toID,
 					Lanes: makeLanes(lanesFwd), Length: length, SpeedLimit: speedFwd,
-					Width: width, Class: class, Geometry: geom,
+					Width: width, Class: class, Roundabout: rab, Geometry: geom,
 				})
 				osmWayOfEdge = append(osmWayOfEdge, w.ID)
 				edgeIsForward = append(edgeIsForward, true)
@@ -167,7 +168,7 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 				edges = append(edges, network.Edge{
 					ID: network.EdgeID(len(edges)), From: toID, To: fromID,
 					Lanes: makeLanes(lanesBwd), Length: length, SpeedLimit: speedBwd,
-					Width: width, Class: class, Geometry: revGeom,
+					Width: width, Class: class, Roundabout: rab, Geometry: revGeom,
 				})
 				osmWayOfEdge = append(osmWayOfEdge, w.ID)
 				// Tag as the way's "forward" for turn-lane purposes (the
@@ -180,7 +181,7 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 				edges = append(edges, network.Edge{
 					ID: network.EdgeID(len(edges)), From: fromID, To: toID,
 					Lanes: makeLanes(lanesFwd), Length: length, SpeedLimit: speedFwd,
-					Width: width, Class: class, Geometry: geom,
+					Width: width, Class: class, Roundabout: rab, Geometry: geom,
 				})
 				osmWayOfEdge = append(osmWayOfEdge, w.ID)
 				edgeIsForward = append(edgeIsForward, true)
@@ -188,7 +189,7 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 				edges = append(edges, network.Edge{
 					ID: network.EdgeID(len(edges)), From: toID, To: fromID,
 					Lanes: makeLanes(lanesBwd), Length: length, SpeedLimit: speedBwd,
-					Width: width, Class: class, Geometry: revGeom,
+					Width: width, Class: class, Roundabout: rab, Geometry: revGeom,
 				})
 				osmWayOfEdge = append(osmWayOfEdge, w.ID)
 				edgeIsForward = append(edgeIsForward, false)

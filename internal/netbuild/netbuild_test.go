@@ -483,3 +483,56 @@ func TestIsRoundabout(t *testing.T) {
 		t.Fatal("plain primary should not be a roundabout")
 	}
 }
+
+func TestBuild_RoundaboutEdgesFlaggedOneWay(t *testing.T) {
+	// Square ring of 4 nodes (1-2-3-4-1) tagged junction=roundabout, with an
+	// approach road at EACH ring node so all four ring nodes are
+	// intersections and the ring splits into four one-way segments.
+	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
+		1: mkNode(1, 40.0000, -74.0000),
+		2: mkNode(2, 40.0000, -73.9996),
+		3: mkNode(3, 40.0004, -73.9996),
+		4: mkNode(4, 40.0004, -74.0000),
+		5: mkNode(5, 39.9994, -74.0000), // approach to node 1
+		6: mkNode(6, 40.0000, -73.9990), // approach to node 2
+		7: mkNode(7, 40.0010, -73.9996), // approach to node 3
+		8: mkNode(8, 40.0004, -74.0010), // approach to node 4
+	}}
+	ring := mkWay(100, "primary", false, 1, 2, 3, 4, 1)
+	ring.Tags = append(ring.Tags, osm.Tag{Key: "junction", Value: "roundabout"})
+	feat.Ways = []*osm.Way{
+		ring,
+		mkWay(101, "secondary", false, 5, 1),
+		mkWay(102, "secondary", false, 6, 2),
+		mkWay(103, "secondary", false, 7, 3),
+		mkWay(104, "secondary", false, 8, 4),
+	}
+
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	ringCount := 0
+	for i := range net.Edges {
+		if net.Edges[i].Roundabout {
+			ringCount++
+		}
+	}
+	if ringCount != 4 {
+		t.Fatalf("expected 4 one-way ring edges, got %d", ringCount)
+	}
+	// One-way: no ring edge may have a reverse twin that is also a ring edge.
+	for i := range net.Edges {
+		e := &net.Edges[i]
+		if !e.Roundabout {
+			continue
+		}
+		for j := range net.Edges {
+			r := &net.Edges[j]
+			if r.Roundabout && r.From == e.To && r.To == e.From {
+				t.Fatalf("found a wrong-way ring edge %d->%d", r.From, r.To)
+			}
+		}
+	}
+}
