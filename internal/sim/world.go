@@ -292,6 +292,12 @@ const leftTurnGapSec = 6.0
 // impatience and GapFactor scale it the same way as the other gap constants.
 const roundaboutGapSec = 3.5
 
+// roundaboutWeaveLookahead (K) is how many ring segments before its exit a
+// vehicle begins migrating to the outer lane (lane 0). 1 means "start the
+// weave-out on the last ring segment before exiting." Tunable by viewer
+// observation.
+const roundaboutWeaveLookahead = 1
+
 const (
 	// Per-driver gap preference — Normal(1.0, gapFactorStdDev) clamped
 	// to [gapFactorMin, gapFactorMax]. Same Normal-then-clamp shape as

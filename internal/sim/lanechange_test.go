@@ -247,6 +247,56 @@ func TestRoundaboutSegmentsToExit(t *testing.T) {
 	}
 }
 
+func TestRoundaboutTargetLane(t *testing.T) {
+	twoLane := func(rab bool) network.Edge {
+		return network.Edge{Roundabout: rab, Lanes: []network.Lane{{Index: 0}, {Index: 1}}}
+	}
+	net := &network.Network{Edges: []network.Edge{
+		twoLane(false), // 0 approach
+		twoLane(true),  // 1 ring
+		twoLane(true),  // 2 ring
+		twoLane(true),  // 3 ring
+		twoLane(false), // 4 exit
+	}}
+	route := []network.EdgeID{0, 1, 2, 3, 4}
+
+	// Far from exit (3 segments, K=1) -> inner lane (highest index = 1).
+	v := &Vehicle{Edge: 1, RouteIdx: 1, Route: route}
+	if lane, ok := roundaboutTargetLane(v, net); !ok || lane != 1 {
+		t.Errorf("far from exit: got (lane=%d, ok=%v), want (1, true)", lane, ok)
+	}
+	// Within K of exit (1 segment) -> outer lane 0.
+	v = &Vehicle{Edge: 3, RouteIdx: 3, Route: route}
+	if lane, ok := roundaboutTargetLane(v, net); !ok || lane != 0 {
+		t.Errorf("at exit: got (lane=%d, ok=%v), want (0, true)", lane, ok)
+	}
+	// Not on a ring -> not applicable.
+	v = &Vehicle{Edge: 0, RouteIdx: 0, Route: route}
+	if _, ok := roundaboutTargetLane(v, net); ok {
+		t.Errorf("on approach: expected ok=false")
+	}
+}
+
+func TestRoundaboutTargetLane_HonorsTags(t *testing.T) {
+	// Ring segment whose OUTER lane (0) explicitly allows the continuation to
+	// the next ring edge (2); the tag must win over the far-from-exit
+	// heuristic (which would otherwise pick the inner lane).
+	ring := network.Edge{Roundabout: true, Lanes: []network.Lane{
+		{Index: 0, AllowedTurns: []network.EdgeID{2}},
+		{Index: 1, AllowedTurns: []network.EdgeID{99}},
+	}}
+	net := &network.Network{Edges: []network.Edge{
+		{Roundabout: false},                                // 0 approach
+		ring,                                               // 1 ring (current)
+		{Roundabout: true, Lanes: make([]network.Lane, 2)}, // 2 ring (next)
+		{Roundabout: false},                                // 3 exit
+	}}
+	v := &Vehicle{Edge: 1, RouteIdx: 1, Route: []network.EdgeID{0, 1, 2, 3}}
+	if lane, ok := roundaboutTargetLane(v, net); !ok || lane != 0 {
+		t.Errorf("tagged lane: got (lane=%d, ok=%v), want (0, true)", lane, ok)
+	}
+}
+
 // TestLaneChange_TurnBias_LastEdge_NoFire verifies bias is a no-op when
 // the current edge is the last edge of the route.
 func TestLaneChange_TurnBias_LastEdge_NoFire(t *testing.T) {

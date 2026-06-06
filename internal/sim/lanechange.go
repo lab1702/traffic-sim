@@ -227,6 +227,49 @@ func nextAheadS(idxs []int, vs []Vehicle, egoEdge network.EdgeID, egoS float64) 
 	return best, found
 }
 
+// roundaboutTargetLane returns the lane a circulating vehicle should occupy,
+// and ok=false when the vehicle is not on a multi-lane ring (so callers fall
+// back to normal lane-change logic). Policy:
+//   - tags first: if the current ring edge's lanes constrain turns via
+//     AllowedTurns, target the nearest lane that feeds the vehicle's next
+//     route edge;
+//   - otherwise heuristic by exit distance: within roundaboutWeaveLookahead
+//     segments of the exit -> outer lane 0; farther -> inner lane.
+func roundaboutTargetLane(v *Vehicle, net *network.Network) (uint8, bool) {
+	if int(v.Edge) >= len(net.Edges) {
+		return 0, false
+	}
+	edge := &net.Edges[v.Edge]
+	if !edge.Roundabout || len(edge.Lanes) < 2 {
+		return 0, false
+	}
+	nLanes := uint8(len(edge.Lanes))
+
+	// Tags first: honor AllowedTurns toward the next route edge when some lane
+	// actually constrains the turn.
+	if v.RouteIdx+1 < len(v.Route) {
+		anyConstrained := false
+		for i := range edge.Lanes {
+			if len(edge.Lanes[i].AllowedTurns) > 0 {
+				anyConstrained = true
+				break
+			}
+		}
+		if anyConstrained {
+			nextE := v.Route[v.RouteIdx+1]
+			if lane, _, ok := nearestCompatibleLane(edge.Lanes, v.Lane, nextE); ok {
+				return lane, true
+			}
+		}
+	}
+
+	// Heuristic by exit distance.
+	if roundaboutSegmentsToExit(v, net) <= roundaboutWeaveLookahead {
+		return 0, true // outer lane to exit
+	}
+	return nLanes - 1, true // inner lane while circulating
+}
+
 // roundaboutSegmentsToExit returns how many ring segments the vehicle will
 // traverse, counting from its current edge, before leaving the roundabout.
 // The exit is the first non-Roundabout edge in the remaining route. The count
