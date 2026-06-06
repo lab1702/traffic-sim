@@ -219,6 +219,34 @@ func TestLaneChange_ClosedLaneBlockedStaysPut(t *testing.T) {
 	}
 }
 
+func TestRoundaboutSegmentsToExit(t *testing.T) {
+	// Route: approach(0,non-ring) -> ring(1) -> ring(2) -> ring(3) -> exit(4,non-ring)
+	net := &network.Network{Edges: []network.Edge{
+		{ID: 0, Roundabout: false},
+		{ID: 1, Roundabout: true},
+		{ID: 2, Roundabout: true},
+		{ID: 3, Roundabout: true},
+		{ID: 4, Roundabout: false},
+	}}
+	route := []network.EdgeID{0, 1, 2, 3, 4}
+
+	// On first ring segment: 3 ring segments remain before the exit.
+	v := &Vehicle{Edge: 1, RouteIdx: 1, Route: route}
+	if got := roundaboutSegmentsToExit(v, net); got != 3 {
+		t.Errorf("on ring seg 1: got %d, want 3", got)
+	}
+	// On last ring segment: next edge is the exit, so 1.
+	v = &Vehicle{Edge: 3, RouteIdx: 3, Route: route}
+	if got := roundaboutSegmentsToExit(v, net); got != 1 {
+		t.Errorf("on ring seg 3: got %d, want 1", got)
+	}
+	// Not on a ring edge: 0 (not applicable).
+	v = &Vehicle{Edge: 0, RouteIdx: 0, Route: route}
+	if got := roundaboutSegmentsToExit(v, net); got != 0 {
+		t.Errorf("on approach: got %d, want 0", got)
+	}
+}
+
 // TestLaneChange_TurnBias_LastEdge_NoFire verifies bias is a no-op when
 // the current edge is the last edge of the route.
 func TestLaneChange_TurnBias_LastEdge_NoFire(t *testing.T) {

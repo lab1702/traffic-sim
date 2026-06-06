@@ -227,6 +227,26 @@ func nextAheadS(idxs []int, vs []Vehicle, egoEdge network.EdgeID, egoS float64) 
 	return best, found
 }
 
+// roundaboutSegmentsToExit returns how many ring segments the vehicle will
+// traverse, counting from its current edge, before leaving the roundabout.
+// The exit is the first non-Roundabout edge in the remaining route. The count
+// includes the current segment (1 == "the next edge is the exit"). Returns 0
+// when the vehicle is not currently on a ring edge.
+func roundaboutSegmentsToExit(v *Vehicle, net *network.Network) int {
+	if int(v.Edge) >= len(net.Edges) || !net.Edges[v.Edge].Roundabout {
+		return 0
+	}
+	count := 0
+	for i := v.RouteIdx; i < len(v.Route); i++ {
+		e := v.Route[i]
+		if int(e) >= len(net.Edges) || !net.Edges[e].Roundabout {
+			break
+		}
+		count++
+	}
+	return count
+}
+
 // nextBehindS returns the S of the closest live vehicle on the lane (on
 // the same edge as ego) with S < egoS. Same filtering as nextAheadS.
 func nextBehindS(idxs []int, vs []Vehicle, egoEdge network.EdgeID, egoS float64) (float64, bool) {
