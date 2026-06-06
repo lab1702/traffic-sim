@@ -16,10 +16,13 @@ const turnBiasRange = 300.0 // meters before the intersection
 // laneVehicles[lane] is a sorted-by-S slice of vehicle indices on that
 // lane of the current edge.
 //
-// Three modes:
+// Four modes:
 //   - Incident vacate: when the vehicle is in an incident's closed lane,
 //     move to an adjacent open lane as soon as a safe gap exists (takes
 //     priority over the other modes; still respects safety gaps).
+//   - Roundabout weave: on a multi-lane ring, migrate one step toward the
+//     target lane (inner while circulating, outer within K of the exit).
+//     Runs after incident-vacate and before turn bias; respects safety gaps.
 //   - Turn bias: within turnBiasRange of an intersection where v will turn,
 //     shift toward the nearest lane whose AllowedTurns includes the next
 //     route edge. Skips the speed-difference threshold but keeps safety gaps.
@@ -61,6 +64,30 @@ func tryLaneChange(v *Vehicle, vi int, laneVehicles map[uint8][]int, vs []Vehicl
 			return
 		}
 		return // blocked in the closed lane; don't fall through to normal LC
+	}
+
+	// Roundabout weave: on a multi-lane ring, migrate one step toward the
+	// target lane (inner while circulating, outer within K of the exit).
+	// Reuses the same safety-gap checks as the other modes.
+	if target, ok := roundaboutTargetLane(v, net); ok && target != v.Lane {
+		dl := int8(1)
+		if target < v.Lane {
+			dl = -1
+		}
+		nl := int(v.Lane) + int(dl)
+		if nl >= 0 && nl < int(numLanes) && nl != int(closedLane) {
+			other := laneVehicles[uint8(nl)]
+			frontS, hasFront := nextAheadS(other, vs, v.Edge, v.S)
+			rearS, hasRear := nextBehindS(other, vs, v.Edge, v.S)
+			frontOK := !hasFront || frontS-v.S-VehicleLength >= safetyGapFront
+			rearOK := !hasRear || v.S-rearS-VehicleLength >= safetyGapRear
+			if frontOK && rearOK {
+				v.Lane = uint8(nl)
+				v.LaneChangeCooldown = laneChangeCooldown
+				v.LastLCDir = dl
+			}
+		}
+		return // on a ring, the weave policy owns lane choice this tick
 	}
 
 	// --- Turn-bias context ---

@@ -297,6 +297,58 @@ func TestRoundaboutTargetLane_HonorsTags(t *testing.T) {
 	}
 }
 
+func TestTryLaneChange_RoundaboutWeavesToOuter(t *testing.T) {
+	net := &network.Network{Edges: []network.Edge{
+		{ID: 0, Roundabout: false, Length: 100, Lanes: make([]network.Lane, 2)},
+		{ID: 1, Roundabout: true, Length: 30, Lanes: make([]network.Lane, 2)},  // current ring seg
+		{ID: 2, Roundabout: false, Length: 100, Lanes: make([]network.Lane, 2)}, // exit
+	}}
+	// Inner lane (1), one ring segment from exit -> target lane 0; outer lane empty.
+	vs := []Vehicle{{Edge: 1, S: 5, V: 6, Lane: 1, RouteIdx: 1, Route: []network.EdgeID{0, 1, 2}}}
+	lanes := map[uint8][]int{1: {0}}
+	tryLaneChange(&vs[0], 0, lanes, vs, net, -1)
+	if vs[0].Lane != 0 {
+		t.Errorf("expected weave to outer lane 0, got lane %d", vs[0].Lane)
+	}
+}
+
+func TestTryLaneChange_RoundaboutMigratesInwardWhileCirculating(t *testing.T) {
+	net := &network.Network{Edges: []network.Edge{
+		{ID: 0, Roundabout: false, Length: 100, Lanes: make([]network.Lane, 2)},
+		{ID: 1, Roundabout: true, Length: 30, Lanes: make([]network.Lane, 2)},
+		{ID: 2, Roundabout: true, Length: 30, Lanes: make([]network.Lane, 2)},
+		{ID: 3, Roundabout: true, Length: 30, Lanes: make([]network.Lane, 2)},
+		{ID: 4, Roundabout: false, Length: 100, Lanes: make([]network.Lane, 2)},
+	}}
+	// 3 ring segments from exit (>K), in outer lane 0 -> target inner lane 1.
+	vs := []Vehicle{{Edge: 1, S: 5, V: 6, Lane: 0, RouteIdx: 1, Route: []network.EdgeID{0, 1, 2, 3, 4}}}
+	lanes := map[uint8][]int{0: {0}}
+	tryLaneChange(&vs[0], 0, lanes, vs, net, -1)
+	if vs[0].Lane != 1 {
+		t.Errorf("expected migrate inward to lane 1, got lane %d", vs[0].Lane)
+	}
+}
+
+func TestTryLaneChange_RoundaboutRespectsSafetyGap(t *testing.T) {
+	net := &network.Network{Edges: []network.Edge{
+		{ID: 0, Roundabout: false, Length: 100, Lanes: make([]network.Lane, 2)},
+		{ID: 1, Roundabout: true, Length: 30, Lanes: make([]network.Lane, 2)},  // current ring seg
+		{ID: 2, Roundabout: false, Length: 100, Lanes: make([]network.Lane, 2)}, // exit
+	}}
+	// Ego in inner lane 1, one seg from exit -> wants outer lane 0. But a
+	// vehicle sits just ahead in lane 0 within the front safety gap, so the
+	// weave must be rejected and ego must stay in lane 1.
+	vs := []Vehicle{
+		{ID: 1, Edge: 1, S: 5, V: 6, Lane: 1, RouteIdx: 1, Route: []network.EdgeID{0, 1, 2}},
+		{ID: 2, Edge: 1, S: 8, V: 6, Lane: 0, RouteIdx: 0, Route: []network.EdgeID{1, 2}}, // blocker ahead in lane 0
+	}
+	lanes := map[uint8][]int{1: {0}, 0: {1}}
+	tryLaneChange(&vs[0], 0, lanes, vs, net, -1)
+	if vs[0].Lane != 1 {
+		t.Errorf("weave into an occupied (unsafe) lane must be rejected; ego moved to lane %d", vs[0].Lane)
+	}
+}
+
 // TestLaneChange_TurnBias_LastEdge_NoFire verifies bias is a no-op when
 // the current edge is the last edge of the route.
 func TestLaneChange_TurnBias_LastEdge_NoFire(t *testing.T) {
