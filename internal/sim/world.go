@@ -285,6 +285,19 @@ const gapThresholdSec = 3.0
 // left-turn maneuver takes longer to execute. Literature: 6–8s.
 const leftTurnGapSec = 6.0
 
+// roundaboutGapSec is the minimum ETA of circulating traffic a vehicle
+// accepts before entering a roundabout. Entry critical gaps run ~3-4 s;
+// slightly above the straight-crossing gapThresholdSec because entering a
+// moving ring is less forgiving. Applied via effectiveGap, so WaitTime
+// impatience and GapFactor scale it the same way as the other gap constants.
+const roundaboutGapSec = 3.5
+
+// roundaboutWeaveLookahead (K) is how many ring segments before its exit a
+// vehicle begins migrating to the outer lane (lane 0). 1 means "start the
+// weave-out on the last ring segment before exiting." Tunable by viewer
+// observation.
+const roundaboutWeaveLookahead = 1
+
 const (
 	// Per-driver gap preference — Normal(1.0, gapFactorStdDev) clamped
 	// to [gapFactorMin, gapFactorMax]. Same Normal-then-clamp shape as
@@ -505,6 +518,10 @@ func (w *World) yieldGapCheck(v *Vehicle, x *network.Intersection, myPos int,
 			continue
 		}
 		otherEdge := &w.Net.Edges[x.Incoming[j]]
+		baseGap := gapThresholdSec
+		if otherEdge.Roundabout {
+			baseGap = roundaboutGapSec
+		}
 		for _, oi := range others {
 			ov := &w.Vehicles[oi]
 			d := otherEdge.Length - ov.S
@@ -512,7 +529,7 @@ func (w *World) yieldGapCheck(v *Vehicle, x *network.Intersection, myPos int,
 			if ovV < 0.5 {
 				ovV = 0.5
 			}
-			if d/ovV < effectiveGap(v, gapThresholdSec) {
+			if d/ovV < effectiveGap(v, baseGap) {
 				return myDist, true
 			}
 		}

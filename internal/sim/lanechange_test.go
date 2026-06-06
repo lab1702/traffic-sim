@@ -219,6 +219,136 @@ func TestLaneChange_ClosedLaneBlockedStaysPut(t *testing.T) {
 	}
 }
 
+func TestRoundaboutSegmentsToExit(t *testing.T) {
+	// Route: approach(0,non-ring) -> ring(1) -> ring(2) -> ring(3) -> exit(4,non-ring)
+	net := &network.Network{Edges: []network.Edge{
+		{ID: 0, Roundabout: false},
+		{ID: 1, Roundabout: true},
+		{ID: 2, Roundabout: true},
+		{ID: 3, Roundabout: true},
+		{ID: 4, Roundabout: false},
+	}}
+	route := []network.EdgeID{0, 1, 2, 3, 4}
+
+	// On first ring segment: 3 ring segments remain before the exit.
+	v := &Vehicle{Edge: 1, RouteIdx: 1, Route: route}
+	if got := roundaboutSegmentsToExit(v, net); got != 3 {
+		t.Errorf("on ring seg 1: got %d, want 3", got)
+	}
+	// On last ring segment: next edge is the exit, so 1.
+	v = &Vehicle{Edge: 3, RouteIdx: 3, Route: route}
+	if got := roundaboutSegmentsToExit(v, net); got != 1 {
+		t.Errorf("on ring seg 3: got %d, want 1", got)
+	}
+	// Not on a ring edge: 0 (not applicable).
+	v = &Vehicle{Edge: 0, RouteIdx: 0, Route: route}
+	if got := roundaboutSegmentsToExit(v, net); got != 0 {
+		t.Errorf("on approach: got %d, want 0", got)
+	}
+}
+
+func TestRoundaboutTargetLane(t *testing.T) {
+	twoLane := func(rab bool) network.Edge {
+		return network.Edge{Roundabout: rab, Lanes: []network.Lane{{Index: 0}, {Index: 1}}}
+	}
+	net := &network.Network{Edges: []network.Edge{
+		twoLane(false), // 0 approach
+		twoLane(true),  // 1 ring
+		twoLane(true),  // 2 ring
+		twoLane(true),  // 3 ring
+		twoLane(false), // 4 exit
+	}}
+	route := []network.EdgeID{0, 1, 2, 3, 4}
+
+	// Far from exit (3 segments, K=1) -> inner lane (highest index = 1).
+	v := &Vehicle{Edge: 1, RouteIdx: 1, Route: route}
+	if lane, ok := roundaboutTargetLane(v, net); !ok || lane != 1 {
+		t.Errorf("far from exit: got (lane=%d, ok=%v), want (1, true)", lane, ok)
+	}
+	// Within K of exit (1 segment) -> outer lane 0.
+	v = &Vehicle{Edge: 3, RouteIdx: 3, Route: route}
+	if lane, ok := roundaboutTargetLane(v, net); !ok || lane != 0 {
+		t.Errorf("at exit: got (lane=%d, ok=%v), want (0, true)", lane, ok)
+	}
+	// Not on a ring -> not applicable.
+	v = &Vehicle{Edge: 0, RouteIdx: 0, Route: route}
+	if _, ok := roundaboutTargetLane(v, net); ok {
+		t.Errorf("on approach: expected ok=false")
+	}
+}
+
+func TestRoundaboutTargetLane_HonorsTags(t *testing.T) {
+	// Ring segment whose OUTER lane (0) explicitly allows the continuation to
+	// the next ring edge (2); the tag must win over the far-from-exit
+	// heuristic (which would otherwise pick the inner lane).
+	ring := network.Edge{Roundabout: true, Lanes: []network.Lane{
+		{Index: 0, AllowedTurns: []network.EdgeID{2}},
+		{Index: 1, AllowedTurns: []network.EdgeID{99}},
+	}}
+	net := &network.Network{Edges: []network.Edge{
+		{Roundabout: false},                                // 0 approach
+		ring,                                               // 1 ring (current)
+		{Roundabout: true, Lanes: make([]network.Lane, 2)}, // 2 ring (next)
+		{Roundabout: false},                                // 3 exit
+	}}
+	v := &Vehicle{Edge: 1, RouteIdx: 1, Route: []network.EdgeID{0, 1, 2, 3}}
+	if lane, ok := roundaboutTargetLane(v, net); !ok || lane != 0 {
+		t.Errorf("tagged lane: got (lane=%d, ok=%v), want (0, true)", lane, ok)
+	}
+}
+
+func TestTryLaneChange_RoundaboutWeavesToOuter(t *testing.T) {
+	net := &network.Network{Edges: []network.Edge{
+		{ID: 0, Roundabout: false, Length: 100, Lanes: make([]network.Lane, 2)},
+		{ID: 1, Roundabout: true, Length: 30, Lanes: make([]network.Lane, 2)},  // current ring seg
+		{ID: 2, Roundabout: false, Length: 100, Lanes: make([]network.Lane, 2)}, // exit
+	}}
+	// Inner lane (1), one ring segment from exit -> target lane 0; outer lane empty.
+	vs := []Vehicle{{Edge: 1, S: 5, V: 6, Lane: 1, RouteIdx: 1, Route: []network.EdgeID{0, 1, 2}}}
+	lanes := map[uint8][]int{1: {0}}
+	tryLaneChange(&vs[0], 0, lanes, vs, net, -1)
+	if vs[0].Lane != 0 {
+		t.Errorf("expected weave to outer lane 0, got lane %d", vs[0].Lane)
+	}
+}
+
+func TestTryLaneChange_RoundaboutMigratesInwardWhileCirculating(t *testing.T) {
+	net := &network.Network{Edges: []network.Edge{
+		{ID: 0, Roundabout: false, Length: 100, Lanes: make([]network.Lane, 2)},
+		{ID: 1, Roundabout: true, Length: 30, Lanes: make([]network.Lane, 2)},
+		{ID: 2, Roundabout: true, Length: 30, Lanes: make([]network.Lane, 2)},
+		{ID: 3, Roundabout: true, Length: 30, Lanes: make([]network.Lane, 2)},
+		{ID: 4, Roundabout: false, Length: 100, Lanes: make([]network.Lane, 2)},
+	}}
+	// 3 ring segments from exit (>K), in outer lane 0 -> target inner lane 1.
+	vs := []Vehicle{{Edge: 1, S: 5, V: 6, Lane: 0, RouteIdx: 1, Route: []network.EdgeID{0, 1, 2, 3, 4}}}
+	lanes := map[uint8][]int{0: {0}}
+	tryLaneChange(&vs[0], 0, lanes, vs, net, -1)
+	if vs[0].Lane != 1 {
+		t.Errorf("expected migrate inward to lane 1, got lane %d", vs[0].Lane)
+	}
+}
+
+func TestTryLaneChange_RoundaboutRespectsSafetyGap(t *testing.T) {
+	net := &network.Network{Edges: []network.Edge{
+		{ID: 0, Roundabout: false, Length: 100, Lanes: make([]network.Lane, 2)},
+		{ID: 1, Roundabout: true, Length: 30, Lanes: make([]network.Lane, 2)},  // current ring seg
+		{ID: 2, Roundabout: false, Length: 100, Lanes: make([]network.Lane, 2)}, // exit
+	}}
+	// Ego in inner lane 1, one seg from exit -> wants outer lane 0. But a
+	// vehicle sits just ahead in lane 0 within the front safety gap, so the
+	// weave must be rejected and ego must stay in lane 1.
+	vs := []Vehicle{
+		{ID: 1, Edge: 1, S: 5, V: 6, Lane: 1, RouteIdx: 1, Route: []network.EdgeID{0, 1, 2}},
+		{ID: 2, Edge: 1, S: 8, V: 6, Lane: 0, RouteIdx: 0, Route: []network.EdgeID{1, 2}}, // blocker ahead in lane 0
+	}
+	lanes := map[uint8][]int{1: {0}, 0: {1}}
+	tryLaneChange(&vs[0], 0, lanes, vs, net, -1)
+	if vs[0].Lane != 1 {
+		t.Errorf("weave into an occupied (unsafe) lane must be rejected; ego moved to lane %d", vs[0].Lane)
+	}
+}
+
 // TestLaneChange_TurnBias_LastEdge_NoFire verifies bias is a no-op when
 // the current edge is the last edge of the route.
 func TestLaneChange_TurnBias_LastEdge_NoFire(t *testing.T) {

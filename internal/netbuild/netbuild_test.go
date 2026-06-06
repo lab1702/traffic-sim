@@ -455,3 +455,147 @@ func TestBuild_ThroughWayRestriction_DirectionAware(t *testing.T) {
 			cat, network.TurnAngle(net, tr.From, tr.To))
 	}
 }
+
+func TestOnewayDirection_Roundabout(t *testing.T) {
+	rab := &osm.Way{Tags: osm.Tags{{Key: "highway", Value: "primary"}, {Key: "junction", Value: "roundabout"}}}
+	if got := onewayDirection(rab); got != onewayForward {
+		t.Fatalf("junction=roundabout: got %v, want onewayForward", got)
+	}
+	circ := &osm.Way{Tags: osm.Tags{{Key: "junction", Value: "circular"}}}
+	if got := onewayDirection(circ); got != onewayForward {
+		t.Fatalf("junction=circular: got %v, want onewayForward", got)
+	}
+	// Explicit oneway tag still wins over the junction implication.
+	twoWay := &osm.Way{Tags: osm.Tags{{Key: "junction", Value: "roundabout"}, {Key: "oneway", Value: "no"}}}
+	if got := onewayDirection(twoWay); got != onewayTwoWay {
+		t.Fatalf("roundabout + oneway=no: got %v, want onewayTwoWay", got)
+	}
+}
+
+func TestIsRoundabout(t *testing.T) {
+	if !isRoundabout(&osm.Way{Tags: osm.Tags{{Key: "junction", Value: "roundabout"}}}) {
+		t.Fatal("junction=roundabout should be a roundabout")
+	}
+	if !isRoundabout(&osm.Way{Tags: osm.Tags{{Key: "junction", Value: "circular"}}}) {
+		t.Fatal("junction=circular should be a roundabout")
+	}
+	if isRoundabout(&osm.Way{Tags: osm.Tags{{Key: "highway", Value: "primary"}}}) {
+		t.Fatal("plain primary should not be a roundabout")
+	}
+}
+
+// squareRoundaboutFeatures builds a square ring of 4 nodes (1-2-3-4-1)
+// tagged junction=roundabout, with one approach road at each ring node so
+// all four ring nodes become intersections and the ring splits into four
+// one-way segments.
+func squareRoundaboutFeatures() *osmload.Features {
+	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
+		1: mkNode(1, 40.0000, -74.0000),
+		2: mkNode(2, 40.0000, -73.9996),
+		3: mkNode(3, 40.0004, -73.9996),
+		4: mkNode(4, 40.0004, -74.0000),
+		5: mkNode(5, 39.9994, -74.0000), // approach to node 1
+		6: mkNode(6, 40.0000, -73.9990), // approach to node 2
+		7: mkNode(7, 40.0010, -73.9996), // approach to node 3
+		8: mkNode(8, 40.0004, -74.0010), // approach to node 4
+	}}
+	ring := mkWay(100, "primary", false, 1, 2, 3, 4, 1)
+	ring.Tags = append(ring.Tags, osm.Tag{Key: "junction", Value: "roundabout"})
+	feat.Ways = []*osm.Way{
+		ring,
+		mkWay(101, "secondary", false, 5, 1),
+		mkWay(102, "secondary", false, 6, 2),
+		mkWay(103, "secondary", false, 7, 3),
+		mkWay(104, "secondary", false, 8, 4),
+	}
+	return feat
+}
+
+// A junction=roundabout way tagged explicitly oneway=no is malformed (a
+// real roundabout is always one-way). It must build as a normal two-way road
+// — no edge flagged Roundabout — rather than giving both directions ring
+// priority at the node.
+func TestBuild_MalformedTwoWayRoundaboutNotFlagged(t *testing.T) {
+	feat := squareRoundaboutFeatures()
+	feat.Ways[0].Tags = append(feat.Ways[0].Tags, osm.Tag{Key: "oneway", Value: "no"})
+
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	for i := range net.Edges {
+		if net.Edges[i].Roundabout {
+			t.Errorf("malformed two-way roundabout must not flag ring edges; edge %d (%d->%d) is flagged",
+				i, net.Edges[i].From, net.Edges[i].To)
+		}
+	}
+}
+
+func TestBuild_RoundaboutEdgesFlaggedOneWay(t *testing.T) {
+	feat := squareRoundaboutFeatures()
+
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	ringCount := 0
+	for i := range net.Edges {
+		if net.Edges[i].Roundabout {
+			ringCount++
+		}
+	}
+	if ringCount != 4 {
+		t.Fatalf("expected 4 one-way ring edges, got %d", ringCount)
+	}
+	// One-way: no ring edge may have a reverse twin that is also a ring edge.
+	for i := range net.Edges {
+		e := &net.Edges[i]
+		if !e.Roundabout {
+			continue
+		}
+		for j := range net.Edges {
+			r := &net.Edges[j]
+			if r.Roundabout && r.From == e.To && r.To == e.From {
+				t.Fatalf("found a wrong-way ring edge %d->%d", r.From, r.To)
+			}
+		}
+	}
+}
+
+func TestBuild_RoundaboutControl(t *testing.T) {
+	net, _, err := Build(squareRoundaboutFeatures())
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	sawRingNode := false
+	for i := range net.Intersections {
+		x := &net.Intersections[i]
+		onRing := false
+		for _, eid := range x.Incoming {
+			if net.Edges[eid].Roundabout {
+				onRing = true
+			}
+		}
+		if !onRing {
+			continue
+		}
+		sawRingNode = true
+		for j, eid := range x.Incoming {
+			c := x.IncomingControl[j]
+			if c == network.ControlAllWayStop {
+				t.Errorf("ring node intersection %d: approach %d must not be AllWayStop", i, eid)
+			}
+			if net.Edges[eid].Roundabout {
+				if c != network.ControlNone {
+					t.Errorf("circulating edge %d: got %v, want ControlNone", eid, c)
+				}
+			} else if c != network.ControlYield {
+				t.Errorf("entering edge %d: got %v, want ControlYield", eid, c)
+			}
+		}
+	}
+	if !sawRingNode {
+		t.Fatal("expected at least one ring node in the built network")
+	}
+}

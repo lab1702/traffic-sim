@@ -9,8 +9,9 @@ import (
 
 // Hash returns a 64-bit fingerprint of the network. It covers topology
 // AND the control configuration the sim relies on: edge endpoints,
-// lengths, lane counts, speed limits, per-intersection structure, the
-// per-approach right-of-way Control values, banned turns, and HasSignal.
+// lengths, lane counts, roundabout flag, speed limits, per-intersection
+// structure, the per-approach right-of-way Control values, banned turns,
+// and HasSignal.
 //
 // Two networks built from the same OSM input by the same builder produce
 // the same hash. Any change to the topology, the lane geometry, the
@@ -51,6 +52,11 @@ func Hash(net *Network) uint64 {
 		putU(uint64(math.Round(e.Length * 1000)))
 		putU(uint64(math.Round(e.SpeedLimit * 1000)))
 		putU32(uint32(len(e.Lanes)))
+		if e.Roundabout {
+			putU8(1)
+		} else {
+			putU8(0)
+		}
 	}
 	for i := range net.Intersections {
 		x := &net.Intersections[i]

@@ -2933,6 +2933,114 @@ func TestWorld_SideStreetServedOnDemand(t *testing.T) {
 	}
 }
 
+// TestWorld_RoundaboutEntryGap: a vehicle yielding to circulating roundabout
+// traffic (Roundabout:true, ControlNone) must use roundaboutGapSec (3.5 s) as
+// its critical gap rather than gapThresholdSec (3.0 s).
+//
+// The circulating vehicle is positioned so its ETA ≈ 3.25 s — a value that
+// lies strictly BETWEEN 3.0 and 3.5. Under the old 3.0 gap the entering
+// vehicle would NOT yield (3.25 > 3.0). With roundaboutGapSec = 3.5 it MUST
+// yield (3.25 < 3.5).
+//
+// Geometry (straight W→E through the center node, mirroring the straight
+// vehicle in TestWorld_FlashRedYields to avoid the cornering speed cap):
+//
+//	    W(0) ─── C(4) ─── E(2)     (entering approach: edge 0, W→C)
+//	             │
+//	          N(3)                  (circulating ring approach: edge 1, N→C)
+//	             │
+//	          S(1)                  (ringNode, feeds edge 1)
+func TestWorld_RoundaboutEntryGap(t *testing.T) {
+	// Nodes: W(0), S(1), E(2), N(3), C(4)
+	nodes := []network.Node{
+		{ID: 0, Pos: network.Point{X: -100, Y: 0}},  // W — entering origin
+		{ID: 1, Pos: network.Point{X: 0, Y: -100}},  // S — ring node (circulating origin)
+		{ID: 2, Pos: network.Point{X: 100, Y: 0}},   // E — outbound destination
+		{ID: 3, Pos: network.Point{X: 0, Y: 100}},   // N — second outbound node (for ring exit)
+		{ID: 4, Pos: network.Point{X: 0, Y: 0}},     // C — center intersection node
+	}
+	mkEdge := func(id, from, to int, roundabout bool) network.Edge {
+		return network.Edge{
+			ID:         network.EdgeID(id),
+			From:       network.NodeID(from),
+			To:         network.NodeID(to),
+			Length:     100,
+			SpeedLimit: 10,
+			Lanes:      []network.Lane{{Index: 0}},
+			Geometry:   []network.Point{nodes[from].Pos, nodes[to].Pos},
+			Roundabout: roundabout,
+		}
+	}
+	// edge 0: W→C (entering approach, non-roundabout)
+	// edge 1: S→C (circulating ring approach, roundabout)
+	// edge 2: C→E (outbound for entering vehicle, straight through)
+	// edge 3: C→N (outbound for circulating vehicle)
+	edges := []network.Edge{
+		mkEdge(0, 0, 4, false), // entering approach
+		mkEdge(1, 1, 4, true),  // circulating ring approach
+		mkEdge(2, 4, 2, false), // outbound east (entering vehicle exits here)
+		mkEdge(3, 4, 3, false), // outbound north (circulating vehicle exits here)
+	}
+	xs := []network.Intersection{
+		{
+			ID:     0,
+			NodeID: 4,
+			// Incoming[0] = edge 0 (entering, Yield)
+			// Incoming[1] = edge 1 (circulating ring, None = priority)
+			Incoming: []network.EdgeID{0, 1},
+			IncomingControl: ctrls(
+				network.ControlYield, // entering: must yield
+				network.ControlNone,  // circulating: priority
+			),
+			Outgoing:  []network.EdgeID{2, 3},
+			HasSignal: false,
+		},
+	}
+	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+
+	// Entering vehicle: near the stop line on edge 0 (straight W→E, no corner cap).
+	// Circulating vehicle: on the ring approach (edge 1), positioned so its ETA ≈ 3.25 s.
+	//   edge length = 100, S = 67.5, V = 10 → d = 100 - 67.5 = 32.5, ETA = 32.5 / 10 = 3.25 s.
+	// 3.25 > gapThresholdSec (3.0)  → vehicle would NOT yield under old code.
+	// 3.25 < roundaboutGapSec (3.5) → vehicle MUST yield under new code.
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0, 2}, Edge: 0, S: 80, V: 10}, // entering, heading straight through
+		{ID: 2, Route: []network.EdgeID{1, 3}, Edge: 1, S: 67.5, V: 10}, // circulating ring, ETA=3.25s
+	}
+	w.nextID = 3
+
+	// Run a few ticks — enough for yield logic to engage, short enough that
+	// the circulating vehicle has not yet cleared.
+	for i := 0; i < 5; i++ {
+		w.Step()
+	}
+
+	// Find the entering vehicle by ID.
+	var entering *Vehicle
+	for i := range w.Vehicles {
+		if w.Vehicles[i].ID == 1 {
+			entering = &w.Vehicles[i]
+		}
+	}
+	if entering == nil {
+		t.Fatal("entering vehicle (ID=1) was lost unexpectedly")
+	}
+
+	// The entering vehicle must still be on its approach edge (it did not
+	// proceed through the intersection) AND must be braking (A < 0).
+	// This only holds when roundaboutGapSec (3.5) is used; under the old
+	// gapThresholdSec (3.0) the ETA of 3.25 s would be accepted and the
+	// vehicle would not brake.
+	if entering.Edge != 0 {
+		t.Errorf("entering vehicle advanced to edge %d; expected to remain on approach edge 0 (yielding to roundabout)", entering.Edge)
+	}
+	if entering.A >= 0 {
+		t.Errorf("entering vehicle A=%.3f (not braking); expected A<0 because ETA=3.25s < roundaboutGapSec=3.5s", entering.A)
+	}
+}
+
 // TestWorld_SemiActuatedDeterminism: two worlds with identical inputs produce
 // identical signal phase sequences — the detector scan must be a pure function
 // of vehicle positions (no map-iteration nondeterminism).

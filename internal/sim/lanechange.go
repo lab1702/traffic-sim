@@ -16,10 +16,13 @@ const turnBiasRange = 300.0 // meters before the intersection
 // laneVehicles[lane] is a sorted-by-S slice of vehicle indices on that
 // lane of the current edge.
 //
-// Three modes:
+// Four modes:
 //   - Incident vacate: when the vehicle is in an incident's closed lane,
 //     move to an adjacent open lane as soon as a safe gap exists (takes
 //     priority over the other modes; still respects safety gaps).
+//   - Roundabout weave: on a multi-lane ring, migrate one step toward the
+//     target lane (inner while circulating, outer within K of the exit).
+//     Runs after incident-vacate and before turn bias; respects safety gaps.
 //   - Turn bias: within turnBiasRange of an intersection where v will turn,
 //     shift toward the nearest lane whose AllowedTurns includes the next
 //     route edge. Skips the speed-difference threshold but keeps safety gaps.
@@ -61,6 +64,30 @@ func tryLaneChange(v *Vehicle, vi int, laneVehicles map[uint8][]int, vs []Vehicl
 			return
 		}
 		return // blocked in the closed lane; don't fall through to normal LC
+	}
+
+	// Roundabout weave: on a multi-lane ring, migrate one step toward the
+	// target lane (inner while circulating, outer within K of the exit).
+	// Reuses the same safety-gap checks as the other modes.
+	if target, ok := roundaboutTargetLane(v, net); ok && target != v.Lane {
+		dl := int8(1)
+		if target < v.Lane {
+			dl = -1
+		}
+		nl := int(v.Lane) + int(dl)
+		if nl >= 0 && nl < int(numLanes) && nl != int(closedLane) {
+			other := laneVehicles[uint8(nl)]
+			frontS, hasFront := nextAheadS(other, vs, v.Edge, v.S)
+			rearS, hasRear := nextBehindS(other, vs, v.Edge, v.S)
+			frontOK := !hasFront || frontS-v.S-VehicleLength >= safetyGapFront
+			rearOK := !hasRear || v.S-rearS-VehicleLength >= safetyGapRear
+			if frontOK && rearOK {
+				v.Lane = uint8(nl)
+				v.LaneChangeCooldown = laneChangeCooldown
+				v.LastLCDir = dl
+			}
+		}
+		return // on a ring, the weave policy owns lane choice this tick
 	}
 
 	// --- Turn-bias context ---
@@ -225,6 +252,69 @@ func nextAheadS(idxs []int, vs []Vehicle, egoEdge network.EdgeID, egoS float64) 
 		}
 	}
 	return best, found
+}
+
+// roundaboutTargetLane returns the lane a circulating vehicle should occupy,
+// and ok=false when the vehicle is not on a multi-lane ring (so callers fall
+// back to normal lane-change logic). Policy:
+//   - tags first: if the current ring edge's lanes constrain turns via
+//     AllowedTurns, target the nearest lane that feeds the vehicle's next
+//     route edge;
+//   - otherwise heuristic by exit distance: within roundaboutWeaveLookahead
+//     segments of the exit -> outer lane 0; farther -> inner lane.
+func roundaboutTargetLane(v *Vehicle, net *network.Network) (uint8, bool) {
+	if int(v.Edge) >= len(net.Edges) {
+		return 0, false
+	}
+	edge := &net.Edges[v.Edge]
+	if !edge.Roundabout || len(edge.Lanes) < 2 {
+		return 0, false
+	}
+	nLanes := uint8(len(edge.Lanes))
+
+	// Tags first: honor AllowedTurns toward the next route edge when some lane
+	// actually constrains the turn.
+	if v.RouteIdx+1 < len(v.Route) {
+		anyConstrained := false
+		for i := range edge.Lanes {
+			if len(edge.Lanes[i].AllowedTurns) > 0 {
+				anyConstrained = true
+				break
+			}
+		}
+		if anyConstrained {
+			nextE := v.Route[v.RouteIdx+1]
+			if lane, _, ok := nearestCompatibleLane(edge.Lanes, v.Lane, nextE); ok {
+				return lane, true
+			}
+		}
+	}
+
+	// Heuristic by exit distance.
+	if roundaboutSegmentsToExit(v, net) <= roundaboutWeaveLookahead {
+		return 0, true // outer lane to exit
+	}
+	return nLanes - 1, true // inner lane while circulating
+}
+
+// roundaboutSegmentsToExit returns how many ring segments the vehicle will
+// traverse, counting from its current edge, before leaving the roundabout.
+// The exit is the first non-Roundabout edge in the remaining route. The count
+// includes the current segment (1 == "the next edge is the exit"). Returns 0
+// when the vehicle is not currently on a ring edge.
+func roundaboutSegmentsToExit(v *Vehicle, net *network.Network) int {
+	if int(v.Edge) >= len(net.Edges) || !net.Edges[v.Edge].Roundabout {
+		return 0
+	}
+	count := 0
+	for i := v.RouteIdx; i < len(v.Route); i++ {
+		e := v.Route[i]
+		if int(e) >= len(net.Edges) || !net.Edges[e].Roundabout {
+			break
+		}
+		count++
+	}
+	return count
 }
 
 // nextBehindS returns the S of the closest live vehicle on the lane (on

@@ -104,6 +104,11 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 	for _, w := range feat.Ways {
 		segs := splitAtIntersections(w, isIntersection)
 		dir := onewayDirection(w)
+		// A real roundabout is always one-way; only flag circulating segments
+		// when the way actually built one-way. This guards malformed data
+		// (junction=roundabout + explicit oneway=no) from getting ring
+		// priority in both directions — it degrades to a normal two-way road.
+		rab := isRoundabout(w) && dir != onewayTwoWay
 		hwType := highwayType(w)
 		def := defaultsFor(hwType)
 		class := classOf(hwType)
@@ -154,7 +159,7 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 				edges = append(edges, network.Edge{
 					ID: network.EdgeID(len(edges)), From: fromID, To: toID,
 					Lanes: makeLanes(lanesFwd), Length: length, SpeedLimit: speedFwd,
-					Width: width, Class: class, Geometry: geom,
+					Width: width, Class: class, Roundabout: rab, Geometry: geom,
 				})
 				osmWayOfEdge = append(osmWayOfEdge, w.ID)
 				edgeIsForward = append(edgeIsForward, true)
@@ -167,7 +172,7 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 				edges = append(edges, network.Edge{
 					ID: network.EdgeID(len(edges)), From: toID, To: fromID,
 					Lanes: makeLanes(lanesBwd), Length: length, SpeedLimit: speedBwd,
-					Width: width, Class: class, Geometry: revGeom,
+					Width: width, Class: class, Roundabout: rab, Geometry: revGeom,
 				})
 				osmWayOfEdge = append(osmWayOfEdge, w.ID)
 				// Tag as the way's "forward" for turn-lane purposes (the
@@ -180,7 +185,7 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 				edges = append(edges, network.Edge{
 					ID: network.EdgeID(len(edges)), From: fromID, To: toID,
 					Lanes: makeLanes(lanesFwd), Length: length, SpeedLimit: speedFwd,
-					Width: width, Class: class, Geometry: geom,
+					Width: width, Class: class, Roundabout: rab, Geometry: geom,
 				})
 				osmWayOfEdge = append(osmWayOfEdge, w.ID)
 				edgeIsForward = append(edgeIsForward, true)
@@ -188,7 +193,7 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 				edges = append(edges, network.Edge{
 					ID: network.EdgeID(len(edges)), From: toID, To: fromID,
 					Lanes: makeLanes(lanesBwd), Length: length, SpeedLimit: speedBwd,
-					Width: width, Class: class, Geometry: revGeom,
+					Width: width, Class: class, Roundabout: rab, Geometry: revGeom,
 				})
 				osmWayOfEdge = append(osmWayOfEdge, w.ID)
 				edgeIsForward = append(edgeIsForward, false)
@@ -299,10 +304,22 @@ const (
 	onewayReverse
 )
 
+// isRoundabout reports whether a way is a circulating roundabout ring.
+// OSM tags these junction=roundabout (and the rarer junction=circular).
+// Such ways are implicitly one-way even with no oneway tag.
+func isRoundabout(w *osm.Way) bool {
+	for _, t := range w.Tags {
+		if t.Key == "junction" && (t.Value == "roundabout" || t.Value == "circular") {
+			return true
+		}
+	}
+	return false
+}
+
 // onewayDirection inspects the OSM way's tags and returns its directionality.
 // Recognizes the full OSM convention including `oneway=-1` and `oneway=reverse`
 // (way is one-way but traffic flows opposite to node order), plus the
-// motorway implicit-oneway rule.
+// motorway and junction=roundabout/circular implicit-oneway rules.
 func onewayDirection(w *osm.Way) onewayDir {
 	for _, t := range w.Tags {
 		if t.Key == "oneway" {
@@ -315,6 +332,12 @@ func onewayDirection(w *osm.Way) onewayDir {
 				return onewayTwoWay
 			}
 		}
+	}
+	// junction=roundabout/circular is implicitly one-way (forward) unless an
+	// explicit oneway tag above already decided. Checked before the motorway
+	// rule; both are implicit-oneway sources.
+	if isRoundabout(w) {
+		return onewayForward
 	}
 	for _, t := range w.Tags {
 		if t.Key == "highway" && t.Value == "motorway" {
