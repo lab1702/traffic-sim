@@ -91,6 +91,18 @@ func TestHash_DistinguishesControls(t *testing.T) {
 	}
 }
 
+func TestHash_RoundaboutFlagMatters(t *testing.T) {
+	base := &Network{
+		Edges: []Edge{{ID: 0, From: 0, To: 1, Length: 10, SpeedLimit: 10, Lanes: make([]Lane, 1)}},
+	}
+	withRab := &Network{
+		Edges: []Edge{{ID: 0, From: 0, To: 1, Length: 10, SpeedLimit: 10, Lanes: make([]Lane, 1), Roundabout: true}},
+	}
+	if Hash(base) == Hash(withRab) {
+		t.Fatal("Roundabout flag must change the network hash")
+	}
+}
+
 // TestHash_BannedTurnOrderIndependent: the order in which BannedTurns are
 // inserted shouldn't affect the hash — Hash sorts them internally before
 // folding into the digest. Otherwise a refactor that reorders BannedTurns
