@@ -299,10 +299,22 @@ const (
 	onewayReverse
 )
 
+// isRoundabout reports whether a way is a circulating roundabout ring.
+// OSM tags these junction=roundabout (and the rarer junction=circular).
+// Such ways are implicitly one-way even with no oneway tag.
+func isRoundabout(w *osm.Way) bool {
+	for _, t := range w.Tags {
+		if t.Key == "junction" && (t.Value == "roundabout" || t.Value == "circular") {
+			return true
+		}
+	}
+	return false
+}
+
 // onewayDirection inspects the OSM way's tags and returns its directionality.
 // Recognizes the full OSM convention including `oneway=-1` and `oneway=reverse`
 // (way is one-way but traffic flows opposite to node order), plus the
-// motorway implicit-oneway rule.
+// motorway and junction=roundabout/circular implicit-oneway rules.
 func onewayDirection(w *osm.Way) onewayDir {
 	for _, t := range w.Tags {
 		if t.Key == "oneway" {
@@ -315,6 +327,12 @@ func onewayDirection(w *osm.Way) onewayDir {
 				return onewayTwoWay
 			}
 		}
+	}
+	// junction=roundabout/circular is implicitly one-way (forward) unless an
+	// explicit oneway tag above already decided. Checked before the motorway
+	// rule; both are implicit-oneway sources.
+	if isRoundabout(w) {
+		return onewayForward
 	}
 	for _, t := range w.Tags {
 		if t.Key == "highway" && t.Value == "motorway" {

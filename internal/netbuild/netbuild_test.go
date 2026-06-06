@@ -455,3 +455,31 @@ func TestBuild_ThroughWayRestriction_DirectionAware(t *testing.T) {
 			cat, network.TurnAngle(net, tr.From, tr.To))
 	}
 }
+
+func TestOnewayDirection_Roundabout(t *testing.T) {
+	rab := &osm.Way{Tags: osm.Tags{{Key: "highway", Value: "primary"}, {Key: "junction", Value: "roundabout"}}}
+	if got := onewayDirection(rab); got != onewayForward {
+		t.Fatalf("junction=roundabout: got %v, want onewayForward", got)
+	}
+	circ := &osm.Way{Tags: osm.Tags{{Key: "junction", Value: "circular"}}}
+	if got := onewayDirection(circ); got != onewayForward {
+		t.Fatalf("junction=circular: got %v, want onewayForward", got)
+	}
+	// Explicit oneway tag still wins over the junction implication.
+	twoWay := &osm.Way{Tags: osm.Tags{{Key: "junction", Value: "roundabout"}, {Key: "oneway", Value: "no"}}}
+	if got := onewayDirection(twoWay); got != onewayTwoWay {
+		t.Fatalf("roundabout + oneway=no: got %v, want onewayTwoWay", got)
+	}
+}
+
+func TestIsRoundabout(t *testing.T) {
+	if !isRoundabout(&osm.Way{Tags: osm.Tags{{Key: "junction", Value: "roundabout"}}}) {
+		t.Fatal("junction=roundabout should be a roundabout")
+	}
+	if !isRoundabout(&osm.Way{Tags: osm.Tags{{Key: "junction", Value: "circular"}}}) {
+		t.Fatal("junction=circular should be a roundabout")
+	}
+	if isRoundabout(&osm.Way{Tags: osm.Tags{{Key: "highway", Value: "primary"}}}) {
+		t.Fatal("plain primary should not be a roundabout")
+	}
+}
