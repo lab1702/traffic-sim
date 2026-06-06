@@ -511,6 +511,26 @@ func squareRoundaboutFeatures() *osmload.Features {
 	return feat
 }
 
+// A junction=roundabout way tagged explicitly oneway=no is malformed (a
+// real roundabout is always one-way). It must build as a normal two-way road
+// — no edge flagged Roundabout — rather than giving both directions ring
+// priority at the node.
+func TestBuild_MalformedTwoWayRoundaboutNotFlagged(t *testing.T) {
+	feat := squareRoundaboutFeatures()
+	feat.Ways[0].Tags = append(feat.Ways[0].Tags, osm.Tag{Key: "oneway", Value: "no"})
+
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	for i := range net.Edges {
+		if net.Edges[i].Roundabout {
+			t.Errorf("malformed two-way roundabout must not flag ring edges; edge %d (%d->%d) is flagged",
+				i, net.Edges[i].From, net.Edges[i].To)
+		}
+	}
+}
+
 func TestBuild_RoundaboutEdgesFlaggedOneWay(t *testing.T) {
 	feat := squareRoundaboutFeatures()
 

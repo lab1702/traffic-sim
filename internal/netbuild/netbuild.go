@@ -104,7 +104,11 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 	for _, w := range feat.Ways {
 		segs := splitAtIntersections(w, isIntersection)
 		dir := onewayDirection(w)
-		rab := isRoundabout(w)
+		// A real roundabout is always one-way; only flag circulating segments
+		// when the way actually built one-way. This guards malformed data
+		// (junction=roundabout + explicit oneway=no) from getting ring
+		// priority in both directions — it degrades to a normal two-way road.
+		rab := isRoundabout(w) && dir != onewayTwoWay
 		hwType := highwayType(w)
 		def := defaultsFor(hwType)
 		class := classOf(hwType)
