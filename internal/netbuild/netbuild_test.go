@@ -484,10 +484,11 @@ func TestIsRoundabout(t *testing.T) {
 	}
 }
 
-func TestBuild_RoundaboutEdgesFlaggedOneWay(t *testing.T) {
-	// Square ring of 4 nodes (1-2-3-4-1) tagged junction=roundabout, with an
-	// approach road at EACH ring node so all four ring nodes are
-	// intersections and the ring splits into four one-way segments.
+// squareRoundaboutFeatures builds a square ring of 4 nodes (1-2-3-4-1)
+// tagged junction=roundabout, with one approach road at each ring node so
+// all four ring nodes become intersections and the ring splits into four
+// one-way segments.
+func squareRoundaboutFeatures() *osmload.Features {
 	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
 		1: mkNode(1, 40.0000, -74.0000),
 		2: mkNode(2, 40.0000, -73.9996),
@@ -507,6 +508,11 @@ func TestBuild_RoundaboutEdgesFlaggedOneWay(t *testing.T) {
 		mkWay(103, "secondary", false, 7, 3),
 		mkWay(104, "secondary", false, 8, 4),
 	}
+	return feat
+}
+
+func TestBuild_RoundaboutEdgesFlaggedOneWay(t *testing.T) {
+	feat := squareRoundaboutFeatures()
 
 	net, _, err := Build(feat)
 	if err != nil {
@@ -534,5 +540,42 @@ func TestBuild_RoundaboutEdgesFlaggedOneWay(t *testing.T) {
 				t.Fatalf("found a wrong-way ring edge %d->%d", r.From, r.To)
 			}
 		}
+	}
+}
+
+func TestBuild_RoundaboutControl(t *testing.T) {
+	net, _, err := Build(squareRoundaboutFeatures())
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	sawRingNode := false
+	for i := range net.Intersections {
+		x := &net.Intersections[i]
+		onRing := false
+		for _, eid := range x.Incoming {
+			if net.Edges[eid].Roundabout {
+				onRing = true
+			}
+		}
+		if !onRing {
+			continue
+		}
+		sawRingNode = true
+		for j, eid := range x.Incoming {
+			c := x.IncomingControl[j]
+			if c == network.ControlAllWayStop {
+				t.Errorf("ring node intersection %d: approach %d must not be AllWayStop", i, eid)
+			}
+			if net.Edges[eid].Roundabout {
+				if c != network.ControlNone {
+					t.Errorf("circulating edge %d: got %v, want ControlNone", eid, c)
+				}
+			} else if c != network.ControlYield {
+				t.Errorf("entering edge %d: got %v, want ControlYield", eid, c)
+			}
+		}
+	}
+	if !sawRingNode {
+		t.Fatal("expected at least one ring node in the built network")
 	}
 }

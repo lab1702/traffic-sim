@@ -77,6 +77,13 @@ func resolveControls(
 			continue
 		}
 
+		// Roundabout ring node: circulating priority, entries yield. Skip the
+		// class/sign chain entirely. Signalled ring nodes (rare) fall through
+		// to the normal + signal path instead.
+		if !x.HasSignal && applyRoundaboutControl(x, edges) {
+			continue
+		}
+
 		var nodeTags osm.Tags
 		var xOSMID osm.NodeID
 		if osmID, ok := osmNodeOf(x.NodeID); ok {
@@ -414,6 +421,34 @@ func applyStopAllOrMinor(x *network.Intersection, tags osm.Tags, classOfEdge fun
 			return
 		}
 	}
+}
+
+// applyRoundaboutControl handles a node on a roundabout ring: circulating
+// approaches (Roundabout edges) keep priority (ControlNone) and never stop;
+// entering approaches yield (ControlYield). Returns true if the node is on a
+// ring (has at least one incoming Roundabout edge), in which case the caller
+// must skip the normal class/sign resolution chain. The sim's yieldGapCheck
+// then makes entries yield to the circulating edge automatically, since the
+// only ControlNone approach at the node is the circulating one.
+func applyRoundaboutControl(x *network.Intersection, edges []network.Edge) bool {
+	onRing := false
+	for _, eid := range x.Incoming {
+		if int(eid) < len(edges) && edges[eid].Roundabout {
+			onRing = true
+			break
+		}
+	}
+	if !onRing {
+		return false
+	}
+	for j, eid := range x.Incoming {
+		if int(eid) < len(edges) && edges[eid].Roundabout {
+			x.IncomingControl[j] = network.ControlNone
+		} else {
+			x.IncomingControl[j] = network.ControlYield
+		}
+	}
+	return true
 }
 
 // oppositeThreshold is the minimum |Δarrival-heading| for two approaches to

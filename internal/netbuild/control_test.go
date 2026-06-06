@@ -811,6 +811,32 @@ func TestNetbuild_InteriorNodeDoesNotDowngradeAllWayStop(t *testing.T) {
 	}
 }
 
+func TestApplyRoundaboutControl(t *testing.T) {
+	edges := []network.Edge{
+		{ID: 0, Roundabout: true},  // circulating ring segment (incoming)
+		{ID: 1, Roundabout: false}, // entering approach road
+	}
+	x := &network.Intersection{
+		Incoming:        []network.EdgeID{0, 1},
+		IncomingControl: make([]network.Control, 2),
+	}
+	if !applyRoundaboutControl(x, edges) {
+		t.Fatal("expected applyRoundaboutControl to report the node as on-ring")
+	}
+	if x.IncomingControl[0] != network.ControlNone {
+		t.Errorf("circulating approach: got %v, want ControlNone", x.IncomingControl[0])
+	}
+	if x.IncomingControl[1] != network.ControlYield {
+		t.Errorf("entering approach: got %v, want ControlYield", x.IncomingControl[1])
+	}
+
+	plain := []network.Edge{{ID: 0}, {ID: 1}}
+	y := &network.Intersection{Incoming: []network.EdgeID{0, 1}, IncomingControl: make([]network.Control, 2)}
+	if applyRoundaboutControl(y, plain) {
+		t.Fatal("non-ring node should report false and not be modified")
+	}
+}
+
 // TestNetbuild_InteriorNodeClosestToXWins: an approach has TWO sign-
 // tagged interior nodes. The one geographically closer to X (the
 // intersection) wins — the walk starts at xIdx and steps toward fromIdx,
