@@ -54,6 +54,9 @@ Run with the viewer:
 > Flags must appear BEFORE the OSM path — the Go flag parser stops at
 > the first non-flag argument.
 
+`--duration` works with the viewer too: when the sim reaches it, the run
+ends and the window closes, just as a headless run exits.
+
 Run headless (research mode):
 ```
 ./trafficsim run --headless --duration 5m --spawn-rate 20 --trace run.trace extract.osm.pbf
@@ -62,11 +65,25 @@ Run headless (research mode):
 > Ctrl+C (SIGINT/SIGTERM) triggers an orderly shutdown: the trace is
 > flushed with a final `SimEnd` event before the process exits.
 
+Flag values are checked up front: `--duration` must be ≥ 0 (and > 0 with
+`--headless`), `--spawn-rate` a finite number ≥ 0, `--gps-share` in 0..1.
+NaN and infinities are rejected. If the trace file can't be written,
+flushed or closed, `trafficsim` reports the error and exits with status 1.
+
 Replay a trace:
 ```
 ./tracereplay -osm extract.osm.pbf -trace run.trace
 ./tracereplay -speed 4 -osm extract.osm.pbf -trace run.trace   # 4x playback
 ```
+
+Replay runs on a wall-clock sim clock (`-speed` must be finite and
+positive). Vehicles move along their recorded routes at each edge's speed
+limit every frame, not just when an event arrives. When the trace ends, the clock
+stops at the last recorded sim time and the final frame stays on screen.
+`tracereplay` warns if the trace was cut short (a truncated or corrupt
+file, or no final `SimEnd`), if the recorder dropped events, or if the
+trace doesn't match the `-osm` network. Vehicles whose routes use edges
+the loaded network lacks are skipped.
 
 Signal overrides (per intersection):
 ```
@@ -75,7 +92,18 @@ Signal overrides (per intersection):
 
 The YAML schema is documented inline in `configs/signals.example.yaml`.
 A missing or invalid signals file causes `trafficsim` to exit with a
-clear error rather than silently producing zero overrides.
+clear error rather than silently producing zero overrides. Invalid means:
+an unknown key (so a typo like `intersection:` can't load as intersection
+0), a non-finite or negative duration, a `green_edges` position past the
+intersection's approaches, or an approach that no phase turns green. An
+override whose `intersection_id` is out of range or unsignalled is skipped
+with a warning.
+
+`tracereplay` doesn't need the signals file. The trace records each
+signal's phase plan (`SignalPlan` events) and its initial phase, so replay
+shows the plan the run actually used, override or default. Traces from
+older builds have no plans, so replay falls back to the default plan and
+ignores phase numbers that plan doesn't have.
 
 ### Actuated signals
 

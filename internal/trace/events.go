@@ -12,6 +12,12 @@
 //	  payload: kind-specific
 //
 // All integers little-endian.
+//
+// The uint16 length caps one record at 16,380 route edges. Writer splits a
+// longer VehicleSpawn route or VehicleReroute tail into continuation
+// VehicleReroute records with the same tick, each extending the route
+// (AtIndex == the route length so far), so splicing reroutes in order
+// rebuilds the full route.
 package trace
 
 type Kind uint8
@@ -34,6 +40,8 @@ const (
 	// KindIncidentSet records that the incident on an edge was set or cleared
 	// at runtime (interactive injection in the viewer).
 	KindIncidentSet Kind = 10
+	// KindSignalPlan records which approaches each phase of a signal serves.
+	KindSignalPlan Kind = 11
 )
 
 // Event is implemented by every concrete event type.
@@ -143,6 +151,20 @@ type IncidentSet struct {
 }
 
 func (*IncidentSet) Kind() Kind { return KindIncidentSet }
+
+// SignalPlan records the phase layout of one signalled intersection, so a
+// replayer can colour its lights from SignalPhase events without rebuilding
+// the plan (which may have come from a --signals override, or from a
+// default-plan generator that has since changed). Phases[i] lists the
+// positions in Intersection.Incoming that are green in phase i. trafficsim
+// writes one per signalled intersection right after SimStart. Timings are
+// not recorded: the SignalPhase events carry them.
+type SignalPlan struct {
+	IntersectionID uint32
+	Phases         [][]uint16
+}
+
+func (*SignalPlan) Kind() Kind { return KindSignalPlan }
 
 // UnknownEvent is returned by Reader.Next when a trace contains an event
 // kind this reader doesn't recognize. The wire format's per-event `length`

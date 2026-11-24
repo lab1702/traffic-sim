@@ -845,6 +845,13 @@ func (w *World) Step() {
 	// values changed. Iterate by index (deterministic slice order).
 	if w.lastPhase == nil {
 		w.lastPhase = make([]signalLast, len(w.SignalStates))
+		// Seed with an impossible phase so every signal's initial state is
+		// emitted on the first tick: the zero value {0, false} equals a
+		// fresh SignalState, so nothing would be written until the first
+		// phase change (never, for single-phase or resting signals).
+		for i := range w.lastPhase {
+			w.lastPhase[i].idx = -1
+		}
 	}
 	if w.lastMode == nil {
 		w.lastMode = make([]SignalMode, len(w.SignalStates))

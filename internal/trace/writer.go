@@ -27,12 +27,50 @@ func (w *Writer) writeHeader() error {
 	return binary.Write(w.w, binary.LittleEndian, fileVersion)
 }
 
-// Write encodes and writes a single event.
+// maxRouteChunk is the most route edges one VehicleSpawn record can carry:
+// the payload length is a uint16 and a spawn spends 14 bytes on its fixed
+// fields before 4 bytes per edge. (A reroute's fixed fields are smaller, so
+// the same limit is safe for it.)
+const maxRouteChunk = (0xFFFF - 14) / 4 // 16380
+
+// Write encodes and writes a single event. A VehicleSpawn route or
+// VehicleReroute tail longer than one record can hold is written as several
+// records; see the package comment.
 //
 // Write does NOT buffer or own the underlying io.Writer. Callers wanting
 // crash-resilient output should wrap their *os.File in bufio.NewWriter
 // and Flush/Sync themselves on shutdown.
 func (w *Writer) Write(tick uint64, simTime float64, e Event) error {
+	switch ev := e.(type) {
+	case *VehicleSpawn:
+		if len(ev.Route) > maxRouteChunk {
+			head := *ev
+			head.Route = ev.Route[:maxRouteChunk]
+			if err := w.writeRecord(tick, simTime, &head); err != nil {
+				return err
+			}
+			return w.Write(tick, simTime, &VehicleReroute{
+				VehicleID: ev.VehicleID, AtIndex: maxRouteChunk, NewTail: ev.Route[maxRouteChunk:],
+			})
+		}
+	case *VehicleReroute:
+		if len(ev.NewTail) > maxRouteChunk {
+			head := *ev
+			head.NewTail = ev.NewTail[:maxRouteChunk]
+			if err := w.writeRecord(tick, simTime, &head); err != nil {
+				return err
+			}
+			return w.Write(tick, simTime, &VehicleReroute{
+				VehicleID: ev.VehicleID, AtIndex: ev.AtIndex + maxRouteChunk, NewTail: ev.NewTail[maxRouteChunk:],
+			})
+		}
+	}
+	return w.writeRecord(tick, simTime, e)
+}
+
+// writeRecord encodes and writes e as exactly one record. Nothing is
+// written if the event cannot be encoded.
+func (w *Writer) writeRecord(tick uint64, simTime float64, e Event) error {
 	if !w.headerWritten {
 		if err := w.writeHeader(); err != nil {
 			return err
@@ -161,6 +199,28 @@ func encodePayload(b *bytes.Buffer, e Event) error {
 		}
 		for _, eid := range ev.NewTail {
 			if err := binary.Write(b, le, eid); err != nil {
+				return err
+			}
+		}
+		return nil
+	case *SignalPlan:
+		if err := binary.Write(b, le, ev.IntersectionID); err != nil {
+			return err
+		}
+		if len(ev.Phases) > 0xFFFF {
+			return fmt.Errorf("trace SignalPlan has too many phases: %d", len(ev.Phases))
+		}
+		if err := binary.Write(b, le, uint16(len(ev.Phases))); err != nil {
+			return err
+		}
+		for _, green := range ev.Phases {
+			if len(green) > 0xFFFF {
+				return fmt.Errorf("trace SignalPlan phase has too many approaches: %d", len(green))
+			}
+			if err := binary.Write(b, le, uint16(len(green))); err != nil {
+				return err
+			}
+			if err := binary.Write(b, le, green); err != nil {
 				return err
 			}
 		}
