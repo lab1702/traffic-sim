@@ -315,35 +315,39 @@ func TestWorld_FullClose_BlocksEntryFromUpstream(t *testing.T) {
 	}
 }
 
-func TestWorld_NextEdgeFullClosed(t *testing.T) {
+// TestWorld_ClosureAhead: the GPS reroute trigger sees a road that is fully
+// blocked (a full closure, or a lane closure of a one-lane road) on the next
+// edge; TestLookahead_GPSDivertsAroundClosureBeyondShortEdge covers one
+// further ahead.
+func TestWorld_ClosureAhead(t *testing.T) {
 	net := buildRerouteGraph()
 	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
 	v := &Vehicle{Route: []network.EdgeID{0, 1}, RouteIdx: 0} // next edge is 1
 
-	if w.nextEdgeFullClosed(v) {
+	if w.closureAhead(v) {
 		t.Fatal("no incident: next edge should not be reported closed")
 	}
 	w.Incidents[1] = Slowdown
-	if w.nextEdgeFullClosed(v) {
+	if w.closureAhead(v) {
 		t.Fatal("Slowdown on next edge must not count as full close")
 	}
 	// Edge 1 has one lane: closing it closes the road.
 	w.Incidents[1] = LaneClose
-	if !w.nextEdgeFullClosed(v) {
+	if !w.closureAhead(v) {
 		t.Fatal("LaneClose on a one-lane next edge must count as full close")
 	}
 	// With two lanes, a lane closure leaves the other lane open.
 	net.Edges[1].Lanes = []network.Lane{{Index: 0}, {Index: 1}}
-	if w.nextEdgeFullClosed(v) {
+	if w.closureAhead(v) {
 		t.Fatal("LaneClose on a two-lane next edge must not count as full close")
 	}
 	w.Incidents[1] = FullClose
-	if !w.nextEdgeFullClosed(v) {
+	if !w.closureAhead(v) {
 		t.Fatal("FullClose on the next edge should be detected")
 	}
 	// On the last edge there is no next edge.
 	last := &Vehicle{Route: []network.EdgeID{0, 1}, RouteIdx: 1}
-	if w.nextEdgeFullClosed(last) {
+	if w.closureAhead(last) {
 		t.Fatal("last edge: there is no next edge to be closed")
 	}
 }

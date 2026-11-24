@@ -444,17 +444,18 @@ func TestLookahead_YellowCallSurvivesNodeBeforeLine(t *testing.T) {
 	})
 	w.SignalStates[0].IsYellow = true
 	v := &Vehicle{Route: []network.EdgeID{0, 1, 2}, Edge: 0, S: 175, V: 13.5} // 35 m from the line
-	if s := w.nextStop(v, -1); s.red || v.YellowCall != yellowGo || v.LineIdx != 1 {
-		t.Fatalf("35 m out at 13.5 m/s with 3 s of yellow: want go owned by line 1, got red=%v call=%d line=%d",
-			s.red, v.YellowCall, v.LineIdx)
+	if s := w.nextStop(v, -1); s.red || v.lineAt(1).call != yellowGo || v.YellowCall != yellowUndecided {
+		t.Fatalf("35 m out at 13.5 m/s with 3 s of yellow: want go stored for line 1, got red=%v call=%d (current-edge call %d)",
+			s.red, v.lineAt(1).call, v.YellowCall)
 	}
 	stepIDM(v, 13.5, 0, 0, false, net, DefaultIDM(), 2) // 27 m: onto the 10 m edge
-	if v.Edge != 1 || v.YellowCall != yellowGo {
-		t.Fatalf("after the node before the line: edge %d call %d, want edge 1 and the go call kept", v.Edge, v.YellowCall)
+	if v.Edge != 1 || v.YellowCall != yellowGo || len(v.linesAhead) != 0 {
+		t.Fatalf("after the node before the line: edge %d call %d memos %d, want edge 1 and the go call taken up",
+			v.Edge, v.YellowCall, len(v.linesAhead))
 	}
 	stepIDM(v, 13.5, 0, 0, false, net, DefaultIDM(), 1) // 13.5 m: across the line
-	if v.Edge != 2 || v.YellowCall != yellowUndecided || v.LineIdx != 2 {
-		t.Fatalf("after the line: edge %d call %d line %d, want edge 2, undecided, line 2", v.Edge, v.YellowCall, v.LineIdx)
+	if v.Edge != 2 || v.YellowCall != yellowUndecided {
+		t.Fatalf("after the line: edge %d call %d, want edge 2 and undecided", v.Edge, v.YellowCall)
 	}
 }
 

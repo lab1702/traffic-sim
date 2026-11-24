@@ -418,9 +418,12 @@ func effectiveControl(w *World, x *network.Intersection, myPos int) network.Cont
 // Distance is measured along the vehicle's route, so a zone reaches back past
 // a short approach edge onto the edges before it. That matters: the route
 // lookahead stops a car ~7 m before a red line, which on an approach shorter
-// than that is still on the previous edge, and a zone confined to the
-// approach edge would never see it. Each vehicle calls at most the first
-// actuated approach ahead of it, within actCallDistance.
+// than that is still on the previous edge (possibly short of another
+// junction), and a zone confined to the approach edge would never see it.
+// A vehicle calls every actuated approach within actCallDistance along its
+// route, except one more than stopLineTolMeters past a junction it has not
+// reached yet: a car still short of that junction is held, if at all, by
+// something else.
 //
 // One pass over vehicles, each walking at most actCallDistance of its route —
 // O(vehicles) with a small constant, dwarfed by the IDM and routing work later
@@ -442,13 +445,14 @@ func (w *World) scanDetectors() (called, occupied [][]bool) {
 		if v.Despawned {
 			continue
 		}
-		d := -v.S // to the start of edge e
+		d := -v.S        // to the start of edge e
+		junction := -1.0 // distance to the last junction passed in the walk, if any
 		for j, e := v.RouteIdx, v.Edge; ; {
 			dEnd := d + w.Net.Edges[e].Length // to e's stop line
 			if dEnd > actCallDistance {
 				break
 			}
-			if de, ok := w.detectorEdges[e]; ok {
+			if de, ok := w.detectorEdges[e]; ok && (junction < 0 || dEnd-junction < stopLineTolMeters) {
 				// Skip a detector whose signal is no longer semi-actuated
 				// (its state was replaced after NewWorld).
 				if c := called[de.sigIdx]; de.phaseIdx < len(c) {
@@ -457,7 +461,9 @@ func (w *World) scanDetectors() (called, occupied [][]bool) {
 						occupied[de.sigIdx][de.phaseIdx] = true
 					}
 				}
-				break
+			}
+			if w.intersectionAt(e) != nil {
+				junction = dEnd
 			}
 			j++
 			if j >= len(v.Route) {
@@ -608,17 +614,25 @@ func (w *World) Step() {
 			}
 		}
 		isRed, mustYield, mustYieldLT := stop.red, stop.yield, stop.leftTurn
+		// held: the line stopping the vehicle ends its current edge (it is
+		// in that line's queue, as before the lookahead) or the vehicle is
+		// at the line. A line elsewhere in the horizon doesn't count: it
+		// would keep a gridlocked car "waiting" for ever.
+		held := (isRed || mustYield || mustYieldLT) &&
+			(stop.j == v.RouteIdx || stop.dist < stopLineTolMeters)
+		yieldLine := stop.j
 
 		prevEdge := v.Edge
 		v0 := w.computeDesiredSpeed(v)
 		stepIDM(v, v0, lS, lV, has, w.Net, DefaultIDM(), w.dt)
 
 		// GPS rerouting fires on edge entry (a decision point) and, additionally,
-		// when the next edge ahead is fully closed (so a committed vehicle diverts
-		// around a closure rather than queuing at it). Bounded by the per-tick
-		// budget. maybeReroute self-gates on HasGPS and cooldown.
+		// when a closure lies ahead within the lookahead horizon (so a committed
+		// vehicle diverts around it rather than queuing at its entry block).
+		// Bounded by the per-tick budget. maybeReroute self-gates on HasGPS and
+		// cooldown.
 		if !v.Despawned && rerouteBudget > 0 &&
-			(v.Edge != prevEdge || (v.HasGPS && w.nextEdgeFullClosed(v))) {
+			(v.Edge != prevEdge || (v.HasGPS && w.closureAhead(v))) {
 			if w.maybeReroute(v) {
 				rerouteBudget--
 			}
@@ -632,21 +646,23 @@ func (w *World) Step() {
 		// the vehicle starts moving, so criticalGap stays below ETA
 		// and mustYield stays false. Each new line starts from a fresh
 		// WaitTime=0. Does NOT apply to red lights. The wait belongs to the
-		// line being yielded at (see claimLine); a vehicle that crossed it
-		// this tick has nothing left to wait for.
-		if v.V < stuckSpeedThresh && (mustYield || mustYieldLT) &&
-			stop.j >= v.RouteIdx && v.claimLine(stop.j) {
-			v.WaitTime += w.dt
+		// line being yielded at, and only time spent held by it counts (see
+		// held), not time queued upstream of a short approach edge. A
+		// vehicle that crossed the line this tick has nothing left to wait
+		// for (setLineAt ignores lines behind it).
+		if v.V < stuckSpeedThresh && held && !isRed {
+			ls := v.lineAt(yieldLine)
+			ls.wait += w.dt
+			v.setLineAt(yieldLine, ls)
 		}
 
 		// Stuck-vehicle guard. Defensive against sim bugs that would
 		// otherwise leave a vehicle wedged forever. Runs only when the
 		// vehicle is below the speed threshold; reuses this tick's nextStop
-		// result. A vehicle held by a line within its lookahead horizon
-		// (including one queued behind the car at the line) is waiting
-		// legitimately, not stuck.
+		// result. Only a vehicle held by its own line (see held) is waiting
+		// legitimately.
 		if !v.Despawned && v.V < stuckSpeedThresh {
-			if !isRed && !mustYield && !mustYieldLT {
+			if !held {
 				v.StuckTime += w.dt
 				if v.StuckTime > stuckTimeoutSec {
 					slog.Warn("stuck vehicle despawned",
@@ -763,18 +779,6 @@ func sortVehicleIdxByS(vs []Vehicle, idxs []int) {
 	}
 }
 
-// nextEdgeFullClosed reports whether the vehicle's next route edge exists and is
-// fully blocked (a full closure, or a lane closure of a one-lane road). Used to
-// trigger an immediate reroute and to bypass the reroute cooldown, so a GPS
-// vehicle diverts around a closure ahead of it instead of queuing at the entry
-// block. O(1); false whenever there are no incidents.
-func (w *World) nextEdgeFullClosed(v *Vehicle) bool {
-	if v.RouteIdx+1 >= len(v.Route) {
-		return false
-	}
-	return w.edgeFullyBlocked(v.Route[v.RouteIdx+1])
-}
-
 // maybeReroute re-evaluates a GPS vehicle's remaining path against live
 // congestion costs and switches to a cheaper route if one beats the current
 // remaining route by switchMargin. Called when the vehicle crosses into a new
@@ -796,9 +800,9 @@ func (w *World) maybeReroute(v *Vehicle) bool {
 	if v.RouteIdx+1 >= len(v.Route) {
 		return false // on the last edge: nothing downstream to change
 	}
-	// Bypass the cooldown when the next edge is fully closed: a committed vehicle
-	// should divert around a closure promptly rather than waiting out the cooldown.
-	if !w.nextEdgeFullClosed(v) && w.SimTime-v.LastRerouteSec < rerouteCooldownSec {
+	// Bypass the cooldown when a closure lies ahead: a committed vehicle should
+	// divert around it promptly rather than waiting out the cooldown.
+	if !w.closureAhead(v) && w.SimTime-v.LastRerouteSec < rerouteCooldownSec {
 		return false
 	}
 	v.LastRerouteSec = w.SimTime
@@ -827,10 +831,9 @@ func (w *World) maybeReroute(v *Vehicle) bool {
 		// 3-index slice caps capacity so append allocates fresh, avoiding any
 		// aliasing with the old tail.
 		v.Route = append(v.Route[:idx:idx], candidate...)
-		// Per-line state for a line on the old tail no longer applies.
-		if v.LineIdx > v.RouteIdx {
-			v.resetLine(v.RouteIdx)
-		}
+		// Per-line state for a line the new tail no longer reaches no
+		// longer applies.
+		v.dropStaleLines()
 		w.emitReroute(v, idx, candidate)
 	}
 	return true
@@ -1015,47 +1018,59 @@ func (w *World) spawnStopLine(route []network.EdgeID, lane uint8, h float64) (fl
 
 // spawnFollowersSafe reports whether every vehicle about to drive onto eid
 // can follow a newcomer entering it at S=0 at `speed` without braking harder
-// than SafeDecel. From eid's start node it walks upstream through empty edges
-// (so a short in-edge doesn't hide the traffic behind it), up to the
-// lookahead horizon of a car at eid's limit, and checks the frontmost vehicle
-// of each occupied edge whose route continues along that path onto eid.
+// than SafeDecel. It searches upstream breadth-first from eid's start node,
+// so every edge feeding the node directly is checked before anything behind
+// it, and continues through empty edges (so a short in-edge doesn't hide the
+// traffic behind it) up to the lookahead horizon of a car at eid's limit. On
+// each occupied edge it checks the frontmost vehicle, if its route continues
+// along that path onto eid. Each edge is visited once and the reverse twin
+// of the edge just walked back along is skipped (that would be a U-turn
+// onto the path). A search larger than maxSpawnUpstreamEdges refuses the
+// spawn: an unchecked follower may be right behind.
 func (w *World) spawnFollowersSafe(eid network.EdgeID, speed float64, occ *spawnOccupancy) bool {
 	p := DefaultIDM()
 	h := lookaheadHorizon(w.Net.Edges[eid].SpeedLimit * speedFactorMax)
-	budget := maxSpawnUpstreamEdges
 	// path is the route a follower must take from its next edge onto eid;
 	// dist is the distance from node to the newcomer's front bumper.
-	var safe func(node network.NodeID, path []network.EdgeID, dist float64) bool
-	safe = func(node network.NodeID, path []network.EdgeID, dist float64) bool {
-		for _, ie := range w.inEdges[node] {
-			if budget--; budget < 0 {
-				return true // bounded effort: what was checked is what counts
+	type step struct {
+		node network.NodeID
+		path []network.EdgeID
+		dist float64
+	}
+	queue := []step{{node: w.Net.Edges[eid].From, path: []network.EdgeID{eid}}}
+	visited := map[network.EdgeID]bool{eid: true}
+	budget := maxSpawnUpstreamEdges
+	for qi := 0; qi < len(queue); qi++ {
+		st := queue[qi]
+		twin, hasTwin := w.reverseEdge[st.path[0]]
+		for _, ie := range w.inEdges[st.node] {
+			if visited[ie] || (hasTwin && ie == twin) {
+				continue
 			}
-			if slicesContains(path, ie) {
-				continue // a loop back through the path
+			visited[ie] = true
+			if budget--; budget < 0 {
+				return false
 			}
 			ieLen := w.Net.Edges[ie].Length
 			if fi, has := occ.front[ie]; has {
 				u := &w.Vehicles[fi]
-				if !routeContinues(u, path) {
+				if !routeContinues(u, st.path) {
 					continue // not heading onto the spawn edge this way
 				}
-				gap := (ieLen - u.S) + dist - VehicleLength // newcomer's rear bumper is VehicleLength behind its front
+				gap := (ieLen - u.S) + st.dist - VehicleLength // newcomer's rear bumper is VehicleLength behind its front
 				if !safeToFollow(p, u.V, w.Net.Edges[ie].SpeedLimit, gap, speed) {
 					return false
 				}
 				continue
 			}
-			if dist+ieLen < h {
-				up := append([]network.EdgeID{ie}, path...)
-				if !safe(w.Net.Edges[ie].From, up, dist+ieLen) {
-					return false
-				}
+			if st.dist+ieLen < h {
+				up := make([]network.EdgeID, 0, len(st.path)+1)
+				up = append(append(up, ie), st.path...)
+				queue = append(queue, step{node: w.Net.Edges[ie].From, path: up, dist: st.dist + ieLen})
 			}
 		}
-		return true
 	}
-	return safe(w.Net.Edges[eid].From, []network.EdgeID{eid}, 0)
+	return true
 }
 
 // routeContinues reports whether u's route, after its current edge, starts
@@ -1070,15 +1085,6 @@ func routeContinues(u *Vehicle, path []network.EdgeID) bool {
 		}
 	}
 	return true
-}
-
-func slicesContains(s []network.EdgeID, e network.EdgeID) bool {
-	for _, x := range s {
-		if x == e {
-			return true
-		}
-	}
-	return false
 }
 
 // trySpawn honours a spawn request when a route exists and the origin edge
