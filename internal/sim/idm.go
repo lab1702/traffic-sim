@@ -28,6 +28,24 @@ const MaxBraking = 8.0
 // safety in case future tuning increases p.A.
 const MaxAccel = 4.0
 
+// SafeDecel is the hardest braking a vehicle may be forced into by someone
+// else's manoeuvre (a lane change cutting in, a car spawning ahead of it).
+// It's the MOBIL "b_safe" safety criterion: about half of MaxBraking, so
+// manoeuvres that would make another driver slam on the brakes are refused.
+const SafeDecel = 4.0
+
+// safeToFollow reports whether a follower at speed followerV (desired speed
+// followerV0) can sit behind a leader at speed leaderV with bumper gap `gap`
+// without IDM demanding more than SafeDecel of braking. Gaps below S0 are
+// never safe. Used to vet manoeuvres before they happen: the follower is the
+// vehicle that would have to react.
+func safeToFollow(p IDMParams, followerV, followerV0, gap, leaderV float64) bool {
+	if gap < p.S0 {
+		return false
+	}
+	return IDMAcceleration(p, followerV, followerV0, gap, followerV-leaderV) >= -SafeDecel
+}
+
 // IDMAcceleration returns the acceleration in m/s^2, clamped to a
 // physical range [-MaxBraking, +MaxAccel].
 //

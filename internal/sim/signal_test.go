@@ -441,8 +441,50 @@ func TestNextActuatedPhase(t *testing.T) {
 	if got := s.nextActuatedPhase(0, []bool{false, false, false}); got != 0 {
 		t.Errorf("no calls: got %d, want major 0", got)
 	}
-	if got := s.nextActuatedPhase(2, []bool{false, true, false}); got != 1 {
-		t.Errorf("from phase 2 with phase 1 called: got %d, want 1 (wrap past major)", got)
+	if got := s.nextActuatedPhase(1, []bool{false, false, true}); got != 2 {
+		t.Errorf("from phase 1 with phase 2 called: got %d, want 2 (next minor before major)", got)
+	}
+	// From the last minor, the cycle ends at the major even though an
+	// earlier minor is still called: wrapping past the major would starve it.
+	if got := s.nextActuatedPhase(2, []bool{false, true, false}); got != 0 {
+		t.Errorf("from phase 2 with phase 1 called: got %d, want major 0 (no wrap past major)", got)
+	}
+	// Non-zero major: cycle is 1 → 2 → 0 → 1. From 0 the next stop is the major.
+	sm := NewSignalState(SignalConfig{
+		Phases:     []SignalPhase{{}, {}, {}},
+		Plan:       PlanSemiActuated,
+		MajorPhase: 1,
+	})
+	if got := sm.nextActuatedPhase(1, []bool{true, false, true}); got != 2 {
+		t.Errorf("major=1, from major with 0 and 2 called: got %d, want 2", got)
+	}
+	if got := sm.nextActuatedPhase(2, []bool{true, false, true}); got != 0 {
+		t.Errorf("major=1, from 2 with 0 called: got %d, want 0", got)
+	}
+	if got := sm.nextActuatedPhase(0, []bool{true, false, true}); got != 1 {
+		t.Errorf("major=1, from 0 with 2 called: got %d, want major 1", got)
+	}
+}
+
+// TestActuated_ThreePhase_MajorServedUnderMinorDemand: with steady calls on
+// both minor phases of a 3-phase signal, the major must still get green every
+// cycle. Before the fix the controller alternated 1, 2, 1, 2 and the major
+// never ran.
+func TestActuated_ThreePhase_MajorServedUnderMinorDemand(t *testing.T) {
+	cfg := actuatedCfg()
+	cfg.Phases = append(cfg.Phases, SignalPhase{GreenEdges: []int{2}, YellowDur: 3})
+	s := NewSignalState(cfg)
+	s.PhaseIdx = 1 // start in a minor green
+	all := []bool{true, true, true}
+	majorGreen := 0.0
+	for t2 := 0.0; t2 < 600; t2 += DefaultDt {
+		s.AdvanceActuated(DefaultDt, all, all)
+		if s.PhaseIdx == cfg.MajorPhase && !s.IsYellow {
+			majorGreen += DefaultDt
+		}
+	}
+	if majorGreen < 60 {
+		t.Fatalf("major phase green for %.1fs of 600s under steady minor demand; want it served every cycle", majorGreen)
 	}
 }
 

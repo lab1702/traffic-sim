@@ -214,9 +214,19 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 	intersections := buildIntersections(nodes, edges, feat, osmToNet, realIntersectionNetNodes)
 
 	// 6. Prune to largest connected component.
-	nodes, edges, intersections, osmWayOfEdge, edgeIsForward, droppedComponents :=
+	nodes, edges, intersections, osmWayOfEdge, edgeIsForward, newNodeID, droppedComponents :=
 		keepLargestComponent(nodes, edges, intersections, segChains, osmWayOfEdge, edgeIsForward)
 	report.ComponentsDropped = droppedComponents
+
+	// Pruning renumbered the surviving nodes. Every later OSM-node lookup
+	// (resolveControls' node tags and approach directions, restriction via
+	// nodes, pickEdgeAt) reads osmToNet, so remap it to the new IDs and drop
+	// pruned nodes. Without this, any extract whose pruned components were
+	// numbered before kept nodes reads signs and restrictions from the wrong
+	// OSM node. realIntersectionNetNodes and segChains also hold pre-prune
+	// IDs but are consumed only by buildIntersections / keepLargestComponent
+	// above; nothing after this point reads them.
+	osmToNet = remapOSMToNet(osmToNet, newNodeID)
 
 	// 6a-bis. Sort Intersection.Incoming by source-OSM-way highway priority
 	// so the sim's "lower index = higher priority" yield rule maps to road
@@ -559,16 +569,37 @@ func buildIntersections(nodes []network.Node, edges []network.Edge,
 	return xs
 }
 
+// remapOSMToNet rewrites an OSM→network node map through a pre→post-prune
+// node renumbering. OSM nodes whose network node was pruned are dropped.
+func remapOSMToNet(osmToNet map[osm.NodeID]network.NodeID,
+	newNodeID map[network.NodeID]network.NodeID,
+) map[osm.NodeID]network.NodeID {
+	out := make(map[osm.NodeID]network.NodeID, len(newNodeID))
+	for osmID, oldID := range osmToNet {
+		if newID, ok := newNodeID[oldID]; ok {
+			out[osmID] = newID
+		}
+	}
+	return out
+}
+
 // keepLargestComponent runs an undirected BFS/Union-Find over edges and
 // retains only nodes/edges/intersections in the largest connected set.
 // segChains provides the full ordered node ID sequences for each segment so
 // interior shaping nodes (not From/To endpoints) are correctly grouped with
 // their segment's component.
-// Returns the new slices and the number of dropped components.
+//
+// When several components tie for largest, the one containing the lowest
+// node ID wins (node IDs follow input way order, so that is the component
+// listed first). This keeps the built network — and its hash — identical
+// across runs instead of depending on map iteration order.
+//
+// Returns the new slices, the old→new node ID map for surviving nodes (pruned
+// nodes are absent), and the number of dropped components.
 func keepLargestComponent(nodes []network.Node, edges []network.Edge,
 	xs []network.Intersection, segChains [][]network.NodeID,
 	osmWayOfEdge []osm.WayID, edgeIsForward []bool,
-) ([]network.Node, []network.Edge, []network.Intersection, []osm.WayID, []bool, int) {
+) ([]network.Node, []network.Edge, []network.Intersection, []osm.WayID, []bool, map[network.NodeID]network.NodeID, int) {
 	parent := make([]network.NodeID, len(nodes))
 	for i := range parent {
 		parent[i] = network.NodeID(i)
@@ -601,10 +632,14 @@ func keepLargestComponent(nodes []network.Node, edges []network.Edge,
 	for i := range nodes {
 		size[find(network.NodeID(i))]++
 	}
+	// Scan in node-ID order (not map order) and require a strictly larger
+	// size to replace the incumbent, so ties go to the component holding the
+	// lowest node ID.
 	var bestRoot network.NodeID
 	best := -1
-	for r, s := range size {
-		if s > best {
+	for i := range nodes {
+		r := find(network.NodeID(i))
+		if s := size[r]; s > best {
 			best, bestRoot = s, r
 		}
 	}
@@ -672,5 +707,5 @@ func keepLargestComponent(nodes []network.Node, edges []network.Edge,
 	if dropped < 0 {
 		dropped = 0
 	}
-	return newNodes, newEdges, newXs, newOsmWayOf, newEdgeIsForward, dropped
+	return newNodes, newEdges, newXs, newOsmWayOf, newEdgeIsForward, newNodeID, dropped
 }

@@ -53,12 +53,13 @@ func buildGridN(n int) *network.Network {
 func benchmarkTickN(b *testing.B, vehicleCount int) {
 	net := buildGridN(40) // 1600 intersections
 	w := NewWorld(net, NewRandomOD(net, 1, 0), nil)
-	// Pre-seed N vehicles by issuing spawn requests until we have enough.
+	// Pre-seed N vehicles by issuing spawn requests until we have enough
+	// (room checks skipped: this measures tick cost, not spawn physics).
 	for len(w.Vehicles) < vehicleCount {
 		w.trySpawn(SpawnRequest{
 			OriginNode: network.NodeID(len(w.Vehicles) % len(net.Nodes)),
 			DestNode:   network.NodeID((len(w.Vehicles)*7 + 3) % len(net.Nodes)),
-		})
+		}, noOccupancy())
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

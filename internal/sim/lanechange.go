@@ -5,10 +5,44 @@ import "github.com/lab1702/traffic-sim/internal/network"
 const (
 	laneChangeCheckGap = 50.0 // m: only consider LC if leader within this
 	vDiffThreshold     = 5.0  // m/s: leader must be this much slower
-	safetyGapFront     = 20.0 // m
-	safetyGapRear      = 10.0 // m
+	safetyGapFront     = 20.0 // m: minimum gap to the new leader
+	safetyGapRear      = 10.0 // m: minimum gap to the new follower
 	laneChangeCooldown = 3.0  // s
 )
+
+// laneGapSafe reports whether ego (vehicle index vi) can move into the lane
+// holding vehicles idxs without cutting anyone off. Both neighbours in the
+// target lane must clear the fixed minimum gaps AND the speed-aware MOBIL
+// safety criterion: neither ego (behind its new leader) nor the new follower
+// (behind ego) may be forced to brake harder than SafeDecel. The fixed gaps
+// alone ignore closing speed, so a slow car could pull in 10 m ahead of one
+// doing 20 m/s.
+func laneGapSafe(v *Vehicle, vi int, idxs []int, vs []Vehicle, edge *network.Edge) bool {
+	ai, bi := laneNeighbors(idxs, vs, vi, v.Edge, v.S)
+	p := DefaultIDM()
+	if ai >= 0 {
+		a := &vs[ai]
+		gap := a.S - v.S - VehicleLength
+		if gap < safetyGapFront || !safeToFollow(p, v.V, edge.SpeedLimit, gap, a.V) {
+			return false
+		}
+	}
+	if bi >= 0 {
+		b := &vs[bi]
+		gap := v.S - b.S - VehicleLength
+		if gap < safetyGapRear || !safeToFollow(p, b.V, edge.SpeedLimit, gap, v.V) {
+			return false
+		}
+	}
+	return true
+}
+
+// changeLane moves v one lane in direction dl and starts the cooldown.
+func changeLane(v *Vehicle, dl int8) {
+	v.Lane = uint8(int(v.Lane) + int(dl))
+	v.LaneChangeCooldown = laneChangeCooldown
+	v.LastLCDir = dl
+}
 
 const turnBiasRange = 300.0 // meters before the intersection
 
@@ -49,18 +83,10 @@ func tryLaneChange(v *Vehicle, vi int, laneVehicles map[uint8][]int, vs []Vehicl
 			if nl < 0 || nl >= int(numLanes) || nl == int(closedLane) { // last clause defensive: nl != closedLane here
 				continue
 			}
-			other := laneVehicles[uint8(nl)]
-			frontS, hasFront := nextAheadS(other, vs, v.Edge, v.S)
-			rearS, hasRear := nextBehindS(other, vs, v.Edge, v.S)
-			if hasFront && frontS-v.S-VehicleLength < safetyGapFront {
+			if !laneGapSafe(v, vi, laneVehicles[uint8(nl)], vs, edge) {
 				continue
 			}
-			if hasRear && v.S-rearS-VehicleLength < safetyGapRear {
-				continue
-			}
-			v.Lane = uint8(nl)
-			v.LaneChangeCooldown = laneChangeCooldown
-			v.LastLCDir = dl
+			changeLane(v, dl)
 			return
 		}
 		return // blocked in the closed lane; don't fall through to normal LC
@@ -75,17 +101,9 @@ func tryLaneChange(v *Vehicle, vi int, laneVehicles map[uint8][]int, vs []Vehicl
 			dl = -1
 		}
 		nl := int(v.Lane) + int(dl)
-		if nl >= 0 && nl < int(numLanes) && nl != int(closedLane) {
-			other := laneVehicles[uint8(nl)]
-			frontS, hasFront := nextAheadS(other, vs, v.Edge, v.S)
-			rearS, hasRear := nextBehindS(other, vs, v.Edge, v.S)
-			frontOK := !hasFront || frontS-v.S-VehicleLength >= safetyGapFront
-			rearOK := !hasRear || v.S-rearS-VehicleLength >= safetyGapRear
-			if frontOK && rearOK {
-				v.Lane = uint8(nl)
-				v.LaneChangeCooldown = laneChangeCooldown
-				v.LastLCDir = dl
-			}
+		if nl >= 0 && nl < int(numLanes) && nl != int(closedLane) &&
+			laneGapSafe(v, vi, laneVehicles[uint8(nl)], vs, edge) {
+			changeLane(v, dl)
 		}
 		return // on a ring, the weave policy owns lane choice this tick
 	}
@@ -112,18 +130,17 @@ func tryLaneChange(v *Vehicle, vi int, laneVehicles map[uint8][]int, vs []Vehicl
 		if nl < 0 || nl >= int(numLanes) {
 			return
 		}
-		other := laneVehicles[uint8(nl)]
-		frontS, hasFront := nextAheadS(other, vs, v.Edge, v.S)
-		rearS, hasRear := nextBehindS(other, vs, v.Edge, v.S)
-		if hasFront && frontS-v.S-VehicleLength < safetyGapFront {
+		// Never steer into a lane an incident has closed, even when it is the
+		// only lane allowing the next turn: the vehicle would just have to
+		// vacate it again at the obstacle. It takes the turn from where it is
+		// (the post-turn snap) instead.
+		if nl == int(closedLane) {
 			return
 		}
-		if hasRear && v.S-rearS-VehicleLength < safetyGapRear {
+		if !laneGapSafe(v, vi, laneVehicles[uint8(nl)], vs, edge) {
 			return
 		}
-		v.Lane = uint8(nl)
-		v.LaneChangeCooldown = laneChangeCooldown
-		v.LastLCDir = dl
+		changeLane(v, dl)
 		return
 	}
 
@@ -165,21 +182,16 @@ func tryLaneChange(v *Vehicle, vi int, laneVehicles map[uint8][]int, vs []Vehicl
 		if nl < 0 || nl >= int(numLanes) {
 			continue
 		}
+		if nl == int(closedLane) {
+			continue // an empty closed lane looks fast, but it ends at the obstacle
+		}
 		if turnContext && !laneAllows(edge.Lanes[nl].AllowedTurns, nextE) {
 			continue
 		}
-		other := laneVehicles[uint8(nl)]
-		frontS, hasFront := nextAheadS(other, vs, v.Edge, v.S)
-		rearS, hasRear := nextBehindS(other, vs, v.Edge, v.S)
-		if hasFront && frontS-v.S-VehicleLength < safetyGapFront {
+		if !laneGapSafe(v, vi, laneVehicles[uint8(nl)], vs, edge) {
 			continue
 		}
-		if hasRear && v.S-rearS-VehicleLength < safetyGapRear {
-			continue
-		}
-		v.Lane = uint8(nl)
-		v.LaneChangeCooldown = laneChangeCooldown
-		v.LastLCDir = dl
+		changeLane(v, dl)
 		return
 	}
 }
@@ -230,28 +242,32 @@ func nearestCompatibleLane(lanes []network.Lane, fromLane uint8, nextE network.E
 	return bestIdx, dl, true
 }
 
-// nextAheadS returns the S of the closest live vehicle on the lane (on
-// the same edge as ego) with S > egoS. Despawned vehicles and vehicles
-// that have transitioned onto the next edge earlier this tick are
-// skipped — both would otherwise produce stale S values that could
-// trigger spurious lane changes.
-func nextAheadS(idxs []int, vs []Vehicle, egoEdge network.EdgeID, egoS float64) (float64, bool) {
-	var best float64
-	found := false
+// laneNeighbors returns the indices of the closest live vehicles in a lane
+// (on ego's edge) ahead of and behind egoS, or -1 when there is none. A
+// vehicle exactly level with ego counts as ahead, so a car alongside always
+// blocks the change. Ego itself (index vi) is skipped. Despawned vehicles and
+// vehicles that have moved onto the next edge earlier this tick are skipped
+// too — both would otherwise produce stale S values that could trigger
+// spurious lane changes.
+func laneNeighbors(idxs []int, vs []Vehicle, vi int, egoEdge network.EdgeID, egoS float64) (ahead, behind int) {
+	ahead, behind = -1, -1
 	for _, i := range idxs {
+		if i == vi {
+			continue
+		}
 		v := &vs[i]
 		if v.Despawned || v.Edge != egoEdge {
 			continue
 		}
-		s := v.S
-		if s <= egoS {
-			continue
-		}
-		if !found || s < best {
-			best, found = s, true
+		if v.S >= egoS {
+			if ahead < 0 || v.S < vs[ahead].S {
+				ahead = i
+			}
+		} else if behind < 0 || v.S > vs[behind].S {
+			behind = i
 		}
 	}
-	return best, found
+	return ahead, behind
 }
 
 // roundaboutTargetLane returns the lane a circulating vehicle should occupy,
@@ -317,23 +333,27 @@ func roundaboutSegmentsToExit(v *Vehicle, net *network.Network) int {
 	return count
 }
 
-// nextBehindS returns the S of the closest live vehicle on the lane (on
-// the same edge as ego) with S < egoS. Same filtering as nextAheadS.
-func nextBehindS(idxs []int, vs []Vehicle, egoEdge network.EdgeID, egoS float64) (float64, bool) {
-	var best float64
-	found := false
-	for _, i := range idxs {
-		v := &vs[i]
-		if v.Despawned || v.Edge != egoEdge {
-			continue
-		}
-		s := v.S
-		if s >= egoS {
-			continue
-		}
-		if !found || s > best {
-			best, found = s, true
+// moveLaneBucket keeps a per-lane bucket map current after vehicle vi
+// changes lane from `from` to `to`: it leaves the old bucket and is inserted
+// into the new one in S order. Without this, two vehicles approaching an
+// empty lane from either side could both judge it free in the same tick and
+// merge into the same spot.
+func moveLaneBucket(lanes map[uint8][]int, vi int, from, to uint8, vs []Vehicle) {
+	if old := lanes[from]; old != nil {
+		for k, idx := range old {
+			if idx == vi {
+				lanes[from] = append(old[:k], old[k+1:]...)
+				break
+			}
 		}
 	}
-	return best, found
+	dst := lanes[to]
+	k := len(dst)
+	for k > 0 && vs[dst[k-1]].S > vs[vi].S {
+		k--
+	}
+	dst = append(dst, 0)
+	copy(dst[k+1:], dst[k:])
+	dst[k] = vi
+	lanes[to] = dst
 }

@@ -43,17 +43,34 @@ const (
 // edgeCost is the routing cost for an edge: congestion travel time, adjusted
 // for any incident. Used by both spawn-time routing and rerouting.
 func (w *World) edgeCost(eid network.EdgeID) float64 {
+	if w.edgeFullyBlocked(eid) {
+		return incidentFullCloseCost
+	}
 	base := w.Cong.Cost(w.Net, eid)
 	switch w.Incidents[eid] {
 	case Slowdown:
 		return base * incidentSlowdownCostMul
 	case LaneClose:
 		return base * incidentLaneCloseCostMul
-	case FullClose:
-		return incidentFullCloseCost
 	default:
 		return base
 	}
+}
+
+// edgeFullyBlocked reports whether nothing can get past edge eid: a full
+// closure, or a lane closure on a road with only one lane. Closing the only
+// lane closes the road, so it must block entry, cost like a full closure in
+// routing, and trigger GPS diversion just as FullClose does. Before this,
+// single-lane LaneClose only placed the obstacle: cars kept driving in,
+// stopped at it, and were despawned as stuck.
+func (w *World) edgeFullyBlocked(eid network.EdgeID) bool {
+	switch w.Incidents[eid] {
+	case FullClose:
+		return true
+	case LaneClose:
+		return len(w.Net.Edges[eid].Lanes) <= 1
+	}
+	return false
 }
 
 // closedLaneFor returns the closed lane index and true when the edge has a
@@ -76,23 +93,23 @@ func (w *World) closedLaneFor(eid network.EdgeID) (uint8, bool) {
 //   - The current edge is closed — a full closure (all lanes) or a lane
 //     closure of the vehicle's lane: the vehicle (already on the edge) stops at
 //     the far end.
-//   - The next route edge is a full closure: an entry block. The vehicle stops
-//     at the current edge's end (the entrance to the closed edge) so it never
-//     drives into/through it. A lane closure on the next edge is NOT blocked —
-//     its open lanes still carry traffic.
+//   - The next route edge is fully blocked (see edgeFullyBlocked): an entry
+//     block. The vehicle stops at the current edge's end (the entrance to the
+//     closed edge) so it never drives into/through it. A lane closure on a
+//     multi-lane next edge is NOT blocked — its open lanes still carry traffic.
 //
 // Mirrors stopDistanceForRed's shape so Step can fold it into the virtual-leader
 // set.
 func (w *World) incidentStopDistance(v *Vehicle) (float64, bool) {
 	sev := w.Incidents[v.Edge]
-	blocked := sev == FullClose
-	if sev == LaneClose {
+	blocked := w.edgeFullyBlocked(v.Edge)
+	if !blocked && sev == LaneClose {
 		if cl, ok := w.closedLaneFor(v.Edge); ok && v.Lane == cl {
 			blocked = true
 		}
 	}
 	if !blocked && v.RouteIdx+1 < len(v.Route) {
-		if w.Incidents[v.Route[v.RouteIdx+1]] == FullClose {
+		if w.edgeFullyBlocked(v.Route[v.RouteIdx+1]) {
 			blocked = true // entry block: don't cross into a fully-closed edge
 		}
 	}

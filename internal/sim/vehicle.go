@@ -85,6 +85,12 @@ type Vehicle struct {
 	// rerouteCooldownSec so a vehicle doesn't recompute on every short edge.
 	LastRerouteSec float64
 
+	// YellowCall is the stop-or-go decision this vehicle made for the yellow
+	// light on its current approach (yellowGo / yellowStop), or
+	// yellowUndecided. Cleared on green and on edge transition. See
+	// World.stopDistanceForRed.
+	YellowCall int8
+
 	Despawned bool
 }
 
@@ -139,6 +145,7 @@ func stepIDM(v *Vehicle, v0 float64, leaderS float64, leaderV float64, hasLeader
 		// impatience now that we've left the prior approach.
 		v.StoppedSinceSec = 0
 		v.WaitTime = 0
+		v.YellowCall = yellowUndecided
 
 		// Lane carry-over: pick the new lane based on the just-completed
 		// turn. This is both the normal post-turn carry-over AND the snap

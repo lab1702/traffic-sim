@@ -2063,7 +2063,7 @@ func TestWorld_GapFactor_Heterogeneous(t *testing.T) {
 	// requests. Use a fixed seed via the world's existing rng.
 	factors := make([]float64, 0, 200)
 	for i := 0; i < 1000 && len(factors) < 200; i++ {
-		w.trySpawn(SpawnRequest{OriginNode: 0, DestNode: 3})
+		w.trySpawn(SpawnRequest{OriginNode: 0, DestNode: 3}, noOccupancy())
 		if len(w.Vehicles) > len(factors) {
 			factors = append(factors, w.Vehicles[len(factors)].GapFactor)
 		}
@@ -3069,5 +3069,85 @@ func TestWorld_SemiActuatedDeterminism(t *testing.T) {
 		if a[i] != b[i] {
 			t.Fatalf("signal sequence diverged at tick %d: %+v vs %+v", i, a[i], b[i])
 		}
+	}
+}
+
+// TestWorld_YellowDecisionSweep: a car at 13 m/s sees a 3 s yellow from a
+// range of distances. Whatever it decides, it must either stop before the
+// line without braking harder than SafeDecel, or cross the line no later
+// than redCommitGrace into the red. Before the fix, cars 40-55 m out
+// committed, then braked at MaxBraking or crossed well into the red.
+func TestWorld_YellowDecisionSweep(t *testing.T) {
+	for d := 15.0; d <= 95; d += 5 {
+		net := buildSignalApproach(13)
+		w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+		w.SignalStates[0] = NewSignalState(SignalConfig{
+			Phases: []SignalPhase{
+				{GreenEdges: []int{0}, GreenDur: 30, YellowDur: 3},
+				{GreenEdges: nil, GreenDur: 60},
+			},
+		})
+		w.SignalStates[0].IsYellow = true
+		w.Vehicles = []Vehicle{{ID: 1, Route: []network.EdgeID{0}, Edge: 0, S: 200 - d, V: 13}}
+		w.nextID = 2
+
+		tRed, tCross, minA := -1.0, -1.0, 0.0
+		for i := 0; i < 400; i++ {
+			w.Step()
+			if tRed < 0 && w.SignalStates[0].PhaseIdx == 1 {
+				tRed = w.SimTime
+			}
+			if len(w.Vehicles) == 0 {
+				tCross = w.SimTime
+				break
+			}
+			if a := w.Vehicles[0].A; a < minA {
+				minA = a
+			}
+		}
+		if minA < -SafeDecel-0.25 {
+			t.Errorf("d=%.0f m: braked at %.2f m/s², harder than SafeDecel %.1f", d, minA, SafeDecel)
+		}
+		if tCross >= 0 && tRed >= 0 && tCross > tRed+redCommitGrace+DefaultDt {
+			t.Errorf("d=%.0f m: crossed the line %.2f s into the red (grace %.1f s)", d, tCross-tRed, redCommitGrace)
+		}
+		if tCross < 0 && w.Vehicles[0].V > stuckSpeedThresh {
+			t.Errorf("d=%.0f m: neither crossed nor stopped (V=%.2f)", d, w.Vehicles[0].V)
+		}
+	}
+}
+
+// TestWorld_YellowDecisionRemembered: once a car has chosen to stop for a
+// yellow, it keeps stopping even as the numbers that drove the choice change;
+// once it has chosen to go, the red that follows doesn't turn it back.
+func TestWorld_YellowDecisionRemembered(t *testing.T) {
+	net := buildSignalApproach(13)
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	st := NewSignalState(SignalConfig{
+		Phases: []SignalPhase{{GreenEdges: []int{0}, GreenDur: 30, YellowDur: 3}, {GreenDur: 60}},
+	})
+	w.SignalStates[0] = st
+	st.IsYellow = true
+
+	v := &Vehicle{ID: 1, Route: []network.EdgeID{0}, Edge: 0, S: 170, V: 13} // 30 m out: go
+	if _, stop := w.stopDistanceForRed(v); stop || v.YellowCall != yellowGo {
+		t.Fatalf("30 m at 13 m/s with 3 s of yellow: want go, got stop=%v call=%d", stop, v.YellowCall)
+	}
+	// Red arrives with the car 5 m from the line: it finishes the crossing.
+	st.PhaseIdx, st.IsYellow, st.Elapsed = 1, false, 0
+	v.S = 195
+	if _, stop := w.stopDistanceForRed(v); stop {
+		t.Fatalf("committed car 5 m from the line at red onset was turned back")
+	}
+	// A committed car that has been slowed far from the line must stop.
+	v.S, v.V = 150, 3
+	if _, stop := w.stopDistanceForRed(v); !stop {
+		t.Fatalf("committed car 50 m out at 3 m/s ran the red")
+	}
+	// Next green clears the decision.
+	st.PhaseIdx = 0
+	w.stopDistanceForRed(v)
+	if v.YellowCall != yellowUndecided {
+		t.Fatalf("green did not clear the yellow decision (call=%d)", v.YellowCall)
 	}
 }

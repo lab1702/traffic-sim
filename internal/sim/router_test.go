@@ -200,3 +200,102 @@ func TestRouter_RouteUnchanged(t *testing.T) {
 		}
 	}
 }
+
+// plusWithBan is the + network from TestRouter_RespectsBannedTurn: E->C->W
+// direct is banned, so the only legal way west from E is the N loop.
+func plusWithBan() *network.Network {
+	c := network.Point{X: 0, Y: 0}
+	n := network.Point{X: 0, Y: 100}
+	e := network.Point{X: 100, Y: 0}
+	w := network.Point{X: -100, Y: 0}
+	nodes := []network.Node{{ID: 0, Pos: e}, {ID: 1, Pos: w}, {ID: 2, Pos: n}, {ID: 3, Pos: c}}
+	edges := []network.Edge{
+		{ID: 0, From: 0, To: 3, Length: 100, SpeedLimit: 10, Geometry: []network.Point{e, c}}, // E->C
+		{ID: 1, From: 3, To: 1, Length: 100, SpeedLimit: 10, Geometry: []network.Point{c, w}}, // C->W
+		{ID: 2, From: 3, To: 2, Length: 100, SpeedLimit: 10, Geometry: []network.Point{c, n}}, // C->N
+		{ID: 3, From: 2, To: 3, Length: 100, SpeedLimit: 10, Geometry: []network.Point{n, c}}, // N->C
+	}
+	xs := []network.Intersection{
+		{ID: 0, NodeID: 3, Incoming: []network.EdgeID{0, 3}, Outgoing: []network.EdgeID{1, 2},
+			BannedTurns: []network.TurnRestriction{{From: 0, To: 1}}},
+	}
+	return &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
+}
+
+// TestRouter_RouteCostFrom_BanAtStartNode: a vehicle already on E->C that
+// searches from C must still obey the E->C->W ban at C. Searching from C
+// with no arrival edge would wrongly return the banned direct edge.
+func TestRouter_RouteCostFrom_BanAtStartNode(t *testing.T) {
+	net := plusWithBan()
+	r := NewRouter(net)
+	free := func(eid network.EdgeID) float64 { return net.Edges[eid].Length / net.Edges[eid].SpeedLimit }
+
+	got, err := r.RouteCostFrom(0, 3, 1, free)
+	if err != nil {
+		t.Fatalf("RouteCostFrom: %v", err)
+	}
+	want := []network.EdgeID{2, 3, 1}
+	if len(got) != len(want) {
+		t.Fatalf("want %v (N loop), got %v", want, got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("want %v (N loop), got %v", want, got)
+		}
+	}
+}
+
+// TestRouter_RouteCostFrom_NoUTurnAtStartNode: a vehicle on 0->1 heading
+// back to node 0 must not U-turn at node 1 while it has another exit; it
+// continues to the dead end at node 2 and turns there.
+func TestRouter_RouteCostFrom_NoUTurnAtStartNode(t *testing.T) {
+	p0 := network.Point{X: 0, Y: 0}
+	p1 := network.Point{X: 100, Y: 0}
+	p2 := network.Point{X: 200, Y: 0}
+	net := &network.Network{
+		Nodes: []network.Node{{ID: 0, Pos: p0}, {ID: 1, Pos: p1}, {ID: 2, Pos: p2}},
+		Edges: []network.Edge{
+			{ID: 0, From: 0, To: 1, Length: 100, SpeedLimit: 10, Geometry: []network.Point{p0, p1}},
+			{ID: 1, From: 1, To: 0, Length: 100, SpeedLimit: 10, Geometry: []network.Point{p1, p0}},
+			{ID: 2, From: 1, To: 2, Length: 100, SpeedLimit: 10, Geometry: []network.Point{p1, p2}},
+			{ID: 3, From: 2, To: 1, Length: 100, SpeedLimit: 10, Geometry: []network.Point{p2, p1}},
+		},
+	}
+	r := NewRouter(net)
+	free := func(eid network.EdgeID) float64 { return net.Edges[eid].Length / net.Edges[eid].SpeedLimit }
+
+	got, err := r.RouteCostFrom(0, 1, 0, free)
+	if err != nil {
+		t.Fatalf("RouteCostFrom: %v", err)
+	}
+	want := []network.EdgeID{2, 3, 1}
+	if len(got) != len(want) {
+		t.Fatalf("want %v (turn at dead end), got %v", want, got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("want %v (turn at dead end), got %v", want, got)
+		}
+	}
+}
+
+// TestMaybeReroute_DoesNotTakeBannedTurn: end-to-end form of the start-node
+// ban. A GPS vehicle on E->C whose route takes the legal N loop must not be
+// rerouted onto the banned direct turn, however much cheaper it looks.
+func TestMaybeReroute_DoesNotTakeBannedTurn(t *testing.T) {
+	net := plusWithBan()
+	w := NewWorld(net, nil, nil)
+	v := Vehicle{
+		ID: 1, Route: []network.EdgeID{0, 2, 3, 1}, Edge: 0, S: 50, V: 10,
+		HasGPS: true, DestNode: 1, LastRerouteSec: -1000,
+	}
+	if !w.maybeReroute(&v) {
+		t.Fatalf("maybeReroute did not run")
+	}
+	want := []network.EdgeID{0, 2, 3, 1}
+	for i := range want {
+		if i >= len(v.Route) || v.Route[i] != want[i] {
+			t.Fatalf("route rerouted through banned turn: got %v, want %v", v.Route, want)
+		}
+	}
+}

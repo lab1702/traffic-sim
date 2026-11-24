@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/lab1702/traffic-sim/internal/network"
+	"github.com/lab1702/traffic-sim/internal/osmload"
+	"github.com/paulmach/osm"
 )
 
 func TestParseTurnLaneToken(t *testing.T) {
@@ -191,8 +193,10 @@ func TestAssignAllowedTurnsForEdge_GeometricFallback_ThreeLanes(t *testing.T) {
 
 func TestAssignAllowedTurnsForEdge_OSMOverride(t *testing.T) {
 	net := buildTestIntersection(2)
-	// OSM says lane 0 = through+right, lane 1 = left only.
-	spec := parseTurnLanesString("through;right|left")
+	// OSM lists turn:lanes from LEFT to RIGHT in the direction of travel:
+	// leftmost lane = left only, rightmost lane = through+right. Lane 0 is
+	// the rightmost (curb) lane, so lane 0 = through+right, lane 1 = left.
+	spec := parseTurnLanesString("left|through;right")
 	allowed := assignAllowedTurnsForEdge(net, 0, &net.Intersections[0], spec)
 
 	if !containsEdge(allowed[0], 1) || !containsEdge(allowed[0], 2) {
@@ -204,6 +208,92 @@ func TestAssignAllowedTurnsForEdge_OSMOverride(t *testing.T) {
 	if containsEdge(allowed[1], 2) {
 		t.Errorf("lane 1 should NOT have straight (2) per explicit OSM, got %v", allowed[1])
 	}
+}
+
+// TestAssignAllowedTurnsForEdge_OSMOrderIsLeftToRight: a 3-lane approach
+// tagged turn:lanes=left|through|right (OSM order: leftmost lane first).
+// Lane 0 is the rightmost lane, so it must get the right turn and lane 2 the
+// left turn — not the other way round.
+func TestAssignAllowedTurnsForEdge_OSMOrderIsLeftToRight(t *testing.T) {
+	net := buildTestIntersection(3)
+	spec := parseTurnLanesString("left|through|right")
+	allowed := assignAllowedTurnsForEdge(net, 0, &net.Intersections[0], spec)
+
+	want := [][]network.EdgeID{{1}, {2}, {3}} // right, straight, left
+	if !reflect.DeepEqual(allowed, want) {
+		t.Errorf("per-lane AllowedTurns = %v, want %v (lane 0 = rightmost = right turn)", allowed, want)
+	}
+}
+
+// TestBuild_TurnLanesForwardBackward_LeftToRight: a two-way primary (2 lanes
+// each way) crossing another primary, with different turn:lanes:forward and
+// turn:lanes:backward. Each direction's spec is listed left-to-right relative
+// to ITS OWN direction of travel, and lane 0 is the rightmost lane of each
+// edge, so both directions are reversed when copied into Lanes.
+func TestBuild_TurnLanesForwardBackward_LeftToRight(t *testing.T) {
+	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
+		1: mkNode(1, 40.0000, -74.0010), // W
+		2: mkNode(2, 40.0010, -74.0005), // N
+		3: mkNode(3, 40.0000, -74.0000), // E
+		4: mkNode(4, 39.9990, -74.0005), // S
+		5: mkNode(5, 40.0000, -74.0005), // junction
+	}}
+	ew := mkWay(10, "primary", false, 1, 5, 3) // forward = eastbound
+	ew.Tags = append(ew.Tags,
+		osm.Tag{Key: "lanes", Value: "4"},
+		// Eastbound: left lane turns left (N); right lane goes through or right (S).
+		osm.Tag{Key: "turn:lanes:forward", Value: "left|through;right"},
+		// Westbound: left lane turns left (S) or goes through; right lane turns right (N).
+		osm.Tag{Key: "turn:lanes:backward", Value: "left;through|right"},
+	)
+	feat.Ways = []*osm.Way{ew, mkWay(20, "primary", false, 2, 5, 4)}
+
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	osmToNetT := make(map[osm.NodeID]network.NodeID)
+	for nid, oid := range buildNetToOSM(net, feat) {
+		osmToNetT[oid] = nid
+	}
+	edgeBetween := func(from, to osm.NodeID) network.EdgeID {
+		t.Helper()
+		for _, e := range net.Edges {
+			if e.From == osmToNetT[from] && e.To == osmToNetT[to] {
+				return e.ID
+			}
+		}
+		t.Fatalf("no edge %d->%d", from, to)
+		return 0
+	}
+	toN, toE, toS, toW := edgeBetween(5, 2), edgeBetween(5, 3), edgeBetween(5, 4), edgeBetween(5, 1)
+
+	check := func(name string, in network.EdgeID, want [][]network.EdgeID) {
+		t.Helper()
+		lanes := net.Edges[in].Lanes
+		if len(lanes) != len(want) {
+			t.Fatalf("%s: want %d lanes, got %d", name, len(want), len(lanes))
+		}
+		for i := range want {
+			got := lanes[i].AllowedTurns
+			if len(got) != len(want[i]) {
+				t.Errorf("%s lane %d: AllowedTurns = %v, want %v", name, i, got, want[i])
+				continue
+			}
+			for _, e := range want[i] {
+				if !containsEdge(got, e) {
+					t.Errorf("%s lane %d: AllowedTurns = %v, want %v", name, i, got, want[i])
+					break
+				}
+			}
+		}
+	}
+	// Eastbound (forward): lane 0 (rightmost, south side) = through + right(S);
+	// lane 1 (leftmost) = left(N) only.
+	check("eastbound", edgeBetween(1, 5), [][]network.EdgeID{{toE, toS}, {toN}})
+	// Westbound (backward): lane 0 (rightmost, north side) = right(N) only;
+	// lane 1 (leftmost) = left(S) + through(W).
+	check("westbound", edgeBetween(3, 5), [][]network.EdgeID{{toN}, {toS, toW}})
 }
 
 func TestAssignAllowedTurnsForEdge_BannedTurnExcluded(t *testing.T) {

@@ -312,3 +312,25 @@ func TestComputeDesiredSpeed_GentleBendGate(t *testing.T) {
 		t.Errorf("60° bend (above gate) should slow: got v0=%.3f, want < 11.2", got)
 	}
 }
+
+// TestComputeDesiredSpeed_ExactUTurnSlows: a U-turn onto the reverse twin has
+// exactly reversed geometry, so the sample points coincide and the
+// circumradius is infinite. It must still be treated as the tightest corner
+// (minCornerSpeed at the node), not as a straight road at full speed.
+func TestComputeDesiredSpeed_ExactUTurnSlows(t *testing.T) {
+	a := network.Point{X: 0, Y: 0}
+	b := network.Point{X: 200, Y: 0}
+	net := &network.Network{Edges: []network.Edge{
+		{ID: 0, From: 0, To: 1, Length: 200, SpeedLimit: 14, Geometry: []network.Point{a, b}},
+		{ID: 1, From: 1, To: 0, Length: 200, SpeedLimit: 14, Geometry: []network.Point{b, a}},
+	}}
+	r, defl := turnGeometry(net, 0, 1)
+	if r != 0 || math.Abs(defl-math.Pi) > 1e-9 {
+		t.Fatalf("exact U-turn: got radius %v deflection %.3f, want radius 0 deflection π", r, defl)
+	}
+	w := &World{Net: net, Incidents: map[network.EdgeID]Severity{}}
+	v := &Vehicle{Route: []network.EdgeID{0, 1}, Edge: 0, S: 198}
+	if got := w.computeDesiredSpeed(v); got > minCornerSpeed+3 {
+		t.Fatalf("2 m before an exact U-turn: desired speed %.2f m/s, want close to minCornerSpeed %.1f", got, minCornerSpeed)
+	}
+}

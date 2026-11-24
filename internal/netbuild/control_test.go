@@ -228,6 +228,82 @@ func TestNetbuild_HighwayStopOnNode(t *testing.T) {
 	}
 }
 
+// crossingWithNodeTags builds the primary (W-E) × residential (N-S) crossing
+// used by the stop=minor tests, with the given tags on the junction node 5.
+func crossingWithNodeTags(tags ...string) *osmload.Features {
+	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
+		1: mkNode(1, 40.0, -74.0010),
+		2: mkNode(2, 40.0010, -74.0005),
+		3: mkNode(3, 40.0, -74.0000),
+		4: mkNode(4, 39.9990, -74.0005),
+		5: mkNode(5, 40.0, -74.0005, tags...),
+	}}
+	feat.Ways = []*osm.Way{
+		mkWay(10, "primary", false, 1, 5, 3),
+		mkWay(20, "residential", false, 2, 5, 4),
+	}
+	return feat
+}
+
+// TestNetbuild_HighwayStopWithStopMinor: highway=stop + stop=minor on the
+// junction node is the standard OSM tagging for a two-way stop. stop=minor
+// scopes the sign to the minor road, so the primary keeps priority (None) and
+// only the residential approaches stop. Previously the node-level
+// highway=stop re-applied Stop to every approach, wiping out stop=minor.
+func TestNetbuild_HighwayStopWithStopMinor(t *testing.T) {
+	feat := crossingWithNodeTags("highway", "stop", "stop", "minor")
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(net.Intersections) != 1 {
+		t.Fatalf("want 1 intersection, got %d", len(net.Intersections))
+	}
+	x := net.Intersections[0]
+	wantApproach(t, net, feat, x, "primary", "W", network.ControlNone)
+	wantApproach(t, net, feat, x, "primary", "E", network.ControlNone)
+	wantApproach(t, net, feat, x, "residential", "N", network.ControlStop)
+	wantApproach(t, net, feat, x, "residential", "S", network.ControlStop)
+}
+
+// TestNetbuild_HighwayGiveWayWithStopMinor: the give-way analogue. stop=minor
+// supplies the scope (minor road only) and highway=give_way the sign type, so
+// the residential approaches yield and the primary keeps priority.
+func TestNetbuild_HighwayGiveWayWithStopMinor(t *testing.T) {
+	feat := crossingWithNodeTags("highway", "give_way", "stop", "minor")
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(net.Intersections) != 1 {
+		t.Fatalf("want 1 intersection, got %d", len(net.Intersections))
+	}
+	x := net.Intersections[0]
+	wantApproach(t, net, feat, x, "primary", "W", network.ControlNone)
+	wantApproach(t, net, feat, x, "primary", "E", network.ControlNone)
+	wantApproach(t, net, feat, x, "residential", "N", network.ControlYield)
+	wantApproach(t, net, feat, x, "residential", "S", network.ControlYield)
+}
+
+// TestNetbuild_HighwayStopDirectionWithStopAll: stop=all decides the whole
+// junction. A directional highway=stop on the same node must not demote the
+// matching approaches from AllWayStop to a plain Stop.
+func TestNetbuild_HighwayStopDirectionWithStopAll(t *testing.T) {
+	feat := crossingWithNodeTags("highway", "stop", "direction", "forward", "stop", "all")
+	net, _, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(net.Intersections) != 1 {
+		t.Fatalf("want 1 intersection, got %d", len(net.Intersections))
+	}
+	for i, c := range net.Intersections[0].IncomingControl {
+		if c != network.ControlAllWayStop {
+			t.Errorf("approach %d: want AllWayStop under stop=all, got %v", i, c)
+		}
+	}
+}
+
 // TestNetbuild_HighwayGiveWayOnNode: an intersection node tagged
 // highway=give_way applies Yield to all approaches.
 func TestNetbuild_HighwayGiveWayOnNode(t *testing.T) {

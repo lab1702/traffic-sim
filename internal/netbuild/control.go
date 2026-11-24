@@ -16,16 +16,20 @@ import (
 // neighbors, no signal) are skipped entirely and stay uncontrolled — a
 // way-join is not a junction.
 //
-// Resolution order (first rule that applies wins for a given approach):
-//  1. stop=all on the intersection node      -> AllWayStop everywhere.
-//  2. stop=minor on the intersection node    -> Stop on every approach
-//     whose highway class is strictly lower-priority than the best.
-//  3. Class-based fallback (terminating road yields): the through road
+// Controls are layered; each later step overrides the earlier ones for the
+// approaches it touches:
+//  1. Class-based fallback (terminating road yields): the through road
 //     keeps priority (None); terminating stems and lower-class approaches
 //     Yield; a genuine equal-class crossing or ambiguous Y is AllWayStop.
-//
-// Task 13 adds rule for highway=stop / highway=give_way on the
-// intersection node.
+//  2. stop=all on the intersection node      -> AllWayStop everywhere.
+//     stop=minor on the intersection node    -> Stop (Yield if the node is
+//     highway=give_way) on every approach whose highway class is strictly
+//     lower-priority than the best; None on the rest.
+//  3. highway=stop / highway=give_way on the intersection node, refined by
+//     direction= — only when neither stop=all nor stop=minor is present
+//     (those qualifiers already say which approaches the sign governs).
+//  4. highway=stop / highway=give_way on an interior node of the approach
+//     (the stop-line position); never weakens an AllWayStop.
 func resolveControls(
 	xs []network.Intersection,
 	feat *osmload.Features,
@@ -59,6 +63,9 @@ func resolveControls(
 		}
 		return osmNodeOf(edges[eid].From)
 	}
+
+	// Edge-only network so the fallback can measure turn angles.
+	geomNet := &network.Network{Edges: edges}
 
 	for i := range xs {
 		x := &xs[i]
@@ -94,11 +101,13 @@ func resolveControls(
 		}
 
 		// Start from the class-based fallback, then layer explicit OSM
-		// signage on top (Task 12 covers fallback + stop=all/stop=minor;
-		// Task 13 adds node-level highway=stop / give_way).
-		applyClassFallback(x, classOfEdge)
-		applyStopAllOrMinor(x, nodeTags, classOfEdge)
-		applyNodeLevelSign(x, nodeTags, wayByID, osmWayOfEdge, edgeFromOSM, xOSMID)
+		// signage on top. A stop=all / stop=minor qualifier fully scopes the
+		// node's sign, so the node-level highway=stop / give_way rule only
+		// runs when no qualifier is present.
+		applyClassFallback(x, classOfEdge, geomNet)
+		if !applyStopAllOrMinor(x, nodeTags, classOfEdge) {
+			applyNodeLevelSign(x, nodeTags, wayByID, osmWayOfEdge, edgeFromOSM, xOSMID)
+		}
 		applyInteriorNodeSign(x, wayByID, osmWayOfEdge, edgeFromOSM, xOSMID, feat.Nodes)
 	}
 }
@@ -132,13 +141,29 @@ func distinctNeighbors(x *network.Intersection, edges []network.Edge) int {
 // roads actually crossing (or an ambiguous equal-class junction with no
 // through road at all).
 //
-// "Through" is read from x.Opposing, populated by resolveOpposing before this
-// runs: an approach with an opposing partner is part of a road that continues
-// across the junction; one without is a stem.
+// A best-class approach is "through" when its road continues across the
+// junction:
+//   - two-way road: it has a best-class opposing partner in x.Opposing
+//     (populated by resolveOpposing before this runs); the pair is one axis.
+//   - one-way road: it has no incoming partner on the far side, but it
+//     continues straight (|turn| < throughTurnThreshold) onto a best-class
+//     outgoing edge; it is an axis on its own.
+//
+// Approaches whose straight continuation is the same outgoing edge are a
+// merge, not separate axes. Merging into a two-way through road's own
+// continuation yields. Otherwise the straightest arm is through and the rest
+// yield, for every road class (see resolveMergeGroup for why motorway zip
+// merges are not left unsigned). A pure merge (one outgoing edge) where no arm
+// is within the straight tolerance still picks a through arm the same way —
+// there is no crossing conflict, so an all-way stop is never right there.
+//
+// One through axis -> it keeps priority (None), every other approach yields.
+// Two or more axes (a genuine equal-class crossing, one-way or two-way) or no
+// through road among several equal arms (an ambiguous Y) -> AllWayStop.
 //
 // Explicit OSM signage (handled by the apply* functions that run after this)
 // still overrides these defaults.
-func applyClassFallback(x *network.Intersection, classOfEdge func(network.EdgeID) int) {
+func applyClassFallback(x *network.Intersection, classOfEdge func(network.EdgeID) int, net *network.Network) {
 	n := len(x.Incoming)
 	if n == 0 {
 		return
@@ -151,20 +176,11 @@ func applyClassFallback(x *network.Intersection, classOfEdge func(network.EdgeID
 	}
 
 	isBest := make([]bool, n)
-	through := make([]bool, n)
-	nBest, nThrough := 0, 0
+	nBest := 0
 	for j, eid := range x.Incoming {
-		if classOfEdge(eid) != best {
-			continue
-		}
-		isBest[j] = true
-		nBest++
-		// A best-class approach is "through" when it has an opposing partner
-		// that is itself best-class — i.e. its road continues straight across
-		// the junction rather than terminating at it.
-		if p := x.Opposing[j]; p >= 0 && int(p) < n && classOfEdge(x.Incoming[p]) == best {
-			through[j] = true
-			nThrough++
+		if classOfEdge(eid) == best {
+			isBest[j] = true
+			nBest++
 		}
 	}
 
@@ -181,19 +197,88 @@ func applyClassFallback(x *network.Intersection, classOfEdge func(network.EdgeID
 		return
 	}
 
-	// nThrough counts approaches in through pairs; nThrough/2 is the number of
-	// crossing axes. Two or more axes (a real equal-class crossing), or no
-	// through road among several equal arms (an ambiguous Y), is the only case
-	// that warrants an all-way stop.
-	if nThrough/2 >= 2 || nThrough == 0 {
+	edges := net.Edges
+	through := make([]bool, n)
+	axis := make([]int, n) // through-axis label, meaningful where through[j]
+
+	// Two-way through roads: best-class opposing pairs. Each pair's
+	// continuation edges (toward the partner's origin) are claimed so a
+	// one-way merging onto them yields instead of forming a second axis.
+	claimed := make(map[network.EdgeID]bool)
+	for j, eid := range x.Incoming {
+		p := int(x.Opposing[j])
+		if !isBest[j] || p < 0 || p >= n || !isBest[p] {
+			continue
+		}
+		through[j] = true
+		axis[j] = min(j, p)
+		partnerFrom := edges[x.Incoming[p]].From
+		for _, o := range x.Outgoing {
+			if edges[o].To == partnerFrom && edges[o].To != edges[eid].From {
+				claimed[o] = true
+			}
+		}
+	}
+
+	// One-way through roads and merges: group the remaining best-class
+	// approaches by the outgoing edge they continue straight onto.
+	var order []network.EdgeID
+	groups := make(map[network.EdgeID][]mergeArm)
+	for j, eid := range x.Incoming {
+		if !isBest[j] || through[j] {
+			continue
+		}
+		o, dev, ok := straightestExit(net, x, eid, func(o network.EdgeID) bool {
+			return classOfEdge(o) == best
+		})
+		if !ok || dev >= throughTurnThreshold || claimed[o] {
+			continue
+		}
+		if _, seen := groups[o]; !seen {
+			order = append(order, o)
+		}
+		groups[o] = append(groups[o], mergeArm{j: j, dev: dev})
+	}
+	for _, o := range order {
+		resolveMergeGroup(groups[o], x, edges, through, axis)
+	}
+
+	// Pure merge (single outgoing edge) where no arm is within the straight
+	// tolerance: still a merge, so pick the through arm by the same rule.
+	nThrough := 0
+	for _, t := range through {
+		if t {
+			nThrough++
+		}
+	}
+	if nThrough == 0 && len(x.Outgoing) == 1 {
+		out := x.Outgoing[0]
+		var g []mergeArm
+		for j, eid := range x.Incoming {
+			if !isBest[j] || edges[out].To == edges[eid].From {
+				continue
+			}
+			g = append(g, mergeArm{j: j, dev: math.Abs(network.TurnAngle(net, eid, out))})
+		}
+		resolveMergeGroup(g, x, edges, through, axis)
+	}
+
+	axes := make(map[int]bool)
+	for j := range through {
+		if through[j] {
+			axes[axis[j]] = true
+		}
+	}
+	if len(axes) != 1 {
 		for j := range x.IncomingControl {
 			x.IncomingControl[j] = network.ControlAllWayStop
 		}
 		return
 	}
 
-	// Exactly one through road of the best class: it keeps priority; every
-	// terminating best-class stem and every lower-class approach yields.
+	// Exactly one through axis of the best class: it keeps priority; every
+	// terminating or merging best-class approach and every lower-class
+	// approach yields.
 	for j := range x.IncomingControl {
 		if through[j] {
 			x.IncomingControl[j] = network.ControlNone
@@ -201,6 +286,64 @@ func applyClassFallback(x *network.Intersection, classOfEdge func(network.EdgeID
 			x.IncomingControl[j] = network.ControlYield
 		}
 	}
+}
+
+// throughTurnThreshold is the largest |turn angle| at which an approach still
+// counts as continuing straight onto an outgoing edge. π/4 = 45° matches the
+// bend tolerance of oppositeThreshold (π − π/4), so a one-way through road may
+// bend exactly as much as a two-way one.
+const throughTurnThreshold = math.Pi / 4
+
+// mergeArm is one approach (index j into Incoming) feeding a merge, with its
+// |turn angle| dev onto the shared outgoing edge.
+type mergeArm struct {
+	j   int
+	dev float64
+}
+
+// resolveMergeGroup marks the through arm of approaches that all continue
+// onto one outgoing edge. A single arm is simply a one-way through road. For
+// several arms the straightest (lowest Incoming index on a tie) is through
+// and the rest are left non-through, i.e. they yield.
+//
+// This applies to motorway/trunk merges too. Real ones are unsigned zip
+// merges, but the sim's car-following cannot see a vehicle on a different
+// incoming edge until it reaches the shared outgoing edge, so giving every
+// arm priority (None) would let two arriving vehicles land on the same spot.
+// Yielding is the conservative stand-in until merging across approaches is
+// modelled.
+func resolveMergeGroup(g []mergeArm, x *network.Intersection, edges []network.Edge, through []bool, axis []int) {
+	if len(g) == 0 {
+		return
+	}
+	w := g[0]
+	for _, a := range g[1:] {
+		if a.dev < w.dev {
+			w = a
+		}
+	}
+	through[w.j] = true
+	axis[w.j] = w.j
+}
+
+// straightestExit returns the outgoing edge at x accepted by keep that the
+// approach eid turns onto most nearly straight, with its |turn angle|.
+// U-turns back to the approach's own origin are never candidates.
+func straightestExit(net *network.Network, x *network.Intersection, eid network.EdgeID,
+	keep func(network.EdgeID) bool,
+) (network.EdgeID, float64, bool) {
+	var bestO network.EdgeID
+	bestDev := math.Inf(1)
+	found := false
+	for _, o := range x.Outgoing {
+		if net.Edges[o].To == net.Edges[eid].From || !keep(o) {
+			continue
+		}
+		if d := math.Abs(network.TurnAngle(net, eid, o)); d < bestDev {
+			bestO, bestDev, found = o, d, true
+		}
+	}
+	return bestO, bestDev, found
 }
 
 // applyNodeLevelSign handles highway=stop and highway=give_way tags on
@@ -214,6 +357,9 @@ func applyClassFallback(x *network.Intersection, classOfEdge func(network.EdgeID
 // direction tag is present. When direction= is set, the explicit sign
 // takes precedence over the class-based AllWayStop for the matched
 // approach.
+//
+// Not called for nodes carrying stop=all / stop=minor: applyStopAllOrMinor
+// has already scoped the node's sign (see resolveControls).
 func applyNodeLevelSign(
 	x *network.Intersection,
 	tags osm.Tags,
@@ -393,17 +539,37 @@ func interiorSignFor(
 
 // applyStopAllOrMinor overrides class-fallback with explicit OSM tags
 // scoped to the intersection node.
-func applyStopAllOrMinor(x *network.Intersection, tags osm.Tags, classOfEdge func(network.EdgeID) int) {
+//
+// stop=all / stop=minor is the OSM qualifier that says WHICH approaches a
+// junction node's sign applies to, so when present it decides every approach
+// at the node:
+//   - stop=all   -> AllWayStop everywhere (a highway=give_way on the same
+//     node cannot weaken it).
+//   - stop=minor -> approaches strictly lower-class than the best get the
+//     node's sign (Stop, or Yield when the node is highway=give_way); the
+//     major road gets None.
+//
+// Returns true when such a qualifier was applied; the caller must then skip
+// applyNodeLevelSign, whose lenient "every approach" / direction= scoping
+// would otherwise re-stop the major road (highway=stop + stop=minor is the
+// standard two-way-stop tagging) or demote stop=all approaches.
+func applyStopAllOrMinor(x *network.Intersection, tags osm.Tags, classOfEdge func(network.EdgeID) int) bool {
+	minorCtrl := network.ControlStop
+	for _, t := range tags {
+		if t.Key == "highway" && t.Value == "give_way" {
+			minorCtrl = network.ControlYield
+		}
+	}
 	for _, t := range tags {
 		if t.Key == "stop" && t.Value == "all" {
 			for j := range x.IncomingControl {
 				x.IncomingControl[j] = network.ControlAllWayStop
 			}
-			return
+			return true
 		}
 		if t.Key == "stop" && t.Value == "minor" {
 			if len(x.Incoming) == 0 {
-				return
+				return true
 			}
 			best := classOfEdge(x.Incoming[0])
 			for _, eid := range x.Incoming[1:] {
@@ -413,14 +579,15 @@ func applyStopAllOrMinor(x *network.Intersection, tags osm.Tags, classOfEdge fun
 			}
 			for j, eid := range x.Incoming {
 				if classOfEdge(eid) > best {
-					x.IncomingControl[j] = network.ControlStop
+					x.IncomingControl[j] = minorCtrl
 				} else {
 					x.IncomingControl[j] = network.ControlNone
 				}
 			}
-			return
+			return true
 		}
 	}
+	return false
 }
 
 // applyRoundaboutControl handles a node on a roundabout ring: circulating

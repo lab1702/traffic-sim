@@ -382,3 +382,138 @@ func TestLaneChange_TurnBias_LastEdge_NoFire(t *testing.T) {
 		t.Errorf("bias must be a no-op on last edge; lane=%d", w.Vehicles[0].Lane)
 	}
 }
+
+func twoLaneStraight(length, limit float64) *network.Network {
+	a := network.Point{X: 0, Y: 0}
+	b := network.Point{X: length, Y: 0}
+	return &network.Network{
+		Nodes: []network.Node{{ID: 0, Pos: a}, {ID: 1, Pos: b}},
+		Edges: []network.Edge{{ID: 0, From: 0, To: 1, Length: length, SpeedLimit: limit,
+			Lanes: []network.Lane{{Index: 0}, {Index: 1}}, Geometry: []network.Point{a, b}}},
+	}
+}
+
+// TestLaneChange_SpeedDrivenAvoidsClosedLane: an incident-closed lane is
+// empty and so looks like the fast lane. A car stuck behind a slow leader
+// must not pull into it.
+func TestLaneChange_SpeedDrivenAvoidsClosedLane(t *testing.T) {
+	net := twoLaneStraight(1000, 20)
+	vs := []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0}, Edge: 0, Lane: 1, S: 100, V: 5}, // ego
+		{ID: 2, Route: []network.EdgeID{0}, Edge: 0, Lane: 1, S: 120, V: 2}, // slow leader
+	}
+	tryLaneChange(&vs[0], 0, map[uint8][]int{1: {0, 1}}, vs, net, 0) // lane 0 closed
+	if vs[0].Lane != 1 {
+		t.Fatalf("moved into closed lane 0")
+	}
+	// Control: with no incident the same car does change.
+	vs[0].Lane, vs[0].LaneChangeCooldown = 1, 0
+	tryLaneChange(&vs[0], 0, map[uint8][]int{1: {0, 1}}, vs, net, -1)
+	if vs[0].Lane != 0 {
+		t.Fatalf("control: expected speed-driven change to lane 0, got %d", vs[0].Lane)
+	}
+}
+
+// TestLaneChange_TurnBiasAvoidsClosedLane: even when the closed lane is the
+// only one allowing the next turn, turn bias must not steer into it.
+func TestLaneChange_TurnBiasAvoidsClosedLane(t *testing.T) {
+	net := twoLaneStraight(200, 20)
+	net.Edges[0].Lanes = []network.Lane{
+		{Index: 0, AllowedTurns: []network.EdgeID{7}}, // only lane for the next edge
+		{Index: 1, AllowedTurns: []network.EdgeID{8}},
+	}
+	vs := []Vehicle{{ID: 1, Route: []network.EdgeID{0, 7}, Edge: 0, Lane: 1, S: 100, V: 10}}
+	tryLaneChange(&vs[0], 0, map[uint8][]int{1: {0}}, vs, net, 0)
+	if vs[0].Lane != 1 {
+		t.Fatalf("turn bias steered into closed lane 0")
+	}
+}
+
+// TestLaneChange_RejectsCutInAheadOfFastFollower: the fixed rear gap (10 m)
+// is not enough when the new follower is much faster. Pulling in at 2 m/s
+// 10.1 m ahead of a car doing 20 m/s would force it to panic-brake.
+func TestLaneChange_RejectsCutInAheadOfFastFollower(t *testing.T) {
+	net := twoLaneStraight(1000, 20)
+	vs := []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0}, Edge: 0, Lane: 0, S: 100, V: 2},   // ego
+		{ID: 2, Route: []network.EdgeID{0}, Edge: 0, Lane: 0, S: 110, V: 0},   // stopped leader
+		{ID: 3, Route: []network.EdgeID{0}, Edge: 0, Lane: 1, S: 84.9, V: 20}, // fast follower in target lane
+	}
+	tryLaneChange(&vs[0], 0, map[uint8][]int{0: {0, 1}, 1: {2}}, vs, net, -1)
+	if vs[0].Lane != 0 {
+		t.Fatalf("cut in 10.1 m ahead of a 20 m/s follower")
+	}
+	// Control: the same gap is fine when the follower is just as slow.
+	vs[2].V = 2
+	tryLaneChange(&vs[0], 0, map[uint8][]int{0: {0, 1}, 1: {2}}, vs, net, -1)
+	if vs[0].Lane != 1 {
+		t.Fatalf("control: expected change with a slow follower, got lane %d", vs[0].Lane)
+	}
+}
+
+// TestLaneChange_NoSameTickDoubleClaim: cars in lanes 0 and 2, level with
+// each other and both stuck behind slow leaders, both want empty lane 1. Only
+// one may take it in a tick; before the fix both moved in on top of each other.
+func TestLaneChange_NoSameTickDoubleClaim(t *testing.T) {
+	a := network.Point{X: 0, Y: 0}
+	b := network.Point{X: 1000, Y: 0}
+	net := &network.Network{
+		Nodes: []network.Node{{ID: 0, Pos: a}, {ID: 1, Pos: b}},
+		Edges: []network.Edge{{ID: 0, From: 0, To: 1, Length: 1000, SpeedLimit: 20,
+			Lanes: []network.Lane{{Index: 0}, {Index: 1}, {Index: 2}}, Geometry: []network.Point{a, b}}},
+	}
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0}, Edge: 0, Lane: 0, S: 100, V: 10},
+		{ID: 2, Route: []network.EdgeID{0}, Edge: 0, Lane: 0, S: 140, V: 0},
+		{ID: 3, Route: []network.EdgeID{0}, Edge: 0, Lane: 2, S: 100, V: 10},
+		{ID: 4, Route: []network.EdgeID{0}, Edge: 0, Lane: 2, S: 140, V: 0},
+	}
+	w.Step()
+	inLane1 := 0
+	for _, v := range w.Vehicles {
+		if v.Lane == 1 {
+			inLane1++
+		}
+	}
+	if inLane1 != 1 {
+		t.Fatalf("%d vehicles moved into lane 1 in one tick, want exactly 1", inLane1)
+	}
+	if g := minSameLaneGap(w); g < 0 {
+		t.Fatalf("vehicles overlap after lane changes (min gap %.2f m)", g)
+	}
+}
+
+// TestMerge_LaneDropZipper: two cars side by side cross a 2-to-1 lane drop.
+// Both snap into lane 0 of the next edge; the one behind in merge order must
+// fall in behind instead of landing on the same spot.
+func TestMerge_LaneDropZipper(t *testing.T) {
+	a := network.Point{X: 0, Y: 0}
+	b := network.Point{X: 200, Y: 0}
+	c := network.Point{X: 600, Y: 0}
+	net := &network.Network{
+		Nodes: []network.Node{{ID: 0, Pos: a}, {ID: 1, Pos: b}, {ID: 2, Pos: c}},
+		Edges: []network.Edge{
+			{ID: 0, From: 0, To: 1, Length: 200, SpeedLimit: 10,
+				Lanes: []network.Lane{{Index: 0}, {Index: 1}}, Geometry: []network.Point{a, b}},
+			{ID: 1, From: 1, To: 2, Length: 400, SpeedLimit: 10,
+				Lanes: []network.Lane{{Index: 0}}, Geometry: []network.Point{b, c}},
+		},
+	}
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	w.Vehicles = []Vehicle{
+		{ID: 1, Route: []network.EdgeID{0, 1}, Edge: 0, Lane: 0, S: 150, V: 10, LaneChangeCooldown: 100},
+		{ID: 2, Route: []network.EdgeID{0, 1}, Edge: 0, Lane: 1, S: 150.5, V: 10, LaneChangeCooldown: 100},
+	}
+	for i := 0; i < 400; i++ {
+		w.Step()
+		if g := minSameLaneGap(w); g < 0 {
+			t.Fatalf("tick %d: merging vehicles overlap (min gap %.2f m)", w.Tick, g)
+		}
+	}
+	for _, v := range w.Vehicles {
+		if v.Edge != 1 {
+			t.Fatalf("vehicle %d never crossed the lane drop (edge %d, S %.1f)", v.ID, v.Edge, v.S)
+		}
+	}
+}

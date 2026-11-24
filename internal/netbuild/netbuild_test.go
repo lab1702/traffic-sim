@@ -1,6 +1,8 @@
 package netbuild
 
 import (
+	"io"
+	"log/slog"
 	"testing"
 
 	"github.com/lab1702/traffic-sim/internal/network"
@@ -88,6 +90,126 @@ func TestBuild_DropsDisconnectedComponent(t *testing.T) {
 	}
 	if len(net.Nodes) != 3 {
 		t.Errorf("want 3 nodes after pruning, got %d", len(net.Nodes))
+	}
+}
+
+// prependIsland adds a tiny 2-node way, far from everything else, as the
+// FIRST way in feat. Listed first it takes the lowest network node IDs and is
+// then pruned as a minor component, which renumbers every kept node — the
+// situation in nearly every real extract.
+func prependIsland(feat *osmload.Features) {
+	feat.Nodes[900] = mkNode(900, 40.0100, -74.0100)
+	feat.Nodes[901] = mkNode(901, 40.0101, -74.0100)
+	feat.Ways = append([]*osm.Way{mkWay(9000, "residential", false, 900, 901)}, feat.Ways...)
+}
+
+// TestBuild_PrunedComponent_StopAllStillOnJunction: pruning a component whose
+// nodes were numbered before the kept ones renumbers the kept nodes. The OSM
+// node lookup used by resolveControls must follow that renumbering, or the
+// junction's stop=all tag is read from some other (untagged) OSM node and the
+// junction silently falls back to class-based control.
+func TestBuild_PrunedComponent_StopAllStillOnJunction(t *testing.T) {
+	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
+		1: mkNode(1, 40.0, -74.0010),
+		2: mkNode(2, 40.0010, -74.0005),
+		3: mkNode(3, 40.0, -74.0000),
+		4: mkNode(4, 39.9990, -74.0005),
+		5: mkNode(5, 40.0, -74.0005, "stop", "all"),
+	}}
+	feat.Ways = []*osm.Way{
+		mkWay(10, "primary", false, 1, 5, 3),
+		mkWay(20, "residential", false, 2, 5, 4),
+	}
+	prependIsland(feat)
+
+	net, rpt, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if rpt.ComponentsDropped != 1 {
+		t.Fatalf("want the island dropped (1 component), got %d", rpt.ComponentsDropped)
+	}
+	if len(net.Intersections) != 1 {
+		t.Fatalf("want 1 intersection, got %d", len(net.Intersections))
+	}
+	for i, c := range net.Intersections[0].IncomingControl {
+		if c != network.ControlAllWayStop {
+			t.Errorf("approach %d: want AllWayStop from stop=all on the junction node, got %v", i, c)
+		}
+	}
+}
+
+// TestBuild_PrunedComponent_RestrictionStillApplied: same renumbering hazard
+// for turn restrictions — the via node must resolve to the kept junction's
+// NEW network ID, not its pre-prune one.
+func TestBuild_PrunedComponent_RestrictionStillApplied(t *testing.T) {
+	feat, err := osmload.Load("../osmload/testdata/with_restriction.osm")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	prependIsland(feat)
+
+	net, rpt, err := Build(feat)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if rpt.ComponentsDropped != 1 {
+		t.Fatalf("want the island dropped (1 component), got %d", rpt.ComponentsDropped)
+	}
+	if rpt.RestrictionsApplied != 1 || rpt.RestrictionsSkipped != 0 {
+		t.Fatalf("want applied=1 skipped=0, got applied=%d skipped=%d",
+			rpt.RestrictionsApplied, rpt.RestrictionsSkipped)
+	}
+	if len(net.Intersections) != 1 || len(net.Intersections[0].BannedTurns) != 1 {
+		t.Fatalf("want exactly 1 BannedTurn on the single intersection")
+	}
+	tr := net.Intersections[0].BannedTurns[0]
+	if cat := network.ClassifyTurn(net, tr.From, tr.To); cat != network.TurnLeft {
+		t.Errorf("banned turn should classify as TurnLeft, got %v", cat)
+	}
+}
+
+// TestBuild_EqualSizeComponents_TieBreakDeterministic: when the two largest
+// components tie in size, the survivor must not depend on map iteration
+// order (which made the built network — and its hash — vary run to run).
+// The component containing the lowest network node ID (i.e. the one whose
+// way appears first in the input) wins.
+func TestBuild_EqualSizeComponents_TieBreakDeterministic(t *testing.T) {
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	mk := func() *osmload.Features {
+		feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
+			1:  mkNode(1, 40.0, -74.0),
+			2:  mkNode(2, 40.0001, -74.0),
+			3:  mkNode(3, 40.0002, -74.0),
+			10: mkNode(10, 40.0100, -74.0),
+			11: mkNode(11, 40.0101, -74.0),
+			12: mkNode(12, 40.0102, -74.0),
+		}}
+		feat.Ways = []*osm.Way{
+			mkWay(100, "residential", false, 1, 2, 3),    // listed first: must survive
+			mkWay(200, "residential", false, 10, 11, 12), // same size: dropped
+		}
+		return feat
+	}
+	for run := 0; run < 200; run++ {
+		feat := mk()
+		net, rpt, err := Build(feat)
+		if err != nil {
+			t.Fatalf("Build: %v", err)
+		}
+		if rpt.ComponentsDropped != 1 || len(net.Nodes) != 3 {
+			t.Fatalf("run %d: want 3 nodes kept and 1 component dropped, got %d nodes, %d dropped",
+				run, len(net.Nodes), rpt.ComponentsDropped)
+		}
+		for nid, oid := range buildNetToOSM(net, feat) {
+			if oid != 1 && oid != 2 && oid != 3 {
+				t.Fatalf("run %d: kept node %d is OSM node %d; want the first-listed component (OSM 1-3) to win the tie",
+					run, nid, oid)
+			}
+		}
 	}
 }
 

@@ -156,7 +156,16 @@ func turnGeometry(net *network.Network, fromEdge, toEdge network.EdgeID) (radius
 	for d <= -math.Pi {
 		d += 2 * math.Pi
 	}
-	return radius, math.Abs(d)
+	deflection = math.Abs(d)
+	// Collinear sample points give an infinite circumradius, which is right
+	// for a straight road but wrong when the path folds back on itself. An
+	// exact U-turn onto a reverse twin has identical, reversed geometry, so
+	// `after` lands on `before`. Treat that as a zero-radius hairpin, so it
+	// gets the minimum corner speed instead of none at all.
+	if math.IsInf(radius, 1) && deflection > math.Pi/2 {
+		radius = 0
+	}
+	return radius, deflection
 }
 
 // turnRadius returns just the fitted radius for the turn (see turnGeometry).
