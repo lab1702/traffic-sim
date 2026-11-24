@@ -92,6 +92,13 @@ type Vehicle struct {
 	// line. See World.redAt. Per-line state: see linesAhead.
 	YellowCall int8
 
+	// heldBy is 1 + the route index of the line that held the vehicle (a
+	// stopped virtual leader) last tick, or 0 when none did. The next tick's
+	// arrivals and detector scan read it, before anyone moves: a vehicle
+	// held by a line does not reach beyond it. (int32, beside YellowCall,
+	// to sit in padding: Vehicle is copied every tick.)
+	heldBy int32
+
 	// linesAhead holds the same per-line state (dwell, wait, yellow call)
 	// for stop lines beyond the current edge, sorted by route index. The
 	// lookahead lets a vehicle stop, dwell or decide on a yellow for a line
@@ -292,6 +299,35 @@ func (v *Vehicle) setLineAt(j int, s lineState) {
 	v.linesAhead = append(v.linesAhead, lineMemo{})
 	copy(v.linesAhead[k+1:], v.linesAhead[k:])
 	v.linesAhead[k] = lineMemo{idx: j, edge: v.Route[j], lineState: s}
+}
+
+// clusterStop returns the vehicle's all-way-stop FIFO time for the line at
+// the end of route index j: the earliest StoppedSinceSec among that line and
+// the lines before it the vehicle has stopped at but not crossed, or 0. A
+// stop at an earlier line survives only while the vehicle is still short of
+// it, which happens only when line j lies within a stopping gap beyond it,
+// so those lines form one junction and the vehicle's turn is its arrival at
+// the first of them.
+func (v *Vehicle) clusterStop(j int) float64 {
+	t := 0.0
+	take := func(s float64) {
+		if s != 0 && (t == 0 || s < t) {
+			t = s
+		}
+	}
+	if j >= v.RouteIdx {
+		take(v.StoppedSinceSec)
+	}
+	for i := range v.linesAhead {
+		m := &v.linesAhead[i]
+		if m.idx > j {
+			break
+		}
+		if m.idx < len(v.Route) && v.Route[m.idx] == m.edge {
+			take(m.stoppedSince)
+		}
+	}
+	return t
 }
 
 // promoteLine runs after an edge transition: it drops memos for lines now

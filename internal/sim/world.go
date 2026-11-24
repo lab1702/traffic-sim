@@ -1,6 +1,7 @@
 package sim
 
 import (
+	"container/heap"
 	"log/slog"
 	"math"
 	"math/rand/v2"
@@ -420,10 +421,15 @@ func effectiveControl(w *World, x *network.Intersection, myPos int) network.Cont
 // lookahead stops a car ~7 m before a red line, which on an approach shorter
 // than that is still on the previous edge (possibly short of another
 // junction), and a zone confined to the approach edge would never see it.
-// A vehicle calls every actuated approach within actCallDistance along its
-// route, except one more than stopLineTolMeters past a junction it has not
-// reached yet: a car still short of that junction is held, if at all, by
-// something else.
+// A vehicle calls (and, within actPassageDistance, occupies) every actuated
+// approach within actCallDistance along its route, except:
+//   - one beyond the line that held it last tick (Vehicle.heldBy): it will
+//     not get there until that line releases it, so it must not call, or
+//     hold green to max-out, a phase it cannot use;
+//   - one more than stopLineTolMeters past the first junction ahead of it:
+//     a car still short of that junction is held, if at all, by something
+//     else, as before the lookahead. A signal closer than that past the
+//     junction is the one a car stopped short of the junction waits for.
 //
 // One pass over vehicles, each walking at most actCallDistance of its route —
 // O(vehicles) with a small constant, dwarfed by the IDM and routing work later
@@ -446,10 +452,11 @@ func (w *World) scanDetectors() (called, occupied [][]bool) {
 			continue
 		}
 		d := -v.S        // to the start of edge e
-		junction := -1.0 // distance to the last junction passed in the walk, if any
+		junction := -1.0 // distance to the first junction ahead, once passed in the walk
+		hold := int(v.heldBy) - 1
 		for j, e := v.RouteIdx, v.Edge; ; {
 			dEnd := d + w.Net.Edges[e].Length // to e's stop line
-			if dEnd > actCallDistance {
+			if dEnd > actCallDistance || (hold >= 0 && j > hold) {
 				break
 			}
 			if de, ok := w.detectorEdges[e]; ok && (junction < 0 || dEnd-junction < stopLineTolMeters) {
@@ -462,7 +469,7 @@ func (w *World) scanDetectors() (called, occupied [][]bool) {
 					}
 				}
 			}
-			if w.intersectionAt(e) != nil {
+			if junction < 0 && w.intersectionAt(e) != nil {
 				junction = dEnd
 			}
 			j++
@@ -608,18 +615,32 @@ func (w *World) Step() {
 		lS, lV, has := info.lS, info.lV, info.has
 
 		stop := w.nextStop(v, i)
-		if stop.any() {
+		hard := stop.any() && !stop.soft
+		if hard {
 			if virtualS := v.S + stop.dist; !has || virtualS < lS {
 				lS, lV, has = virtualS, 0, true
 			}
 		}
+		// Remember the holding line for next tick's arrivals and detectors.
+		v.heldBy = 0
+		if hard {
+			v.heldBy = int32(stop.j + 1)
+		}
 		isRed, mustYield, mustYieldLT := stop.red, stop.yield, stop.leftTurn
 		// held: the line stopping the vehicle ends its current edge (it is
-		// in that line's queue, as before the lookahead) or the vehicle is
-		// at the line. A line elsewhere in the horizon doesn't count: it
-		// would keep a gridlocked car "waiting" for ever.
-		held := (isRed || mustYield || mustYieldLT) &&
-			(stop.j == v.RouteIdx || stop.dist < stopLineTolMeters)
+		// in that line's queue, as before the lookahead, however far back)
+		// or the vehicle is at the line with no controlled line before it.
+		// A line elsewhere in the horizon doesn't count, nor does one past a
+		// junction it has yet to cross: either would keep a gridlocked car,
+		// or two cars waiting on each other across close junctions,
+		// "waiting" for ever.
+		atOwnLine := stop.j == v.RouteIdx || stop.dist < stopLineTolMeters
+		held := (isRed || mustYield || mustYieldLT) && atOwnLine &&
+			(stop.j == v.RouteIdx || !stop.pastControlled)
+		// Impatience builds while waiting at the line, or on its approach
+		// edge as before the lookahead, also past a nearer junction: the
+		// car must be able to accept the gap there eventually.
+		waiting := (mustYield || mustYieldLT) && atOwnLine
 		yieldLine := stop.j
 
 		prevEdge := v.Edge
@@ -646,11 +667,12 @@ func (w *World) Step() {
 		// the vehicle starts moving, so criticalGap stays below ETA
 		// and mustYield stays false. Each new line starts from a fresh
 		// WaitTime=0. Does NOT apply to red lights. The wait belongs to the
-		// line being yielded at, and only time spent held by it counts (see
-		// held), not time queued upstream of a short approach edge. A
+		// line being yielded at, and only time spent at it or on its
+		// approach edge counts, not time queued upstream of a short
+		// approach edge. A
 		// vehicle that crossed the line this tick has nothing left to wait
 		// for (setLineAt ignores lines behind it).
-		if v.V < stuckSpeedThresh && held && !isRed {
+		if v.V < stuckSpeedThresh && waiting {
 			ls := v.lineAt(yieldLine)
 			ls.wait += w.dt
 			v.setLineAt(yieldLine, ls)
@@ -1018,73 +1040,91 @@ func (w *World) spawnStopLine(route []network.EdgeID, lane uint8, h float64) (fl
 
 // spawnFollowersSafe reports whether every vehicle about to drive onto eid
 // can follow a newcomer entering it at S=0 at `speed` without braking harder
-// than SafeDecel. It searches upstream breadth-first from eid's start node,
-// so every edge feeding the node directly is checked before anything behind
-// it, and continues through empty edges (so a short in-edge doesn't hide the
-// traffic behind it) up to the lookahead horizon of a car at eid's limit. On
-// each occupied edge it checks the frontmost vehicle, if its route continues
-// along that path onto eid. Each edge is visited once and the reverse twin
-// of the edge just walked back along is skipped (that would be a U-turn
-// onto the path). A search larger than maxSpawnUpstreamEdges refuses the
-// spawn: an unchecked follower may be right behind.
+// than SafeDecel. It searches upstream from eid's start node in order of
+// distance, through empty edges (so a short in-edge doesn't hide the traffic
+// behind it), out to the lookahead horizon of a car at eid's limit. The
+// frontmost vehicle on each occupied edge it reaches is checked by its own
+// route (followerSafe), so it does not matter which path the search found
+// its edge by; a car about to U-turn onto eid is checked like any other. A
+// search larger than maxSpawnUpstreamEdges refuses the spawn: an unchecked
+// follower may be right behind.
 func (w *World) spawnFollowersSafe(eid network.EdgeID, speed float64, occ *spawnOccupancy) bool {
 	p := DefaultIDM()
 	h := lookaheadHorizon(w.Net.Edges[eid].SpeedLimit * speedFactorMax)
-	// path is the route a follower must take from its next edge onto eid;
-	// dist is the distance from node to the newcomer's front bumper.
-	type step struct {
-		node network.NodeID
-		path []network.EdgeID
-		dist float64
-	}
-	queue := []step{{node: w.Net.Edges[eid].From, path: []network.EdgeID{eid}}}
-	visited := map[network.EdgeID]bool{eid: true}
+	start := w.Net.Edges[eid].From
+	best := map[network.NodeID]float64{start: 0} // shortest known distance to the newcomer's front bumper
+	settled := map[network.NodeID]bool{}
+	checked := map[int]bool{}
+	q := &nodeQueue{{node: start}}
 	budget := maxSpawnUpstreamEdges
-	for qi := 0; qi < len(queue); qi++ {
-		st := queue[qi]
-		twin, hasTwin := w.reverseEdge[st.path[0]]
-		for _, ie := range w.inEdges[st.node] {
-			if visited[ie] || (hasTwin && ie == twin) {
-				continue
-			}
-			visited[ie] = true
+	for q.Len() > 0 {
+		it := heap.Pop(q).(nodeDist)
+		if settled[it.node] {
+			continue
+		}
+		settled[it.node] = true
+		for _, ie := range w.inEdges[it.node] {
 			if budget--; budget < 0 {
 				return false
 			}
-			ieLen := w.Net.Edges[ie].Length
 			if fi, has := occ.front[ie]; has {
-				u := &w.Vehicles[fi]
-				if !routeContinues(u, st.path) {
-					continue // not heading onto the spawn edge this way
-				}
-				gap := (ieLen - u.S) + st.dist - VehicleLength // newcomer's rear bumper is VehicleLength behind its front
-				if !safeToFollow(p, u.V, w.Net.Edges[ie].SpeedLimit, gap, speed) {
-					return false
+				if !checked[fi] {
+					checked[fi] = true
+					if !w.followerSafe(&w.Vehicles[fi], eid, speed, h, p) {
+						return false
+					}
 				}
 				continue
 			}
-			if st.dist+ieLen < h {
-				up := make([]network.EdgeID, 0, len(st.path)+1)
-				up = append(append(up, ie), st.path...)
-				queue = append(queue, step{node: w.Net.Edges[ie].From, path: up, dist: st.dist + ieLen})
+			from := w.Net.Edges[ie].From
+			nd := it.dist + w.Net.Edges[ie].Length
+			if old, seen := best[from]; nd < h && !settled[from] && (!seen || nd < old) {
+				best[from] = nd
+				heap.Push(q, nodeDist{node: from, dist: nd})
 			}
 		}
 	}
 	return true
 }
 
-// routeContinues reports whether u's route, after its current edge, starts
-// with path.
-func routeContinues(u *Vehicle, path []network.EdgeID) bool {
-	if u.RouteIdx+len(path) >= len(u.Route) {
-		return false
-	}
-	for m, e := range path {
-		if u.Route[u.RouteIdx+1+m] != e {
-			return false
+// followerSafe reports whether u, if its route takes it onto eid within h
+// metres, can follow a newcomer entering eid at S=0 at `speed` without
+// braking harder than SafeDecel.
+func (w *World) followerSafe(u *Vehicle, eid network.EdgeID, speed, h float64, p IDMParams) bool {
+	d := w.Net.Edges[u.Edge].Length - u.S // u's front bumper to the start of Route[k]
+	for k := u.RouteIdx + 1; k < len(u.Route) && d < h; k++ {
+		if u.Route[k] == eid {
+			// The newcomer's rear bumper is VehicleLength behind its front.
+			return safeToFollow(p, u.V, w.Net.Edges[u.Edge].SpeedLimit, d-VehicleLength, speed)
 		}
+		d += w.Net.Edges[u.Route[k]].Length
 	}
-	return true
+	return true // not heading onto eid within the horizon
+}
+
+// nodeDist and nodeQueue order spawnFollowersSafe's upstream search by
+// distance (ties by node ID, for a deterministic order).
+type nodeDist struct {
+	node network.NodeID
+	dist float64
+}
+
+type nodeQueue []nodeDist
+
+func (q nodeQueue) Len() int { return len(q) }
+func (q nodeQueue) Less(a, b int) bool {
+	if q[a].dist != q[b].dist {
+		return q[a].dist < q[b].dist
+	}
+	return q[a].node < q[b].node
+}
+func (q nodeQueue) Swap(a, b int) { q[a], q[b] = q[b], q[a] }
+func (q *nodeQueue) Push(x any)   { *q = append(*q, x.(nodeDist)) }
+func (q *nodeQueue) Pop() any {
+	old := *q
+	it := old[len(old)-1]
+	*q = old[:len(old)-1]
+	return it
 }
 
 // trySpawn honours a spawn request when a route exists and the origin edge

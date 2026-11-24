@@ -31,8 +31,19 @@ package sim
 //     car two short edges back counts, and only cars whose own route crosses
 //     X by that approach do. maxCriticalGap bounds every gap a driver
 //     accepts, so a vehicle out of reach could never have been inside one.
-//     A driver only judges a gap once it is within gapDecisionDist of the
-//     line (its stopping distance plus a margin), not from 150 m out.
+//     A driver only brakes for a gap once within gapDecisionDist of the line
+//     (its stopping distance plus a margin), not from 150 m out; farther
+//     back a shut gap is a "soft" obligation that still counts for the
+//     stuck guard. A vehicle held by a line a few metres beyond line j (it
+//     stops short of line j) closes nobody's gap at line j: it will not
+//     cross j until released.
+//
+// All-way stops a few metres apart act as one junction: a vehicle's FIFO
+// time at a line is the earliest stop it made at any line it has not yet
+// crossed (Vehicle.clusterStop). Judged line by line, a car that won the
+// first junction and then had to stop for the second (short of the first)
+// and a car doing the same the other way round each held the slot the
+// other needed, for ever.
 //  4. Desired speed (computeDesiredSpeed): every corner and every lower speed
 //     limit within the horizon caps v0 with the kinematic approach profile the
 //     current-edge corner already used.
@@ -59,10 +70,14 @@ package sim
 //
 // Held, not stuck. The stuck guard (World.Step) exempts a stopped vehicle only
 // when the line holding it ends its current edge (the queue on the approach,
-// as before) or when it is at that line (within stopLineTolMeters). A line
-// merely somewhere within the horizon does not exempt it, or gridlock would
-// never clear. WaitTime accrues under the same condition, so time queued
-// upstream of a short approach does not count as impatience.
+// as before) or when it is at that line (within stopLineTolMeters) with no
+// controlled line in between. A line merely somewhere within the horizon
+// does not exempt it, or gridlock would never clear; nor does a line beyond
+// another controlled junction the vehicle has not crossed, so a mutual wait
+// across two close junctions is cleared too. WaitTime accrues under the
+// same condition, so time queued upstream of a short approach does not
+// count as impatience. Vehicle.heldBy remembers the holding line for the
+// next tick's arrivals and detector scan.
 //
 // Determinism: walks follow the route slice; arrivals are appended in vehicle
 // index order and record start-of-tick positions, speeds and stop times, so a
@@ -234,8 +249,9 @@ type arrival struct {
 	vi    int32   // vehicle index
 	dist  float64 // front bumper to the end of the edge
 	v     float64 // speed
-	since float64 // when it stopped at this line (StoppedSinceSec), or 0
+	since float64 // its all-way-stop FIFO time here (Vehicle.clusterStop), or 0
 	left  bool    // it turns left at this line
+	short bool    // it is held by a line just beyond this one and waits short of it
 }
 
 // buildArrivals records, for every edge that ends at an intersection, the
@@ -267,7 +283,7 @@ func (w *World) buildArrivals() {
 				if len(w.arrivals[e]) == 0 {
 					w.arrTouched = append(w.arrTouched, e)
 				}
-				a := arrival{vi: int32(vi), dist: math.Max(dEnd, 0), v: v.V, since: v.lineAt(j).stoppedSince}
+				a := arrival{vi: int32(vi), dist: math.Max(dEnd, 0), v: v.V, since: v.clusterStop(j), short: w.stopsShortOf(v, j)}
 				if j+1 < len(v.Route) {
 					a.left = w.turnAt(e, v.Route[j+1]).cat == network.TurnLeft
 				}
@@ -280,6 +296,24 @@ func (w *World) buildArrivals() {
 			d, e = dEnd, v.Route[j]
 		}
 	}
+}
+
+// stopsShortOf reports whether the line holding v (as of last tick) lies
+// less than a stopping gap beyond the line at the end of Route[j], so v,
+// which rests about VehicleLength+S0 before its holding line, waits short of
+// line j and will not cross it until released.
+func (w *World) stopsShortOf(v *Vehicle, j int) bool {
+	hold := int(v.heldBy) - 1
+	if hold <= j || hold >= len(v.Route) {
+		return false
+	}
+	span := 0.0
+	for k := j + 1; k <= hold; k++ {
+		if span += w.Net.Edges[v.Route[k]].Length; span >= stopLineTolMeters {
+			return false
+		}
+	}
+	return true
 }
 
 // arrivalsAt returns this tick's arrivals at the end of edge e.
@@ -303,6 +337,15 @@ type stopInfo struct {
 
 	// What holds the vehicle at the line (all false: nothing does).
 	red, yield, leftTurn, incident bool
+
+	// soft: the obligation is a shut gap (yield or left turn) judged from
+	// farther than gapDecisionDist. It counts for the stuck guard and
+	// impatience but puts no stopped virtual leader in front of the vehicle.
+	soft bool
+	// pastControlled: the walk passed a controlled line (a signal, a sign,
+	// or a left turn across opposing traffic) before this one, which the
+	// vehicle has not crossed yet.
+	pastControlled bool
 }
 
 func (s stopInfo) any() bool { return s.red || s.yield || s.leftTurn || s.incident }
@@ -317,17 +360,24 @@ func (s stopInfo) any() bool { return s.red || s.yield || s.leftTurn || s.incide
 // May update the vehicle's per-line state (YellowCall, StoppedSinceSec), so
 // call it once per vehicle per tick.
 func (w *World) nextStop(v *Vehicle, vi int) stopInfo {
+	if len(v.linesAhead) > 0 {
+		w.clearYellowMemosOnGreen(v)
+	}
 	h := lookaheadHorizon(v.V)
 	lane := v.Lane
 	d := -v.S // to the start of edge e
+	pastControlled := false
 	for j, e := v.RouteIdx, v.Edge; ; {
 		dEnd := d + w.Net.Edges[e].Length
 		if j > v.RouteIdx && dEnd > h {
 			break
 		}
-		if s := w.lineStop(v, vi, j, e, lane, math.Max(dEnd, 0)); s.any() {
+		s, controlled := w.lineStop(v, vi, j, e, lane, math.Max(dEnd, 0))
+		if s.any() {
+			s.pastControlled = pastControlled
 			return s
 		}
+		pastControlled = pastControlled || controlled
 		j++
 		if j >= len(v.Route) {
 			break
@@ -339,10 +389,43 @@ func (w *World) nextStop(v *Vehicle, vi int) stopInfo {
 	return stopInfo{}
 }
 
+// clearYellowMemosOnGreen forgets the yellow decision remembered for a line
+// beyond the current edge whose signal now shows pure green for the
+// vehicle's approach. nextStop stops at the first obligation, so while a
+// nearer line holds the vehicle it never reaches that signal's green, and an
+// old "go" would otherwise be reused on the next yellow.
+func (w *World) clearYellowMemosOnGreen(v *Vehicle) {
+	for i := 0; i < len(v.linesAhead); i++ {
+		m := v.linesAhead[i]
+		if m.call == yellowUndecided {
+			continue
+		}
+		x := w.intersectionAt(m.edge)
+		if x == nil || !x.HasSignal {
+			continue
+		}
+		st := w.SignalStates[x.ID]
+		if st == nil || st.Mode != ModeNormal || st.IsYellow {
+			continue
+		}
+		if pos := IncomingPos(x, m.edge); pos >= 0 && st.GreenFor(pos) {
+			ls := v.lineAt(m.idx)
+			ls.call = yellowUndecided
+			v.setLineAt(m.idx, ls)
+			if i < len(v.linesAhead) && v.linesAhead[i].idx != m.idx {
+				i-- // the memo was dropped; the next one moved into slot i
+			}
+		}
+	}
+}
+
 // lineStop evaluates the line at the end of edge e (route index j), which the
 // vehicle will reach in `lane`, dist metres ahead of its front bumper.
-func (w *World) lineStop(v *Vehicle, vi, j int, e network.EdgeID, lane uint8, dist float64) stopInfo {
-	s := stopInfo{dist: dist, j: j}
+// controlled reports whether the line governs this approach at all (a
+// signal, a sign, or a left turn across opposing traffic), whether or not it
+// holds the vehicle now.
+func (w *World) lineStop(v *Vehicle, vi, j int, e network.EdgeID, lane uint8, dist float64) (s stopInfo, controlled bool) {
+	s = stopInfo{dist: dist, j: j}
 	next, hasNext := network.EdgeID(0), j+1 < len(v.Route)
 	if hasNext {
 		next = v.Route[j+1]
@@ -360,21 +443,29 @@ func (w *World) lineStop(v *Vehicle, vi, j int, e network.EdgeID, lane uint8, di
 	}
 	x := w.intersectionAt(e)
 	if x == nil {
-		return s
+		return s, false
 	}
 	pos := IncomingPos(x, e)
 	if pos < 0 {
-		return s
+		return s, false
 	}
-	near := dist <= gapDecisionDist(v.V) // close enough to judge a gap
+	ctrl := effectiveControl(w, x, pos)
+	leftAcross := hasNext && pos < len(x.Opposing) && x.Opposing[pos] >= 0 &&
+		w.turnAt(e, next).cat == network.TurnLeft
+	controlled = x.HasSignal || ctrl != network.ControlNone || leftAcross
+	// Gaps are judged from any distance, so a queue far back on the approach
+	// knows it is waiting, but only braked for once near (see stopInfo.soft).
+	near := dist <= gapDecisionDist(v.V)
 	s.red = w.redAt(v, j, e, x, pos, dist)
 	if !s.red {
-		s.yield = w.yieldAt(v, vi, j, e, next, hasNext, x, pos, dist, near)
+		s.yield = w.yieldAt(v, vi, j, e, next, hasNext, x, pos, dist, ctrl)
+		s.soft = s.yield && ctrl == network.ControlYield && !near
 	}
-	if !s.red && !s.yield && hasNext && near {
+	if !s.red && !s.yield && leftAcross {
 		s.leftTurn = w.leftTurnBlocked(v, vi, j, e, next, x, pos)
+		s.soft = s.leftTurn && !near
 	}
-	return s
+	return s, controlled
 }
 
 // redAt reports whether the signal at x holds a vehicle approaching on edge e
@@ -436,19 +527,18 @@ func (w *World) redAt(v *Vehicle, j int, e network.EdgeID, x *network.Intersecti
 //   - ControlStop:       mandatory dwell, then gap acceptance.
 //   - ControlAllWayStop: mandatory dwell, then FIFO arbitration.
 //
-// For signals, effectiveControl maps the mode: ModeNormal is ControlNone
-// (redAt owns it); off and flash modes become all-way-stop / stop / none.
-// A yield sign's gap is only judged once near (see gapDecisionDist); the
-// mandatory stop of a stop or all-way-stop applies from any distance.
+// ctrl is effectiveControl(w, x, pos): for signals it maps the mode
+// (ModeNormal is ControlNone, redAt owns it; off and flash modes become
+// all-way-stop / stop / none).
 //
 // Records the stop time for line j (via markStopped) when the vehicle first
 // comes to rest near a stop or all-way-stop line.
 func (w *World) yieldAt(v *Vehicle, vi, j int, e, next network.EdgeID, hasNext bool,
-	x *network.Intersection, pos int, dist float64, near bool,
+	x *network.Intersection, pos int, dist float64, ctrl network.Control,
 ) bool {
-	switch effectiveControl(w, x, pos) {
+	switch ctrl {
 	case network.ControlYield:
-		return near && w.gapBlocked(v, vi, j, x, pos)
+		return w.gapBlocked(v, vi, j, x, pos)
 	case network.ControlStop:
 		if !w.dwelled(v, j) {
 			w.markStopped(v, j, dist)
@@ -506,7 +596,7 @@ func (w *World) gapBlocked(v *Vehicle, vi, j int, x *network.Intersection, pos i
 		}
 		g := criticalGap(v, base, wait)
 		for i := range arr {
-			if int(arr[i].vi) != vi && arr[i].within(g) {
+			if int(arr[i].vi) != vi && !arr[i].short && arr[i].within(g) {
 				return true
 			}
 		}
@@ -522,7 +612,7 @@ func (w *World) allWayStopBlocked(v *Vehicle, vi, j int, e, next network.EdgeID,
 	x *network.Intersection, pos int,
 ) bool {
 	vLeft := hasNext && w.turnAt(e, next).cat == network.TurnLeft
-	mySince := v.lineAt(j).stoppedSince
+	mySince := v.clusterStop(j)
 	for k, ie := range x.Incoming {
 		if k == pos {
 			continue
@@ -577,7 +667,7 @@ func (w *World) leftTurnBlocked(v *Vehicle, vi, j int, e, next network.EdgeID, x
 	}
 	g := criticalGap(v, leftTurnGapSec, v.lineAt(j).wait)
 	for i := range arr {
-		if a := &arr[i]; int(a.vi) != vi && !a.left && a.within(g) {
+		if a := &arr[i]; int(a.vi) != vi && !a.left && !a.short && a.within(g) {
 			return true
 		}
 	}
