@@ -304,7 +304,7 @@ func TestWorld_YellowCommitsWhenTooClose(t *testing.T) {
 	w.Vehicles = []Vehicle{{ID: 1, Route: []network.EdgeID{0}, Edge: 0, S: 190, V: 13}}
 	w.nextID = 2
 
-	if _, isRed := w.stopDistanceForRed(&w.Vehicles[0]); isRed {
+	if _, isRed := redStop(w, &w.Vehicles[0]); isRed {
 		t.Errorf("yellow + 10m at 13 m/s: expected commit, got virtual stop leader")
 	}
 }
@@ -323,7 +323,7 @@ func TestWorld_YellowStopsWhenComfortable(t *testing.T) {
 	w.Vehicles = []Vehicle{{ID: 1, Route: []network.EdgeID{0}, Edge: 0, S: 100, V: 13}}
 	w.nextID = 2
 
-	d, isRed := w.stopDistanceForRed(&w.Vehicles[0])
+	d, isRed := redStop(w, &w.Vehicles[0])
 	if !isRed {
 		t.Errorf("yellow + 100m at 13 m/s: expected stop, got commit")
 	}
@@ -345,7 +345,7 @@ func TestWorld_PureGreenDoesNotStop(t *testing.T) {
 	w.Vehicles = []Vehicle{{ID: 1, Route: []network.EdgeID{0}, Edge: 0, S: 50, V: 13}}
 	w.nextID = 2
 
-	if _, isRed := w.stopDistanceForRed(&w.Vehicles[0]); isRed {
+	if _, isRed := redStop(w, &w.Vehicles[0]); isRed {
 		t.Errorf("pure green: expected no virtual leader, got isRed=true")
 	}
 }
@@ -368,7 +368,7 @@ func TestWorld_YellowStopsWhenStandingStill(t *testing.T) {
 	w.Vehicles = []Vehicle{{ID: 1, Route: []network.EdgeID{0}, Edge: 0, S: 180, V: 0}}
 	w.nextID = 2
 
-	if _, isRed := w.stopDistanceForRed(&w.Vehicles[0]); !isRed {
+	if _, isRed := redStop(w, &w.Vehicles[0]); !isRed {
 		t.Errorf("stopped at yellow with 20m clearance: expected stop holds, got commit")
 	}
 }
@@ -719,8 +719,7 @@ func TestWorld_TraceDeterminism(t *testing.T) {
 // logged at WARN level and despawned.
 func TestWorld_StuckVehicleDespawned(t *testing.T) {
 	// Single 200m edge, no intersection at the end. With no intersection,
-	// stopDistanceForRed and stopDistanceForYield both return false, so the
-	// stuck condition can trigger.
+	// nextStop finds no red and no yield, so the stuck condition can trigger.
 	nodes := []network.Node{
 		{ID: 0, Pos: network.Point{X: 0, Y: 0}},
 		{ID: 1, Pos: network.Point{X: 200, Y: 0}},
@@ -764,8 +763,8 @@ func TestWorld_StuckVehicleDespawned(t *testing.T) {
 }
 
 // TestWorld_StuckAtRedNotDespawned: a vehicle stopped at a red light for
-// longer than the stuck timeout must NOT be despawned, because
-// stopDistanceForRed returning true is the "legitimately stopped" branch.
+// longer than the stuck timeout must NOT be despawned, because a red from
+// nextStop is the "legitimately stopped" branch.
 func TestWorld_StuckAtRedNotDespawned(t *testing.T) {
 	// Same setup as TestWorld_StopsAtRedLight: single edge ending in a
 	// signalized intersection forced all-red.
@@ -807,8 +806,8 @@ func TestWorld_StuckAtRedNotDespawned(t *testing.T) {
 }
 
 // TestWorld_StuckAtYieldNotDespawned: a vehicle correctly yielding at an
-// unsignalized intersection must NOT be despawned, because
-// stopDistanceForYield returning true is the "legitimately stopped" branch.
+// unsignalized intersection must NOT be despawned, because a yield from
+// nextStop is the "legitimately stopped" branch.
 func TestWorld_StuckAtYieldNotDespawned(t *testing.T) {
 	// Two incoming edges into an unsignalized intersection. Incoming[0]
 	// (priority road) and Incoming[1] (yield road).
@@ -849,7 +848,7 @@ func TestWorld_StuckAtYieldNotDespawned(t *testing.T) {
 	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
 	// Priority vehicle pinned at S=99 (1 m from intersection) with V=2.0 m/s
 	// → ETA = 0.5 s, which is below minAcceptedGap (1.5 s). Impatience can
-	// never shrink effectiveGap below 1.5 s, so the yield vehicle must wait
+	// never shrink criticalGap below 1.5 s, so the yield vehicle must wait
 	// indefinitely and must not be despawned by the stuck-vehicle guard.
 	// Yield vehicle approaching its own stop line.
 	w.Vehicles = []Vehicle{
@@ -1277,10 +1276,12 @@ func TestWorld_StopSign_GapAcceptance(t *testing.T) {
 	net := &network.Network{Nodes: nodes, Edges: edges, Intersections: xs}
 
 	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
-	// Priority vehicle pinned close to the line at low speed (ETA inside
-	// gapThresholdSec). Stop vehicle approaching its line (starts at S=50, V=8).
+	// Priority vehicle pinned close to the line at low speed: ETA 1.2 s,
+	// inside gapThresholdSec and below minAcceptedGap, so no amount of
+	// impatience accepts it. Stop vehicle approaching its line (starts at
+	// S=50, V=8).
 	w.Vehicles = []Vehicle{
-		{ID: 1, Route: []network.EdgeID{0, 2}, Edge: 0, S: 99, V: 0.5},
+		{ID: 1, Route: []network.EdgeID{0, 2}, Edge: 0, S: 99.4, V: 0.5},
 		{ID: 2, Route: []network.EdgeID{1, 3}, Edge: 1, S: 50, V: 8},
 	}
 	w.nextID = 3
@@ -1290,7 +1291,7 @@ func TestWorld_StopSign_GapAcceptance(t *testing.T) {
 		// keeps seeing it as imminent cross-traffic.
 		for j := range w.Vehicles {
 			if w.Vehicles[j].ID == 1 && !w.Vehicles[j].Despawned {
-				w.Vehicles[j].S = 99
+				w.Vehicles[j].S = 99.4
 				w.Vehicles[j].V = 0.5
 			}
 		}
@@ -1325,7 +1326,7 @@ func TestWorld_LeftTurn_PriorityRoad_YieldsToOpposing(t *testing.T) {
 	// Vehicle A: north approach, turning left (heading west out).
 	// Vehicle B: south approach (opposing A), going straight (heading north out).
 	// Both approaches are ControlNone (priority road).
-	// Expect A to yield (mustYield via leftTurnYieldsToOpposing).
+	// Expect A to yield (mustYieldLT via leftTurnBlocked).
 	nodes := []network.Node{
 		{ID: 0, Pos: network.Point{X: 0, Y: 100}},  // N origin (A starts here)
 		{ID: 1, Pos: network.Point{X: 0, Y: -100}}, // S origin (B starts here)
@@ -1507,7 +1508,7 @@ func TestWorld_LeftTurn_StuckGuardBypassed(t *testing.T) {
 	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
 	// Vehicle B pinned at S=98 (2 m from intersection) with V=2.0 m/s
 	// → ETA = 1.0 s, below minAcceptedGap (1.5 s). Impatience can never
-	// shrink effectiveGap below 1.5 s, so vehicle A must wait indefinitely
+	// shrink criticalGap below 1.5 s, so vehicle A must wait indefinitely
 	// and must not be despawned by the stuck-vehicle guard.
 	w.Vehicles = []Vehicle{
 		{ID: 1, Route: []network.EdgeID{0, 2}, Edge: 0, S: 98, V: 0.5}, // A: left, near line
@@ -2102,7 +2103,7 @@ func TestWorld_GapFactor_Heterogeneous(t *testing.T) {
 
 // TestWorld_Impatience_StraightCrossingShrinksGap: a yield-controlled
 // vehicle facing perpetual cross-traffic with ETA=2.5s yields at t=0
-// (base gap 3s > 2.5s ETA → yield). After ~5s wait, effectiveGap
+// (base gap 3s > 2.5s ETA → yield). After ~5s wait, criticalGap
 // drops to 2.5s and vehicle accepts the gap. Test verifies the wait
 // duration and the eventual departure.
 func TestWorld_Impatience_StraightCrossingShrinksGap(t *testing.T) {
@@ -3130,23 +3131,23 @@ func TestWorld_YellowDecisionRemembered(t *testing.T) {
 	st.IsYellow = true
 
 	v := &Vehicle{ID: 1, Route: []network.EdgeID{0}, Edge: 0, S: 170, V: 13} // 30 m out: go
-	if _, stop := w.stopDistanceForRed(v); stop || v.YellowCall != yellowGo {
+	if _, stop := redStop(w, v); stop || v.YellowCall != yellowGo {
 		t.Fatalf("30 m at 13 m/s with 3 s of yellow: want go, got stop=%v call=%d", stop, v.YellowCall)
 	}
 	// Red arrives with the car 5 m from the line: it finishes the crossing.
 	st.PhaseIdx, st.IsYellow, st.Elapsed = 1, false, 0
 	v.S = 195
-	if _, stop := w.stopDistanceForRed(v); stop {
+	if _, stop := redStop(w, v); stop {
 		t.Fatalf("committed car 5 m from the line at red onset was turned back")
 	}
 	// A committed car that has been slowed far from the line must stop.
 	v.S, v.V = 150, 3
-	if _, stop := w.stopDistanceForRed(v); !stop {
+	if _, stop := redStop(w, v); !stop {
 		t.Fatalf("committed car 50 m out at 3 m/s ran the red")
 	}
 	// Next green clears the decision.
 	st.PhaseIdx = 0
-	w.stopDistanceForRed(v)
+	redStop(w, v)
 	if v.YellowCall != yellowUndecided {
 		t.Fatalf("green did not clear the yellow decision (call=%d)", v.YellowCall)
 	}

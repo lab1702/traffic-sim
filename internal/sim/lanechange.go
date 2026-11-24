@@ -58,8 +58,10 @@ const turnBiasRange = 300.0 // meters before the intersection
 //     target lane (inner while circulating, outer within K of the exit).
 //     Runs after incident-vacate and before turn bias; respects safety gaps.
 //   - Turn bias: within turnBiasRange of an intersection where v will turn,
-//     shift toward the nearest lane whose AllowedTurns includes the next
-//     route edge. Skips the speed-difference threshold but keeps safety gaps.
+//     shift toward the nearest lane that suits the route ahead: its
+//     AllowedTurns include the next route edge and, through short edges,
+//     the turns after it (see routeLaneMask). Skips the speed-difference
+//     threshold but keeps safety gaps.
 //   - Speed-driven (existing): catch a faster gap on a neighbor lane.
 //     When turn bias is active, this still runs only if the ego lane is
 //     already compatible, AND candidate lanes that would become
@@ -109,20 +111,19 @@ func tryLaneChange(v *Vehicle, vi int, laneVehicles map[uint8][]int, vs []Vehicl
 	}
 
 	// --- Turn-bias context ---
-	var nextE network.EdgeID
+	// fit has bit l set when lane l suits the route ahead (routeLaneMask);
+	// turnContext means some lane does not, so lane choice matters.
+	var fit uint64
 	turnContext := false
-	if v.RouteIdx+1 < len(v.Route) {
-		nextE = v.Route[v.RouteIdx+1]
-		dToInt := edge.Length - v.S
-		if dToInt <= turnBiasRange && len(edge.Lanes[v.Lane].AllowedTurns) > 0 {
-			turnContext = true
-		}
+	if v.RouteIdx+1 < len(v.Route) && edge.Length-v.S <= turnBiasRange && numLanes <= 64 {
+		fit = routeLaneMask(v, net, numLanes)
+		turnContext = fit != 1<<numLanes-1
 	}
-	myCompatible := !turnContext || laneAllows(edge.Lanes[v.Lane].AllowedTurns, nextE)
+	myCompatible := !turnContext || fit&(1<<v.Lane) != 0
 
 	// --- Turn bias branch: ego in incompatible lane, must migrate ---
 	if turnContext && !myCompatible {
-		_, dl, ok := nearestCompatibleLane(edge.Lanes, v.Lane, nextE)
+		dl, ok := nearestLaneIn(fit, v.Lane, numLanes)
 		if !ok {
 			return
 		}
@@ -185,7 +186,7 @@ func tryLaneChange(v *Vehicle, vi int, laneVehicles map[uint8][]int, vs []Vehicl
 		if nl == int(closedLane) {
 			continue // an empty closed lane looks fast, but it ends at the obstacle
 		}
-		if turnContext && !laneAllows(edge.Lanes[nl].AllowedTurns, nextE) {
+		if turnContext && fit&(1<<uint(nl)) == 0 {
 			continue
 		}
 		if !laneGapSafe(v, vi, laneVehicles[uint8(nl)], vs, edge) {
@@ -194,6 +195,88 @@ func tryLaneChange(v *Vehicle, vi int, laneVehicles map[uint8][]int, vs []Vehicl
 		changeLane(v, dl)
 		return
 	}
+}
+
+// laneChangeRoom is the shortest edge on which a vehicle can still be counted
+// on to change lanes before its end. netbuild splits roads at every shared
+// node, so the only lane that reaches a turn lane may have to be chosen on
+// the edge before a short one; turn bias plans the lane through edges
+// shorter than this (see laneFitsRoute).
+const laneChangeRoom = 50.0 // m
+
+// routeLaneMask returns a bit mask of the lanes of v's current edge that suit
+// its route ahead (bit l: lane l), for edges of at most 64 lanes. A lane
+// suits it when the vehicle can stay in it, and in the lanes it carries into
+// through each node, through every turn up to and including the end of the
+// first edge long enough to change lanes on (laneFitsRoute). When no lane
+// manages that, it falls back to the lanes whose AllowedTurns include the
+// next route edge, the one-edge rule.
+func routeLaneMask(v *Vehicle, net *network.Network, numLanes uint8) uint64 {
+	lanes := net.Edges[v.Edge].Lanes
+	nextE := v.Route[v.RouteIdx+1]
+	var planned, next uint64
+	for l := uint8(0); l < numLanes; l++ {
+		if !laneAllows(lanes[l].AllowedTurns, nextE) {
+			continue
+		}
+		next |= 1 << l
+		if laneFitsRoute(v, net, l) {
+			planned |= 1 << l
+		}
+	}
+	if planned != 0 {
+		return planned
+	}
+	return next
+}
+
+// laneFitsRoute reports whether a vehicle staying in `lane` of its current
+// edge, and in the lane postTurnLane carries it into at each node, can make
+// every turn ahead without changing lanes, up to the end of the first edge
+// at least laneChangeRoom long (where it can change lanes if it must) or
+// turnBiasRange metres, whichever comes first.
+func laneFitsRoute(v *Vehicle, net *network.Network, lane uint8) bool {
+	e := v.Edge
+	d := net.Edges[e].Length - v.S
+	for j := v.RouteIdx + 1; j < len(v.Route) && d <= turnBiasRange; j++ {
+		next := v.Route[j]
+		if lanes := net.Edges[e].Lanes; int(lane) < len(lanes) && !laneAllows(lanes[lane].AllowedTurns, next) {
+			return false
+		}
+		if int(next) >= len(net.Edges) || net.Edges[next].Length >= laneChangeRoom {
+			return true // room to change lanes there (or nothing known to plan for)
+		}
+		lane = postTurnLane(lane, network.ClassifyTurn(net, e, next), uint8(len(net.Edges[next].Lanes)))
+		e = next
+		d += net.Edges[e].Length
+	}
+	return true
+}
+
+// nearestLaneIn returns the direction step (±1) from lane `from` toward the
+// nearest lane in mask (bit l: lane l), ties toward the lower index, and
+// false when mask holds no lane below numLanes.
+func nearestLaneIn(mask uint64, from, numLanes uint8) (int8, bool) {
+	best, bestDist := -1, 1<<30
+	for l := 0; l < int(numLanes); l++ {
+		if mask&(1<<uint(l)) == 0 {
+			continue
+		}
+		d := l - int(from)
+		if d < 0 {
+			d = -d
+		}
+		if d < bestDist {
+			best, bestDist = l, d
+		}
+	}
+	if best < 0 {
+		return 0, false
+	}
+	if best < int(from) {
+		return -1, true
+	}
+	return 1, true
 }
 
 // laneAllows reports whether `nextE` is in the lane's AllowedTurns list.

@@ -95,24 +95,24 @@ func TestIncidentStopDistance_Blocks(t *testing.T) {
 	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
 	v := &Vehicle{Edge: 0, Lane: 0, S: 50}
 
-	if _, ok := w.incidentStopDistance(v); ok {
+	if _, ok := incidentStop(w, v); ok {
 		t.Fatal("no incident should not block")
 	}
 	w.Incidents[0] = FullClose
-	if d, ok := w.incidentStopDistance(v); !ok || math.Abs(d-150) > 1e-9 {
+	if d, ok := incidentStop(w, v); !ok || math.Abs(d-150) > 1e-9 {
 		t.Fatalf("FullClose got (%.2f,%v) want (150,true)", d, ok)
 	}
 	w.Incidents[0] = LaneClose // closes curb lane 0
-	if d, ok := w.incidentStopDistance(v); !ok || math.Abs(d-150) > 1e-9 {
+	if d, ok := incidentStop(w, v); !ok || math.Abs(d-150) > 1e-9 {
 		t.Fatalf("LaneClose lane0 got (%.2f,%v) want (150,true)", d, ok)
 	}
 	v.Lane = 1
-	if _, ok := w.incidentStopDistance(v); ok {
+	if _, ok := incidentStop(w, v); ok {
 		t.Fatal("LaneClose should not block a vehicle in the open lane")
 	}
 	v.Lane = 0
 	w.Incidents[0] = Slowdown
-	if _, ok := w.incidentStopDistance(v); ok {
+	if _, ok := incidentStop(w, v); ok {
 		t.Fatal("Slowdown should not block")
 	}
 }
@@ -548,7 +548,7 @@ func TestWorld_SingleLaneLaneClose_BlocksEntryAndRouting(t *testing.T) {
 		t.Fatalf("one-lane LaneClose cost = %v, want full-close cost %v", c, incidentFullCloseCost)
 	}
 	v := &Vehicle{Route: []network.EdgeID{0, 1}, Edge: 0, S: 60}
-	d, blocked := w.incidentStopDistance(v)
+	d, blocked := incidentStop(w, v)
 	if !blocked || d != 40 {
 		t.Fatalf("entry to a one-lane LaneClose edge: got (%.1f, %v), want (40, true)", d, blocked)
 	}

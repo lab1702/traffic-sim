@@ -594,7 +594,7 @@ func applyStopAllOrMinor(x *network.Intersection, tags osm.Tags, classOfEdge fun
 // approaches (Roundabout edges) keep priority (ControlNone) and never stop;
 // entering approaches yield (ControlYield). Returns true if the node is on a
 // ring (has at least one incoming Roundabout edge), in which case the caller
-// must skip the normal class/sign resolution chain. The sim's yieldGapCheck
+// must skip the normal class/sign resolution chain. The sim's gapBlocked
 // then makes entries yield to the circulating edge automatically, since the
 // only ControlNone approach at the node is the circulating one.
 func applyRoundaboutControl(x *network.Intersection, edges []network.Edge) bool {

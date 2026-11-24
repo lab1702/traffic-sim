@@ -75,7 +75,7 @@ func (w *World) edgeFullyBlocked(eid network.EdgeID) bool {
 
 // closedLaneFor returns the closed lane index and true when the edge has a
 // LaneClose incident. v1 always closes the curb lane (index 0). FullClose is
-// handled by incidentStopDistance (all lanes), not here.
+// handled by lineStop (all lanes), not here.
 func (w *World) closedLaneFor(eid network.EdgeID) (uint8, bool) {
 	if w.Incidents[eid] != LaneClose {
 		return 0, false
@@ -84,43 +84,6 @@ func (w *World) closedLaneFor(eid network.EdgeID) (uint8, bool) {
 		return 0, false
 	}
 	return 0, true
-}
-
-// incidentStopDistance returns (distance from the vehicle's front bumper to
-// the incident obstacle, true) when the vehicle is blocked by an incident.
-// The obstacle sits at the current edge's downstream end. Two cases:
-//
-//   - The current edge is closed — a full closure (all lanes) or a lane
-//     closure of the vehicle's lane: the vehicle (already on the edge) stops at
-//     the far end.
-//   - The next route edge is fully blocked (see edgeFullyBlocked): an entry
-//     block. The vehicle stops at the current edge's end (the entrance to the
-//     closed edge) so it never drives into/through it. A lane closure on a
-//     multi-lane next edge is NOT blocked — its open lanes still carry traffic.
-//
-// Mirrors stopDistanceForRed's shape so Step can fold it into the virtual-leader
-// set.
-func (w *World) incidentStopDistance(v *Vehicle) (float64, bool) {
-	sev := w.Incidents[v.Edge]
-	blocked := w.edgeFullyBlocked(v.Edge)
-	if !blocked && sev == LaneClose {
-		if cl, ok := w.closedLaneFor(v.Edge); ok && v.Lane == cl {
-			blocked = true
-		}
-	}
-	if !blocked && v.RouteIdx+1 < len(v.Route) {
-		if w.edgeFullyBlocked(v.Route[v.RouteIdx+1]) {
-			blocked = true // entry block: don't cross into a fully-closed edge
-		}
-	}
-	if !blocked {
-		return 0, false
-	}
-	d := w.Net.Edges[v.Edge].Length - v.S
-	if d < 0 {
-		d = 0
-	}
-	return d, true
 }
 
 // applyIncident sets or clears the incident on an edge and records it. Out-of-

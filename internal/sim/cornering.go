@@ -6,50 +6,6 @@ import (
 	"github.com/lab1702/traffic-sim/internal/network"
 )
 
-// computeDesiredSpeed returns the v0 (desired speed) for IDM. It is the current
-// edge's speed limit (scaled by the driver's preference and any Slowdown
-// incident), optionally reduced for an upcoming turn. The turn reduction uses a
-// radius-based comfortable speed and a smooth kinematic approach profile so the
-// vehicle eases into the corner rather than braking hard far upstream.
-func (w *World) computeDesiredSpeed(v *Vehicle) float64 {
-	edge := &w.Net.Edges[v.Edge]
-	// Per-driver speed preference. A zero factor means a hand-constructed
-	// vehicle (test fixture) — treat as 1.0 so existing tests work.
-	factor := v.SpeedFactor
-	if factor == 0 {
-		factor = 1.0
-	}
-	v0 := edge.SpeedLimit * factor
-	if w.Incidents[v.Edge] == Slowdown {
-		if cap := edge.SpeedLimit * incidentSlowdownFactor; cap < v0 {
-			v0 = cap
-		}
-	}
-	if v.RouteIdx+1 >= len(v.Route) {
-		return v0 // no next edge: nothing to slow for
-	}
-	nextEdge := v.Route[v.RouteIdx+1]
-	radius, deflection := turnGeometry(w.Net, v.Edge, nextEdge)
-	if deflection < minCornerAngle {
-		return v0 // bend too gentle to slow for (drivers don't lift for slight bends)
-	}
-	vSafe := cornerSpeed(radius)
-	if math.IsInf(vSafe, 1) || vSafe >= v0 {
-		return v0 // turn imposes no meaningful speed constraint
-	}
-	// Kinematic approach: the max speed from which we can still decelerate at
-	// cornerBrakeDecel to reach vSafe by the corner (distance d ahead). Far from
-	// the corner this exceeds v0 (no effect); it eases to vSafe as d -> 0.
-	d := edge.Length - v.S
-	if d < 0 {
-		d = 0
-	}
-	if v0corner := math.Sqrt(vSafe*vSafe + 2*cornerBrakeDecel*d); v0corner < v0 {
-		return v0corner
-	}
-	return v0
-}
-
 // circumradius returns the radius of the circle through three points, or +Inf
 // when they are (near-)collinear. A straight road therefore yields no
 // curvature constraint. R = (|ab|·|bc|·|ca|) / (4·area); area is half the
