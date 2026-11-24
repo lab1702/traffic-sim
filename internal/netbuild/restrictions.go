@@ -29,6 +29,7 @@ func applyOSMRestrictions(
 	intersections []network.Intersection,
 	edges []network.Edge,
 	osmWayOfEdge []osm.WayID,
+	edgeSpan [][2]int,
 	osmToNet map[osm.NodeID]network.NodeID,
 	feat *osmload.Features,
 	osmNodeOf func(network.NodeID) (osm.NodeID, bool),
@@ -63,7 +64,7 @@ func applyOSMRestrictions(
 	}
 
 	for _, r := range restrictions {
-		if applyOne(r, edges, wayToEdges, osmToNet, xAtNode, wayByID, osmNodeOf) {
+		if applyOne(r, edges, edgeSpan, wayToEdges, osmToNet, xAtNode, wayByID, osmNodeOf) {
 			applied++
 		} else {
 			skipped++
@@ -77,6 +78,7 @@ func applyOSMRestrictions(
 func applyOne(
 	r *osm.Relation,
 	edges []network.Edge,
+	edgeSpan [][2]int,
 	wayToEdges map[osm.WayID][]network.EdgeID,
 	osmToNet map[osm.NodeID]network.NodeID,
 	xAtNode map[network.NodeID]*network.Intersection,
@@ -139,13 +141,13 @@ func applyOne(
 	// 4. Find the from edge: belongs to fromWay AND ends at viaNet.
 	//    For through-ways (way passes through via), multiple candidates match;
 	//    prefer the one in the way's forward direction.
-	fromEdge, ok := pickEdgeAt(wayToEdges[fromWay], edges, viaNet, true /*ends-at*/,
+	fromEdge, ok := pickEdgeAt(wayToEdges[fromWay], edges, edgeSpan, viaNet, true /*ends-at*/,
 		wayByID[fromWay], viaNode, osmNodeOf)
 	if !ok {
 		return false
 	}
 	// 5. Find the to edge: belongs to toWay AND starts at viaNet.
-	toEdge, ok := pickEdgeAt(wayToEdges[toWay], edges, viaNet, false /*starts-at*/,
+	toEdge, ok := pickEdgeAt(wayToEdges[toWay], edges, edgeSpan, viaNet, false /*starts-at*/,
 		wayByID[toWay], viaNode, osmNodeOf)
 	if !ok {
 		return false
@@ -204,8 +206,14 @@ func applyOne(
 //
 // Falls back to the first slice-order match if disambiguation isn't
 // possible (way unknown, via not found in way, edge endpoints missing).
+//
+// When edgeSpan (each edge's From/To positions in its way, see Build) covers
+// the matches, the forward one is simply the one whose From comes before its
+// To. Searching the way for the nodes instead finds the first of the two
+// positions a closed way gives its first node, which misjudges the segment
+// that closes the ring; that search remains for callers without spans.
 func pickEdgeAt(
-	candidates []network.EdgeID, edges []network.Edge, node network.NodeID, endsAt bool,
+	candidates []network.EdgeID, edges []network.Edge, edgeSpan [][2]int, node network.NodeID, endsAt bool,
 	way *osm.Way, viaOSM osm.NodeID, osmNodeOf func(network.NodeID) (osm.NodeID, bool),
 ) (network.EdgeID, bool) {
 	var matches []network.EdgeID
@@ -224,7 +232,26 @@ func pickEdgeAt(
 	if len(matches) == 0 {
 		return 0, false
 	}
-	if len(matches) == 1 || way == nil {
+	if len(matches) == 1 {
+		return matches[0], true
+	}
+	if spansKnown := len(edgeSpan) > 0; spansKnown {
+		for _, eid := range matches {
+			if int(eid) >= len(edgeSpan) {
+				spansKnown = false
+				break
+			}
+		}
+		if spansKnown {
+			for _, eid := range matches {
+				if edgeSpan[eid][0] < edgeSpan[eid][1] {
+					return eid, true
+				}
+			}
+			return matches[0], true
+		}
+	}
+	if way == nil {
 		return matches[0], true
 	}
 

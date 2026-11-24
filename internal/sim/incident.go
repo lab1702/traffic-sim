@@ -109,6 +109,7 @@ func (w *World) applyIncident(ev IncidentEvent) {
 	if twin, ok := w.reverseEdge[ev.EdgeID]; ok {
 		w.setIncidentEdge(twin, ev.Severity)
 	}
+	w.incidentGen++
 }
 
 // setIncidentEdge sets or clears the incident on a single directed edge and

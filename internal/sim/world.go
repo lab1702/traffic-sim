@@ -106,6 +106,12 @@ type World struct {
 	// no incident. Owned by the sim goroutine; read by publishSnapshot.
 	Incidents map[network.EdgeID]Severity
 
+	// incidentGen counts changes to Incidents made through applyIncident,
+	// starting at 1. A GPS vehicle records the value its route was last
+	// planned with (Vehicle.rerouteGen) so maybeReroute bypasses its cooldown
+	// for a closure ahead only once per change.
+	incidentGen uint64
+
 	// IncidentControl delivers runtime incident commands from the UI. Step
 	// drains it non-blocking at the top of each tick, like Control. Nil
 	// disables.
@@ -231,6 +237,7 @@ func NewWorld(net *network.Network, spawner Spawner, overrides map[network.Inter
 		rng:           rand.New(rand.NewPCG(0xCAFE, 0xBEEF)),
 		Cong:          NewCongestion(net, ewmaHalfLifeSec, DefaultDt),
 		Incidents:     make(map[network.EdgeID]Severity),
+		incidentGen:   1, // a hand-built vehicle (rerouteGen 0) has planned with none
 		reverseEdge:   buildReverseEdges(net),
 		GpsShare:      1.0,
 		inEdges:       inEdges,
@@ -616,10 +623,16 @@ func (w *World) Step() {
 
 		stop := w.nextStop(v, i)
 		hard := stop.any() && !stop.soft
+		followsVehicle := has // the binding leader is a vehicle, not a stop line
 		if hard {
 			if virtualS := v.S + stop.dist; !has || virtualS < lS {
 				lS, lV, has = virtualS, 0, true
+				followsVehicle = false
 			}
+		}
+		var stopEdge network.EdgeID // the edge whose end is the stop line, read before a reroute
+		if stop.any() {
+			stopEdge = v.Route[stop.j]
 		}
 		// Remember the holding line for next tick's arrivals and detectors.
 		v.heldBy = 0
@@ -637,6 +650,17 @@ func (w *World) Step() {
 		atOwnLine := stop.j == v.RouteIdx || stop.dist < stopLineTolMeters
 		held := (isRed || mustYield || mustYieldLT) && atOwnLine &&
 			(stop.j == v.RouteIdx || !stop.pastControlled)
+		// queued: behind a vehicle that was, at the start of the tick, stopped
+		// and held at its line or itself queued, waiting for that same line:
+		// it is the first stop line ahead (or lies beyond the horizon) with no
+		// other controlled line in between. A red longer than the stuck
+		// timeout holds the whole queue, not only the cars on the approach
+		// edge, which on netbuild's short edges is one or two cars. A queue
+		// that runs back through another controlled line does not count, so a
+		// gridlock through junctions (each head waiting on another queue's
+		// tail) still clears.
+		queued := !held && followsVehicle && info.stopped && info.rank > 0 &&
+			!stop.pastControlled && (!stop.any() || stopEdge == info.line)
 		// Impatience builds while waiting at the line, or on its approach
 		// edge as before the lookahead, also past a nearer junction: the
 		// car must be able to accept the gap there eventually.
@@ -681,10 +705,27 @@ func (w *World) Step() {
 		// Stuck-vehicle guard. Defensive against sim bugs that would
 		// otherwise leave a vehicle wedged forever. Runs only when the
 		// vehicle is below the speed threshold; reuses this tick's nextStop
-		// result. Only a vehicle held by its own line (see held) is waiting
-		// legitimately.
+		// result. A vehicle held by its own line (see held) is waiting
+		// legitimately; one queued behind it pauses its stuck time, which
+		// neither grows nor resets while the queue waits.
+		switch {
+		case held:
+			v.queueRank, v.queueLine = 1, stopEdge
+		case queued:
+			v.queueRank, v.queueLine = info.rank+1, info.line
+			if v.queueRank == 0 { // saturate rather than wrap to "not queued"
+				v.queueRank = math.MaxUint16
+			}
+		default:
+			v.queueRank = 0
+		}
 		if !v.Despawned && v.V < stuckSpeedThresh {
-			if !held {
+			switch {
+			case held:
+				v.StuckTime = 0
+			case queued:
+				// Waiting behind a held queue: neither stuck nor moving on.
+			default:
 				v.StuckTime += w.dt
 				if v.StuckTime > stuckTimeoutSec {
 					slog.Warn("stuck vehicle despawned",
@@ -701,8 +742,6 @@ func (w *World) Step() {
 					)
 					v.Despawned = true
 				}
-			} else {
-				v.StuckTime = 0
 			}
 		} else {
 			v.StuckTime = 0
@@ -722,13 +761,23 @@ func (w *World) Step() {
 		// Try lane change after stepping. byEdgeLane starts as this tick's
 		// snapshot; each accepted change is applied to it at once, so a later
 		// vehicle (in index order — deterministic) sees the lane as taken.
-		if lanes, ok := byEdgeLane[v.Edge]; ok {
+		// The safety check looks across the nodes at both ends of the edge
+		// (laneChangeSafe). A vehicle that has just crossed onto an edge with
+		// no bucket yet gets one, so a change it makes is recorded too.
+		if !v.Despawned {
+			lanes, ok := byEdgeLane[v.Edge]
+			if !ok {
+				lanes = make(map[uint8][]int)
+				byEdgeLane[v.Edge] = lanes
+			}
 			cl := int8(-1)
 			if c, ok := w.closedLaneFor(v.Edge); ok {
 				cl = int8(c)
 			}
 			before := v.Lane
-			tryLaneChange(v, i, lanes, w.Vehicles, w.Net, cl)
+			tryLaneChangeWith(v, i, lanes, w.Vehicles, w.Net, cl, func(nl uint8) bool {
+				return w.laneChangeSafe(i, nl, byEdgeLane)
+			})
 			if v.Lane != before {
 				moveLaneBucket(lanes, i, before, v.Lane, w.Vehicles)
 			}
@@ -762,9 +811,9 @@ const mergeRelief = 0.5
 // the same lane of the same next edge — so ego must slot in behind it. Merge
 // order is by S, ties broken by vehicle index, so of two cars exactly level
 // exactly one yields. Only vehicles within mergeZone of the edge end are
-// considered; returns ok=false when there is no such vehicle. The returned
-// position includes mergeRelief.
-func (w *World) mergeLeader(vi int, ln uint8, eid network.EdgeID, lanes map[uint8][]int) (float64, float64, bool) {
+// considered; returns ok=false when there is no such vehicle. Returns the
+// leader's position, including mergeRelief, and its vehicle index.
+func (w *World) mergeLeader(vi int, ln uint8, eid network.EdgeID, lanes map[uint8][]int) (float64, int, bool) {
 	if len(lanes) < 2 {
 		return 0, 0, false
 	}
@@ -777,7 +826,7 @@ func (w *World) mergeLeader(vi int, ln uint8, eid network.EdgeID, lanes map[uint
 	nLanes := uint8(len(w.Net.Edges[nextE].Lanes))
 	cat := w.turnAt(eid, nextE).cat
 	target := postTurnLane(ln, cat, nLanes)
-	bestS, bestV, bestI, found := 0.0, 0.0, 0, false
+	bestS, bestI, found := 0.0, 0, false
 	for ol, idxs := range lanes {
 		if ol == ln || postTurnLane(ol, cat, nLanes) != target {
 			continue
@@ -793,7 +842,7 @@ func (w *World) mergeLeader(vi int, ln uint8, eid network.EdgeID, lanes map[uint
 			// Ties on S go to the lower vehicle index, so the result does
 			// not depend on map iteration order over lanes.
 			if !found || c.S < bestS || (c.S == bestS && ci < bestI) {
-				bestS, bestV, bestI, found = c.S, c.V, ci, true
+				bestS, bestI, found = c.S, ci, true
 			}
 			break // idxs is sorted by S: the first eligible one is the nearest
 		}
@@ -801,7 +850,7 @@ func (w *World) mergeLeader(vi int, ln uint8, eid network.EdgeID, lanes map[uint
 	if !found {
 		return 0, 0, false
 	}
-	return bestS + mergeRelief*math.Max(edge.Length-bestS, 0), bestV, true
+	return bestS + mergeRelief*math.Max(edge.Length-bestS, 0), bestI, true
 }
 
 // sortVehicleIdxByS sorts idxs ascending by Vehicles[i].S (insertion sort;
@@ -821,9 +870,10 @@ func sortVehicleIdxByS(vs []Vehicle, idxs []int) {
 //
 // Returns false immediately — without consuming a budget slot or touching
 // LastRerouteSec — when HasGPS is false, the vehicle is on its last edge, or
-// the cooldown hasn't elapsed. Returns true (and stamps LastRerouteSec) once
-// A* is run, regardless of whether a switch was made; the caller decrements
-// the per-tick reroute budget on a true return.
+// the cooldown hasn't elapsed (and no closure ahead is new to it). Returns
+// true (and stamps LastRerouteSec and rerouteGen) once A* is run, regardless
+// of whether a switch was made; the caller decrements the per-tick reroute
+// budget on a true return.
 //
 // On switch it splices Route[:RouteIdx+1] + candidate (RouteIdx still points
 // at the current edge, unchanged) and emits a VehicleReroute event so replay
@@ -835,12 +885,18 @@ func (w *World) maybeReroute(v *Vehicle) bool {
 	if v.RouteIdx+1 >= len(v.Route) {
 		return false // on the last edge: nothing downstream to change
 	}
-	// Bypass the cooldown when a closure lies ahead: a committed vehicle should
-	// divert around it promptly rather than waiting out the cooldown.
-	if !w.closureAhead(v) && w.SimTime-v.LastRerouteSec < rerouteCooldownSec {
+	// Bypass the cooldown when a closure lies ahead that the route was not yet
+	// planned with: a committed vehicle should divert around it promptly
+	// rather than waiting out the cooldown. Once it has searched with the
+	// current incidents there is nothing new to find (from further along it
+	// has fewer ways round, not more), and retrying every tick cost a search
+	// of the whole network each time when no detour exists.
+	bypass := v.rerouteGen != w.incidentGen && w.closureAhead(v)
+	if !bypass && w.SimTime-v.LastRerouteSec < rerouteCooldownSec {
 		return false
 	}
 	v.LastRerouteSec = w.SimTime
+	v.rerouteGen = w.incidentGen
 
 	costFn := func(eid network.EdgeID) float64 { return w.edgeCost(eid) }
 	// Search from the end of the current edge, arriving via it: the vehicle
@@ -907,18 +963,19 @@ type edgeLane struct {
 }
 
 // spawnOccupancy is a per-tick index used to vet spawns: the rearmost
-// vehicle on each (edge, lane), and the frontmost vehicle on each edge. Built
-// once per tick that has spawn requests; trySpawn keeps it current as it
-// adds vehicles, so two spawns on the same edge in one tick see each other.
+// vehicle on each (edge, lane), and every vehicle on each edge, frontmost
+// first. Built once per tick that has spawn requests; trySpawn keeps it
+// current as it adds vehicles, so two spawns on the same edge in one tick see
+// each other.
 type spawnOccupancy struct {
-	rear  map[edgeLane]int
-	front map[network.EdgeID]int
+	rear   map[edgeLane]int
+	onEdge map[network.EdgeID][]int // by S descending, ties by vehicle index
 }
 
 func (w *World) buildSpawnOccupancy() *spawnOccupancy {
 	occ := &spawnOccupancy{
-		rear:  make(map[edgeLane]int),
-		front: make(map[network.EdgeID]int),
+		rear:   make(map[edgeLane]int),
+		onEdge: make(map[network.EdgeID][]int),
 	}
 	for i := range w.Vehicles {
 		v := &w.Vehicles[i]
@@ -929,8 +986,15 @@ func (w *World) buildSpawnOccupancy() *spawnOccupancy {
 		if j, ok := occ.rear[k]; !ok || v.S < w.Vehicles[j].S {
 			occ.rear[k] = i
 		}
-		if j, ok := occ.front[v.Edge]; !ok || v.S > w.Vehicles[j].S {
-			occ.front[v.Edge] = i
+		occ.onEdge[v.Edge] = append(occ.onEdge[v.Edge], i)
+	}
+	for _, idxs := range occ.onEdge {
+		// Insertion sort, front first; indices were appended in ascending
+		// order, so equal S keeps the lower index first.
+		for a := 1; a < len(idxs); a++ {
+			for b := a; b > 0 && w.Vehicles[idxs[b-1]].S < w.Vehicles[idxs[b]].S; b-- {
+				idxs[b-1], idxs[b] = idxs[b], idxs[b-1]
+			}
 		}
 	}
 	return occ
@@ -1066,20 +1130,22 @@ func (w *World) spawnStopLine(route []network.EdgeID, lane uint8, h float64) (fl
 // spawnFollowersSafe reports whether every vehicle about to drive onto eid
 // can follow a newcomer entering it at S=0 at `speed` without braking harder
 // than SafeDecel. It searches upstream from eid's start node in order of
-// distance, through empty edges (so a short in-edge doesn't hide the traffic
-// behind it), out to the lookahead horizon of a car at eid's limit. The
-// frontmost vehicle on each occupied edge it reaches is checked by its own
-// route (followerSafe), so it does not matter which path the search found
-// its edge by; a car about to U-turn onto eid is checked like any other. A
-// search larger than maxSpawnUpstreamEdges refuses the spawn: an unchecked
-// follower may be right behind.
+// distance, out to the lookahead horizon of a car at eid's limit. On each
+// edge it reaches, the vehicles are taken front to back and checked by their
+// own route (followerSafe), so it does not matter which path the search found
+// the edge by; a car about to U-turn onto eid is checked like any other. The
+// first one heading onto eid is the newcomer's follower by that edge, and the
+// cars behind it follow it, so the search stops there. An edge where nobody
+// is heading onto eid (empty, or its cars all turn elsewhere) hides nothing,
+// and the search carries on upstream through it. A search larger than
+// maxSpawnUpstreamEdges refuses the spawn: an unchecked follower may be
+// right behind.
 func (w *World) spawnFollowersSafe(eid network.EdgeID, speed float64, occ *spawnOccupancy) bool {
 	p := DefaultIDM()
 	h := lookaheadHorizon(w.Net.Edges[eid].SpeedLimit * speedFactorMax)
 	start := w.Net.Edges[eid].From
 	best := map[network.NodeID]float64{start: 0} // shortest known distance to the newcomer's front bumper
 	settled := map[network.NodeID]bool{}
-	checked := map[int]bool{}
 	q := &nodeQueue{{node: start}}
 	budget := maxSpawnUpstreamEdges
 	for q.Len() > 0 {
@@ -1092,13 +1158,18 @@ func (w *World) spawnFollowersSafe(eid network.EdgeID, speed float64, occ *spawn
 			if budget--; budget < 0 {
 				return false
 			}
-			if fi, has := occ.front[ie]; has {
-				if !checked[fi] {
-					checked[fi] = true
-					if !w.followerSafe(&w.Vehicles[fi], eid, speed, h, p) {
-						return false
-					}
+			shielded := false
+			for _, fi := range occ.onEdge[ie] {
+				heading, safe := w.followerSafe(&w.Vehicles[fi], eid, speed, h, p)
+				if !safe {
+					return false
 				}
+				if heading {
+					shielded = true
+					break
+				}
+			}
+			if shielded {
 				continue
 			}
 			from := w.Net.Edges[ie].From
@@ -1112,19 +1183,20 @@ func (w *World) spawnFollowersSafe(eid network.EdgeID, speed float64, occ *spawn
 	return true
 }
 
-// followerSafe reports whether u, if its route takes it onto eid within h
-// metres, can follow a newcomer entering eid at S=0 at `speed` without
-// braking harder than SafeDecel.
-func (w *World) followerSafe(u *Vehicle, eid network.EdgeID, speed, h float64, p IDMParams) bool {
+// followerSafe reports whether u's route takes it onto eid within h metres
+// (heading) and, if so, whether it can follow a newcomer entering eid at S=0
+// at `speed` without braking harder than SafeDecel (safe; true when not
+// heading).
+func (w *World) followerSafe(u *Vehicle, eid network.EdgeID, speed, h float64, p IDMParams) (heading, safe bool) {
 	d := w.Net.Edges[u.Edge].Length - u.S // u's front bumper to the start of Route[k]
 	for k := u.RouteIdx + 1; k < len(u.Route) && d < h; k++ {
 		if u.Route[k] == eid {
 			// The newcomer's rear bumper is VehicleLength behind its front.
-			return safeToFollow(p, u.V, w.Net.Edges[u.Edge].SpeedLimit, d-VehicleLength, speed)
+			return true, safeToFollow(p, u.V, w.Net.Edges[u.Edge].SpeedLimit, d-VehicleLength, speed)
 		}
 		d += w.Net.Edges[u.Route[k]].Length
 	}
-	return true // not heading onto eid within the horizon
+	return false, true
 }
 
 // nodeDist and nodeQueue order spawnFollowersSafe's upstream search by
@@ -1209,6 +1281,7 @@ func (w *World) trySpawn(r SpawnRequest, occ *spawnOccupancy) {
 		HasGPS:         hasGPS,
 		DestNode:       r.DestNode,
 		LastRerouteSec: w.SimTime,
+		rerouteGen:     w.incidentGen, // a GPS route is planned with edgeCost's incidents
 	}
 	w.nextID++
 	w.Vehicles = append(w.Vehicles, v)
@@ -1216,9 +1289,7 @@ func (w *World) trySpawn(r SpawnRequest, occ *spawnOccupancy) {
 	// second spawn this tick queues behind it rather than on top of it.
 	ni := len(w.Vehicles) - 1
 	occ.rear[edgeLane{v.Edge, v.Lane}] = ni
-	if _, has := occ.front[v.Edge]; !has {
-		occ.front[v.Edge] = ni
-	}
+	occ.onEdge[v.Edge] = append(occ.onEdge[v.Edge], ni) // at S=0: rearmost
 
 	// Emit spawn event.
 	route32 := make([]uint32, len(route))

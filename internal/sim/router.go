@@ -144,12 +144,14 @@ func (r *Router) RouteCostFrom(arrivedVia network.EdgeID, src, dst network.NodeI
 		// Prohibit U-turns at intermediate nodes UNLESS the U-turn is the only
 		// non-banned option (e.g., dead-end streets). Vehicles at the origin
 		// have ArrivedVia=noEdge and can pick any outgoing edge — a true U-turn
-		// requires an arrival edge to flip from.
+		// requires an arrival edge to flip from. A closed road (edgeCost's
+		// incidentFullCloseCost) is no way on either: counting it kept a car
+		// at a closure from turning round when that was its only way out.
 		uTurnsAllowed := cur.state.ArrivedVia == noEdge
 		if !uTurnsAllowed {
 			uTurnsAllowed = true
 			for _, eid := range r.adjOut[cur.state.Node] {
-				if fromBans != nil && fromBans[eid] {
+				if (fromBans != nil && fromBans[eid]) || cost(eid) >= incidentFullCloseCost {
 					continue
 				}
 				if network.ClassifyTurn(r.net, cur.state.ArrivedVia, eid) != network.TurnUTurn {

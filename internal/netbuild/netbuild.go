@@ -36,18 +36,26 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 	// 2. Count how many distinct ways reference each node; a node shared
 	// by >=2 ways is a real intersection.
 	usageCount := make(map[osm.NodeID]int)
+	// selfJunction marks nodes a single way passes through twice, other than
+	// the first/last node of a closed ring: a lollipop cul-de-sac drawn as one
+	// way [A, B, C, D, E, B] meets itself at B, a real junction.
+	selfJunction := make(map[osm.NodeID]bool)
 	for _, w := range feat.Ways {
 		seen := make(map[osm.NodeID]bool)
-		for _, n := range w.Nodes {
+		last := len(w.Nodes) - 1
+		for i, n := range w.Nodes {
 			if !seen[n.ID] {
 				usageCount[n.ID]++
 				seen[n.ID] = true
+			} else if i != last || n.ID != w.Nodes[0].ID {
+				selfJunction[n.ID] = true
 			}
 		}
 	}
 
 	// A node is treated as a real intersection if it is shared by ≥2
-	// distinct ways OR it carries the `highway=traffic_signals` tag.
+	// distinct ways, met twice by one way (selfJunction), OR it carries the
+	// `highway=traffic_signals` tag.
 	//
 	// Note: nodes tagged `highway=stop` or `highway=give_way` on a SINGLE
 	// way are NOT promoted here — they live as interior shaping nodes and
@@ -55,7 +63,7 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 	// find the closest interior sign. Promoting them would split the way
 	// and bypass that walking logic.
 	isIntersection := func(id osm.NodeID) bool {
-		if usageCount[id] >= 2 {
+		if usageCount[id] >= 2 || selfJunction[id] {
 			return true
 		}
 		if n, ok := feat.Nodes[id]; ok {
@@ -100,9 +108,15 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 	// to internal EdgeIDs (post-prune).
 	var osmWayOfEdge []osm.WayID
 	var edgeIsForward []bool
+	// edgeSpan[i] holds the positions in its way's node list of edge i's From
+	// and To nodes. A closed way lists its first node twice, so searching the
+	// list for an edge's end node finds the wrong occurrence for the segment
+	// that closes the ring; the sign and restriction resolvers read this
+	// instead.
+	var edgeSpan [][2]int
 	report := Report{}
 	for _, w := range feat.Ways {
-		segs := splitAtIntersections(w, isIntersection)
+		spans := splitAtIntersections(w, isIntersection)
 		dir := onewayDirection(w)
 		// A real roundabout is always one-way; only flag circulating segments
 		// when the way actually built one-way. This guards malformed data
@@ -120,7 +134,8 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 		lanesFwd, lanesBwd := parseLanesPerDirection(w, def.LanesPerDir)
 		width := wayWidthMeters(w, dir, lanesFwd, lanesBwd)
 
-		for _, seg := range segs {
+		for _, span := range spans {
+			seg := w.Nodes[span[0] : span[1]+1]
 			if len(seg) < 2 {
 				report.WaysSkipped++
 				continue
@@ -163,6 +178,7 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 				})
 				osmWayOfEdge = append(osmWayOfEdge, w.ID)
 				edgeIsForward = append(edgeIsForward, true)
+				edgeSpan = append(edgeSpan, span)
 			case onewayReverse:
 				// oneway=-1 / reverse: the way's tagged direction is opposite
 				// to its node order. Emit exactly one edge, but flipped, and
@@ -181,6 +197,7 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 				// physical traffic flow, not the node order). Empirically
 				// uncommon; treating it as forward is conservative.
 				edgeIsForward = append(edgeIsForward, true)
+				edgeSpan = append(edgeSpan, [2]int{span[1], span[0]})
 			case onewayTwoWay:
 				edges = append(edges, network.Edge{
 					ID: network.EdgeID(len(edges)), From: fromID, To: toID,
@@ -189,6 +206,7 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 				})
 				osmWayOfEdge = append(osmWayOfEdge, w.ID)
 				edgeIsForward = append(edgeIsForward, true)
+				edgeSpan = append(edgeSpan, span)
 				revGeom := reverseGeom(geom)
 				edges = append(edges, network.Edge{
 					ID: network.EdgeID(len(edges)), From: toID, To: fromID,
@@ -197,6 +215,7 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 				})
 				osmWayOfEdge = append(osmWayOfEdge, w.ID)
 				edgeIsForward = append(edgeIsForward, false)
+				edgeSpan = append(edgeSpan, [2]int{span[1], span[0]})
 			}
 		}
 	}
@@ -214,8 +233,8 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 	intersections := buildIntersections(nodes, edges, feat, osmToNet, realIntersectionNetNodes)
 
 	// 6. Prune to largest connected component.
-	nodes, edges, intersections, osmWayOfEdge, edgeIsForward, newNodeID, droppedComponents :=
-		keepLargestComponent(nodes, edges, intersections, segChains, osmWayOfEdge, edgeIsForward)
+	nodes, edges, intersections, osmWayOfEdge, edgeIsForward, edgeSpan, newNodeID, droppedComponents :=
+		keepLargestComponent(nodes, edges, intersections, segChains, osmWayOfEdge, edgeIsForward, edgeSpan)
 	report.ComponentsDropped = droppedComponents
 
 	// Pruning renumbered the surviving nodes. Every later OSM-node lookup
@@ -253,12 +272,12 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 		o, ok := osmToNetReverse[nid]
 		return o, ok
 	}
-	resolveControls(intersections, feat, osmWayOfEdge, osmNodeOf, edges)
+	resolveControls(intersections, feat, osmWayOfEdge, edgeSpan, osmNodeOf, edges)
 
 	// 6b. Resolve OSM turn restriction relations to BannedTurns on the
 	// intersections (writes through pointers into the slice).
 	report.RestrictionsApplied, report.RestrictionsSkipped =
-		applyOSMRestrictions(intersections, edges, osmWayOfEdge, osmToNet,
+		applyOSMRestrictions(intersections, edges, osmWayOfEdge, edgeSpan, osmToNet,
 			feat, osmNodeOf, feat.Restrictions)
 
 	// 6c. Populate Lane.AllowedTurns per the turn-aware-lane-choice design.
@@ -420,20 +439,22 @@ func makeLanes(n uint8) []network.Lane {
 	return out
 }
 
-func splitAtIntersections(w *osm.Way, isX func(osm.NodeID) bool) [][]osm.WayNode {
-	var segs [][]osm.WayNode
+// splitAtIntersections splits a way at its interior intersection nodes and
+// returns each segment as the positions of its first and last node in
+// w.Nodes (inclusive).
+func splitAtIntersections(w *osm.Way, isX func(osm.NodeID) bool) [][2]int {
 	if len(w.Nodes) == 0 {
 		return nil
 	}
+	var segs [][2]int
 	start := 0
 	for i := 1; i < len(w.Nodes)-1; i++ {
 		if isX(w.Nodes[i].ID) {
-			segs = append(segs, w.Nodes[start:i+1])
+			segs = append(segs, [2]int{start, i})
 			start = i
 		}
 	}
-	segs = append(segs, w.Nodes[start:])
-	return segs
+	return append(segs, [2]int{start, len(w.Nodes) - 1})
 }
 
 // refPoint picks a reference lat/lon for the local planar projection
@@ -598,8 +619,8 @@ func remapOSMToNet(osmToNet map[osm.NodeID]network.NodeID,
 // nodes are absent), and the number of dropped components.
 func keepLargestComponent(nodes []network.Node, edges []network.Edge,
 	xs []network.Intersection, segChains [][]network.NodeID,
-	osmWayOfEdge []osm.WayID, edgeIsForward []bool,
-) ([]network.Node, []network.Edge, []network.Intersection, []osm.WayID, []bool, map[network.NodeID]network.NodeID, int) {
+	osmWayOfEdge []osm.WayID, edgeIsForward []bool, edgeSpan [][2]int,
+) ([]network.Node, []network.Edge, []network.Intersection, []osm.WayID, []bool, [][2]int, map[network.NodeID]network.NodeID, int) {
 	parent := make([]network.NodeID, len(nodes))
 	for i := range parent {
 		parent[i] = network.NodeID(i)
@@ -659,6 +680,7 @@ func keepLargestComponent(nodes []network.Node, edges []network.Edge,
 	var newEdges []network.Edge
 	var newOsmWayOf []osm.WayID
 	var newEdgeIsForward []bool
+	var newEdgeSpan [][2]int
 	for i, e := range edges {
 		if !keep(e.From) || !keep(e.To) {
 			continue
@@ -672,6 +694,9 @@ func keepLargestComponent(nodes []network.Node, edges []network.Edge,
 		}
 		if i < len(edgeIsForward) {
 			newEdgeIsForward = append(newEdgeIsForward, edgeIsForward[i])
+		}
+		if i < len(edgeSpan) {
+			newEdgeSpan = append(newEdgeSpan, edgeSpan[i])
 		}
 	}
 	// Intersections must be rebuilt because edge IDs changed.
@@ -707,5 +732,5 @@ func keepLargestComponent(nodes []network.Node, edges []network.Edge,
 	if dropped < 0 {
 		dropped = 0
 	}
-	return newNodes, newEdges, newXs, newOsmWayOf, newEdgeIsForward, newNodeID, dropped
+	return newNodes, newEdges, newXs, newOsmWayOf, newEdgeIsForward, newEdgeSpan, newNodeID, dropped
 }

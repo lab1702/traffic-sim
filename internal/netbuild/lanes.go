@@ -260,6 +260,56 @@ func populateAllowedTurns(
 	}
 }
 
+// PruneBannedTurns brings the AllowedTurns of x's incoming lanes in line with
+// x.BannedTurns, for bans added after Build (the --signals turn
+// restrictions; OSM restrictions are applied before lanes are assigned). Each
+// banned movement leaves the lanes of its approach. A lane that served only
+// banned movements takes the movements of the nearest lane that still has
+// some (ties to the lower index): left as it was, every route avoided it and
+// the approach lost a lane; left empty, it would mean "any movement".
+func PruneBannedTurns(net *network.Network, x *network.Intersection) {
+	for _, inc := range x.Incoming {
+		banned := make(map[network.EdgeID]bool)
+		for _, br := range x.BannedTurns {
+			if br.From == inc {
+				banned[br.To] = true
+			}
+		}
+		if len(banned) == 0 || int(inc) >= len(net.Edges) {
+			continue
+		}
+		lanes := net.Edges[inc].Lanes
+		var emptied []int
+		for li := range lanes {
+			allowed := lanes[li].AllowedTurns
+			if len(allowed) == 0 {
+				continue // already "any movement"
+			}
+			var kept []network.EdgeID
+			for _, e := range allowed {
+				if !banned[e] {
+					kept = append(kept, e)
+				}
+			}
+			if len(kept) == 0 {
+				emptied = append(emptied, li)
+			}
+			lanes[li].AllowedTurns = kept
+		}
+		for _, li := range emptied {
+		search:
+			for d := 1; d < len(lanes); d++ {
+				for _, n := range []int{li - d, li + d} {
+					if n >= 0 && n < len(lanes) && len(lanes[n].AllowedTurns) > 0 {
+						lanes[li].AllowedTurns = append([]network.EdgeID(nil), lanes[n].AllowedTurns...)
+						break search
+					}
+				}
+			}
+		}
+	}
+}
+
 // assignLanesGeometric returns a per-lane list of allowed turn categories
 // for an intersection where the given set of categories is present.
 // Convention: lane 0 = rightmost; higher index = closer to road centerline.

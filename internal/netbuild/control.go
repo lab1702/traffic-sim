@@ -30,10 +30,14 @@ import (
 //     (those qualifiers already say which approaches the sign governs).
 //  4. highway=stop / highway=give_way on an interior node of the approach
 //     (the stop-line position); never weakens an AllWayStop.
+//
+// edgeSpan[i] holds the positions of edge i's From and To nodes in its OSM
+// way's node list (see Build).
 func resolveControls(
 	xs []network.Intersection,
 	feat *osmload.Features,
 	osmWayOfEdge []osm.WayID,
+	edgeSpan [][2]int,
 	osmNodeOf func(network.NodeID) (osm.NodeID, bool),
 	edges []network.Edge,
 ) {
@@ -55,13 +59,6 @@ func resolveControls(
 			}
 		}
 		return 100
-	}
-
-	edgeFromOSM := func(eid network.EdgeID) (osm.NodeID, bool) {
-		if int(eid) >= len(edges) {
-			return 0, false
-		}
-		return osmNodeOf(edges[eid].From)
 	}
 
 	// Edge-only network so the fallback can measure turn angles.
@@ -92,9 +89,7 @@ func resolveControls(
 		}
 
 		var nodeTags osm.Tags
-		var xOSMID osm.NodeID
 		if osmID, ok := osmNodeOf(x.NodeID); ok {
-			xOSMID = osmID
 			if n, ok2 := feat.Nodes[osmID]; ok2 && n != nil {
 				nodeTags = n.Tags
 			}
@@ -106,9 +101,9 @@ func resolveControls(
 		// runs when no qualifier is present.
 		applyClassFallback(x, classOfEdge, geomNet)
 		if !applyStopAllOrMinor(x, nodeTags, classOfEdge) {
-			applyNodeLevelSign(x, nodeTags, wayByID, osmWayOfEdge, edgeFromOSM, xOSMID)
+			applyNodeLevelSign(x, nodeTags, edgeSpan)
 		}
-		applyInteriorNodeSign(x, wayByID, osmWayOfEdge, edgeFromOSM, xOSMID, feat.Nodes)
+		applyInteriorNodeSign(x, wayByID, osmWayOfEdge, edgeSpan, feat.Nodes)
 	}
 }
 
@@ -360,14 +355,7 @@ func straightestExit(net *network.Network, x *network.Intersection, eid network.
 //
 // Not called for nodes carrying stop=all / stop=minor: applyStopAllOrMinor
 // has already scoped the node's sign (see resolveControls).
-func applyNodeLevelSign(
-	x *network.Intersection,
-	tags osm.Tags,
-	wayByID map[osm.WayID]*osm.Way,
-	osmWayOfEdge []osm.WayID,
-	edgeFromOSM func(network.EdgeID) (osm.NodeID, bool),
-	xOSMID osm.NodeID,
-) {
+func applyNodeLevelSign(x *network.Intersection, tags osm.Tags, edgeSpan [][2]int) {
 	var target network.Control
 	hasSign := false
 	direction := ""
@@ -396,52 +384,28 @@ func applyNodeLevelSign(
 	}
 
 	for j, eid := range x.Incoming {
-		approachDir := approachDirectionOnWay(eid, xOSMID, wayByID, osmWayOfEdge, edgeFromOSM)
-		if approachDir == direction {
+		if approachDirectionOnWay(eid, edgeSpan) == direction {
 			x.IncomingControl[j] = target
 		}
 	}
 }
 
-// approachDirectionOnWay returns "forward" or "backward" for approach
-// edge eid arriving at intersection node xOSMID, based on whether the
-// edge's From node appears before or after xOSMID in the underlying
-// OSM way's node sequence. Returns empty string if the direction
-// cannot be determined.
-func approachDirectionOnWay(
-	eid network.EdgeID,
-	xOSMID osm.NodeID,
-	wayByID map[osm.WayID]*osm.Way,
-	osmWayOfEdge []osm.WayID,
-	edgeFromOSM func(network.EdgeID) (osm.NodeID, bool),
-) string {
-	if int(eid) >= len(osmWayOfEdge) {
+// approachDirectionOnWay returns "forward" or "backward" for approach edge
+// eid, by whether its From node comes before or after the intersection (its
+// To node) in the underlying OSM way's node sequence, or "" when that is
+// unknown. The positions come from edgeSpan, recorded when the way was split:
+// searching the way for the nodes found the first of the two positions a
+// closed way gives its first node, so an approach along the segment closing
+// the ring read as backward.
+func approachDirectionOnWay(eid network.EdgeID, edgeSpan [][2]int) string {
+	if int(eid) >= len(edgeSpan) {
 		return ""
 	}
-	way, ok := wayByID[osmWayOfEdge[eid]]
-	if !ok || way == nil {
-		return ""
-	}
-	fromOSM, ok := edgeFromOSM(eid)
-	if !ok {
-		return ""
-	}
-	xIdx, fromIdx := -1, -1
-	for i, n := range way.Nodes {
-		if n.ID == xOSMID && xIdx < 0 {
-			xIdx = i
-		}
-		if n.ID == fromOSM && fromIdx < 0 {
-			fromIdx = i
-		}
-	}
-	if xIdx < 0 || fromIdx < 0 {
-		return ""
-	}
-	if fromIdx < xIdx {
+	fromIdx, xIdx := edgeSpan[eid][0], edgeSpan[eid][1]
+	switch {
+	case fromIdx < xIdx:
 		return "forward"
-	}
-	if fromIdx > xIdx {
+	case fromIdx > xIdx:
 		return "backward"
 	}
 	return ""
@@ -462,15 +426,14 @@ func applyInteriorNodeSign(
 	x *network.Intersection,
 	wayByID map[osm.WayID]*osm.Way,
 	osmWayOfEdge []osm.WayID,
-	edgeFromOSM func(network.EdgeID) (osm.NodeID, bool),
-	xOSMID osm.NodeID,
+	edgeSpan [][2]int,
 	nodeByID map[osm.NodeID]*osm.Node,
 ) {
 	for j, eid := range x.Incoming {
 		if x.IncomingControl[j] == network.ControlAllWayStop {
 			continue
 		}
-		sign := interiorSignFor(eid, xOSMID, wayByID, osmWayOfEdge, edgeFromOSM, nodeByID)
+		sign := interiorSignFor(eid, wayByID, osmWayOfEdge, edgeSpan, nodeByID)
 		if sign != network.ControlNone {
 			x.IncomingControl[j] = sign
 		}
@@ -478,41 +441,30 @@ func applyInteriorNodeSign(
 }
 
 // interiorSignFor walks the underlying OSM way's node sequence between
-// (exclusive) the approach edge's From node and the intersection node
-// xOSMID, looking for the closest sign-tagged interior shaping node.
-// Returns ControlStop for highway=stop, ControlYield for highway=give_way,
-// or ControlNone if no sign-tagged interior node exists. The walk
-// starts at xOSMID and steps toward fromOSM so the FIRST tag encountered
-// is the one closest to X (the stop-line position).
+// (exclusive) the approach edge's From node and the intersection (its To
+// node), looking for the closest sign-tagged interior shaping node. Returns
+// ControlStop for highway=stop, ControlYield for highway=give_way, or
+// ControlNone if no sign-tagged interior node exists. The walk starts at the
+// intersection and steps toward the From node so the FIRST tag encountered
+// is the one closest to X (the stop-line position). The two positions come
+// from edgeSpan: searching the way for them walked the wrong part of a
+// closed way for the segment that closes the ring.
 func interiorSignFor(
 	eid network.EdgeID,
-	xOSMID osm.NodeID,
 	wayByID map[osm.WayID]*osm.Way,
 	osmWayOfEdge []osm.WayID,
-	edgeFromOSM func(network.EdgeID) (osm.NodeID, bool),
+	edgeSpan [][2]int,
 	nodeByID map[osm.NodeID]*osm.Node,
 ) network.Control {
-	if int(eid) >= len(osmWayOfEdge) {
+	if int(eid) >= len(osmWayOfEdge) || int(eid) >= len(edgeSpan) {
 		return network.ControlNone
 	}
 	way, ok := wayByID[osmWayOfEdge[eid]]
 	if !ok || way == nil {
 		return network.ControlNone
 	}
-	fromOSM, ok := edgeFromOSM(eid)
-	if !ok {
-		return network.ControlNone
-	}
-	xIdx, fromIdx := -1, -1
-	for i, n := range way.Nodes {
-		if n.ID == xOSMID && xIdx < 0 {
-			xIdx = i
-		}
-		if n.ID == fromOSM && fromIdx < 0 {
-			fromIdx = i
-		}
-	}
-	if xIdx < 0 || fromIdx < 0 || xIdx == fromIdx {
+	fromIdx, xIdx := edgeSpan[eid][0], edgeSpan[eid][1]
+	if xIdx == fromIdx || max(xIdx, fromIdx) >= len(way.Nodes) {
 		return network.ControlNone
 	}
 	step := -1
@@ -547,7 +499,9 @@ func interiorSignFor(
 //     node cannot weaken it).
 //   - stop=minor -> approaches strictly lower-class than the best get the
 //     node's sign (Stop, or Yield when the node is highway=give_way); the
-//     major road gets None.
+//     major road gets None. When every approach is of the same class, the
+//     class fallback's yielding arms get the sign instead, its through road
+//     keeps None, and an all-way stop stays one.
 //
 // Returns true when such a qualifier was applied; the caller must then skip
 // applyNodeLevelSign, whose lenient "every approach" / direction= scoping
@@ -572,16 +526,31 @@ func applyStopAllOrMinor(x *network.Intersection, tags osm.Tags, classOfEdge fun
 				return true
 			}
 			best := classOfEdge(x.Incoming[0])
+			byClass := false // some approach is of a lower class than the best
 			for _, eid := range x.Incoming[1:] {
-				if c := classOfEdge(eid); c < best {
+				c := classOfEdge(eid)
+				if c != best {
+					byClass = true
+				}
+				if c < best {
 					best = c
 				}
 			}
 			for j, eid := range x.Incoming {
-				if classOfEdge(eid) > best {
+				switch {
+				case byClass && classOfEdge(eid) > best:
 					x.IncomingControl[j] = minorCtrl
-				} else {
+				case byClass:
 					x.IncomingControl[j] = network.ControlNone
+				case x.IncomingControl[j] == network.ControlYield:
+					// Every road is of the same class, so class can't say
+					// which is minor. Take applyClassFallback's split: its
+					// yielding (terminating or merging) arms are the minor
+					// road and its through road stays major. A junction it
+					// made an all-way stop has no through road to favour and
+					// stays one. Marking every approach major left the
+					// signed junction with no control at all.
+					x.IncomingControl[j] = minorCtrl
 				}
 			}
 			return true

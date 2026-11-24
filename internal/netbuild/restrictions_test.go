@@ -39,7 +39,7 @@ func TestPickEdgeAt_PrefersForwardDirection(t *testing.T) {
 	// Candidates fed in reverse order: pre-fix code would return edge 0.
 	candidates := []network.EdgeID{0, 1}
 
-	got, ok := pickEdgeAt(candidates, edges, network.NodeID(1) /*via*/, true /*endsAt*/, way, osm.NodeID(20), osmNodeOf)
+	got, ok := pickEdgeAt(candidates, edges, nil, network.NodeID(1) /*via*/, true /*endsAt*/, way, osm.NodeID(20), osmNodeOf)
 	if !ok {
 		t.Fatal("pickEdgeAt returned !ok")
 	}
@@ -73,7 +73,7 @@ func TestPickEdgeAt_PrefersForwardDirectionStartsAt(t *testing.T) {
 	}
 	candidates := []network.EdgeID{0, 1}
 
-	got, ok := pickEdgeAt(candidates, edges, network.NodeID(1) /*via*/, false /*startsAt*/, way, osm.NodeID(20), osmNodeOf)
+	got, ok := pickEdgeAt(candidates, edges, nil, network.NodeID(1) /*via*/, false /*startsAt*/, way, osm.NodeID(20), osmNodeOf)
 	if !ok {
 		t.Fatal("pickEdgeAt returned !ok")
 	}
@@ -88,7 +88,7 @@ func TestPickEdgeAt_SingleCandidate(t *testing.T) {
 	edges := []network.Edge{
 		{ID: 0, From: 5, To: 1},
 	}
-	got, ok := pickEdgeAt([]network.EdgeID{0}, edges, network.NodeID(1), true, nil, 0, nil)
+	got, ok := pickEdgeAt([]network.EdgeID{0}, edges, nil, network.NodeID(1), true, nil, 0, nil)
 	if !ok || got != 0 {
 		t.Errorf("single-candidate path: want (0, true), got (%d, %v)", got, ok)
 	}
@@ -99,7 +99,7 @@ func TestPickEdgeAt_NoMatch(t *testing.T) {
 	edges := []network.Edge{
 		{ID: 0, From: 5, To: 99}, // doesn't end at the via node
 	}
-	_, ok := pickEdgeAt([]network.EdgeID{0}, edges, network.NodeID(1), true, nil, 0, nil)
+	_, ok := pickEdgeAt([]network.EdgeID{0}, edges, nil, network.NodeID(1), true, nil, 0, nil)
 	if ok {
 		t.Error("no-match path: want !ok")
 	}

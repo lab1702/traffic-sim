@@ -86,9 +86,10 @@ func parseWidthMeters(raw string) (float64, bool) {
 
 // wayWidthMeters returns the total physical road width for an OSM way.
 // Honors the `width=*` tag if present and parseable, otherwise estimates
-// from the lane count: a one-way contributes lanesFwd lanes; a two-way
-// contributes lanesFwd + lanesBwd. lanesFwd and lanesBwd are the values
-// produced by parseLanesPerDirection.
+// from the lane count: a one-way contributes the lanes of the direction it is
+// built in (lanesFwd, or lanesBwd for oneway=-1, whose single edge uses
+// them); a two-way contributes lanesFwd + lanesBwd. lanesFwd and lanesBwd
+// are the values produced by parseLanesPerDirection.
 //
 // Both edges of a two-way way receive the same width so the renderer can
 // paint one band over the shared centerline geometry.
@@ -101,8 +102,11 @@ func wayWidthMeters(w *osm.Way, dir onewayDir, lanesFwd, lanesBwd uint8) float64
 		}
 	}
 	totalLanes := float64(lanesFwd)
-	if dir == onewayTwoWay {
+	switch dir {
+	case onewayTwoWay:
 		totalLanes = float64(lanesFwd) + float64(lanesBwd)
+	case onewayReverse:
+		totalLanes = float64(lanesBwd)
 	}
 	if totalLanes < 1 {
 		totalLanes = 1

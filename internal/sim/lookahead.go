@@ -181,10 +181,23 @@ func (w *World) intersectionAt(e network.EdgeID) *network.Intersection {
 
 // leaderInfo is a vehicle's leader for this tick, in the vehicle's
 // current-edge coordinates: lS is its S plus the distance to the leader's
-// front bumper.
+// front bumper. stopped, rank and line copy the leader's start-of-tick
+// standstill and queue state (Vehicle.queueRank / queueLine) for the stuck
+// guard, so stepping order cannot matter.
 type leaderInfo struct {
-	lS, lV float64
-	has    bool
+	lS, lV  float64
+	has     bool
+	stopped bool
+	rank    uint16
+	line    network.EdgeID
+}
+
+// leaderFrom returns ld as a leader whose front bumper is at lS.
+func leaderFrom(ld *Vehicle, lS float64) leaderInfo {
+	return leaderInfo{
+		lS: lS, lV: ld.V, has: true,
+		stopped: ld.V < stuckSpeedThresh, rank: ld.queueRank, line: ld.queueLine,
+	}
 }
 
 // findLeaders computes every live vehicle's leader from start-of-tick
@@ -204,7 +217,7 @@ func (w *World) findLeaders(byEdgeLane map[network.EdgeID]map[uint8][]int) []lea
 				var info leaderInfo
 				if pos+1 < len(idxs) {
 					ld := &w.Vehicles[idxs[pos+1]]
-					info = leaderInfo{lS: ld.S, lV: ld.V, has: true}
+					info = leaderFrom(ld, ld.S)
 				} else {
 					info = w.leaderAhead(&w.Vehicles[vi], byEdgeLane)
 				}
@@ -212,8 +225,8 @@ func (w *World) findLeaders(byEdgeLane map[network.EdgeID]map[uint8][]int) []lea
 				// lane drop, or a multi-lane turn onto fewer lanes) merge at
 				// the node. Follow whoever is ahead in the merge order, so
 				// the two cars don't land on the same spot.
-				if mS, mV, ok := w.mergeLeader(vi, ln, eid, lanes); ok && (!info.has || mS < info.lS) {
-					info = leaderInfo{lS: mS, lV: mV, has: true}
+				if mS, mi, ok := w.mergeLeader(vi, ln, eid, lanes); ok && (!info.has || mS < info.lS) {
+					info = leaderFrom(&w.Vehicles[mi], mS)
 				}
 				leaders[vi] = info
 			}
@@ -235,7 +248,7 @@ func (w *World) leaderAhead(v *Vehicle, byEdgeLane map[network.EdgeID]map[uint8]
 		lane = w.laneAfter(lane, prev, e)
 		if idxs := byEdgeLane[e][lane]; len(idxs) > 0 {
 			ld := &w.Vehicles[idxs[0]]
-			return leaderInfo{lS: v.S + d + ld.S, lV: ld.V, has: true}
+			return leaderFrom(ld, v.S+d+ld.S)
 		}
 		d += w.Net.Edges[e].Length
 		prev = e
@@ -344,7 +357,8 @@ type stopInfo struct {
 	soft bool
 	// pastControlled: the walk passed a controlled line (a signal, a sign,
 	// or a left turn across opposing traffic) before this one, which the
-	// vehicle has not crossed yet.
+	// vehicle has not crossed yet. When no line holds the vehicle it says
+	// whether the walk passed one anywhere within the horizon.
 	pastControlled bool
 }
 
@@ -386,7 +400,9 @@ func (w *World) nextStop(v *Vehicle, vi int) stopInfo {
 		lane = w.laneAfter(lane, e, next)
 		d, e = dEnd, next
 	}
-	return stopInfo{}
+	// No stop within the horizon; pastControlled still says whether the walk
+	// crossed a controlled line (the stuck guard's queue test reads it).
+	return stopInfo{pastControlled: pastControlled}
 }
 
 // clearYellowMemosOnGreen forgets the yellow decision remembered for a line
@@ -455,7 +471,9 @@ func (w *World) lineStop(v *Vehicle, vi, j int, e network.EdgeID, lane uint8, di
 	controlled = x.HasSignal || ctrl != network.ControlNone || leftAcross
 	// Gaps are judged from any distance, so a queue far back on the approach
 	// knows it is waiting, but only braked for once near (see stopInfo.soft).
-	near := dist <= gapDecisionDist(v.V)
+	// An incident at the same line is a hard stop whatever the gap, so it
+	// keeps its stopped virtual leader even when a far-off shut gap is soft.
+	near := dist <= gapDecisionDist(v.V) || s.incident
 	s.red = w.redAt(v, j, e, x, pos, dist)
 	if !s.red {
 		s.yield = w.yieldAt(v, vi, j, e, next, hasNext, x, pos, dist, ctrl)
@@ -559,7 +577,15 @@ func (w *World) yieldAt(v *Vehicle, vi, j int, e, next network.EdgeID, hasNext b
 			w.markStopped(v, j, dist)
 			return true
 		}
-		return w.allWayStopBlocked(v, vi, j, e, next, hasNext, x, pos)
+		if w.allWayStopBlocked(v, vi, j, e, next, hasNext, x, pos) {
+			return true
+		}
+		// With no priority road, yield-sign approaches outrank the stopping
+		// ones (gapBlocked). Yield traffic never stops, so it holds no FIFO
+		// slot and allWayStopBlocked can't see it; gap-accept against it as a
+		// stop approach would. Without this, a yield car and an all-way-stop
+		// car (a directional give_way on an equal-class crossing) went at once.
+		return !w.hasFreeApproach(x) && w.gapBlocked(v, vi, j, x, pos, network.ControlStop)
 	}
 	return false
 }
@@ -595,8 +621,10 @@ func (w *World) markStopped(v *Vehicle, j int, dist float64) {
 // with a less strict control than ctrl (a stop sign gives way to yield-sign
 // traffic) and, among yield approaches, those earlier in x.Incoming, which
 // netbuild sorts by road priority. That keeps a strict order, so two yield
-// approaches never both go nor both wait on each other. Stop approaches order
-// themselves first come, first served instead (yieldAt).
+// approaches never both go nor both wait on each other. Stop and all-way-stop
+// approaches order themselves first come, first served instead (yieldAt),
+// which gap-checks an all-way-stop car as a stop approach (ctrl ControlStop),
+// so it too gives way to yield traffic.
 func (w *World) gapBlocked(v *Vehicle, vi, j int, x *network.Intersection, pos int, ctrl network.Control) bool {
 	wait := v.lineAt(j).wait
 	free := w.hasFreeApproach(x)

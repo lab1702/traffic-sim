@@ -135,24 +135,39 @@ type SignalState struct {
 	// last occupied. Used by AdvanceActuated for gap-out; reset on every
 	// phase change. Unused under PlanFixed.
 	passageGap float64
+
+	// latched holds the minor-phase calls that ended the major phase's green,
+	// kept through its yellow (locking detector memory). Without it, a call
+	// that vanished during the yellow (its car rerouted, or a nearer line
+	// suppressed its detection) sent the controller straight back to the
+	// major green: a yellow that served nobody. Unused under PlanFixed.
+	latched []bool
 }
 
+// NewSignalState returns a signal starting its plan in c.InitialMode: a
+// semi-actuated plan at the start of its rest (major) phase's green, so no
+// uncalled minor phase is served first (as resumeNormal), a fixed plan at
+// phase 0.
 func NewSignalState(c SignalConfig) *SignalState {
+	s := &SignalState{Config: c, Mode: c.InitialMode}
 	if c.Plan == PlanSemiActuated {
 		if c.MinGreen == 0 {
-			c.MinGreen = actMinGreen
+			s.Config.MinGreen = actMinGreen
 		}
 		if c.MajorMinGreen == 0 {
-			c.MajorMinGreen = actMajorMinGreen
+			s.Config.MajorMinGreen = actMajorMinGreen
 		}
 		if c.Passage == 0 {
-			c.Passage = actPassage
+			s.Config.Passage = actPassage
 		}
 		if c.MaxGreen == 0 {
-			c.MaxGreen = actMaxGreen
+			s.Config.MaxGreen = actMaxGreen
+		}
+		if c.MajorPhase >= 0 && c.MajorPhase < len(c.Phases) {
+			s.PhaseIdx = c.MajorPhase
 		}
 	}
-	return &SignalState{Config: c, Mode: c.InitialMode}
+	return s
 }
 
 // Advance moves the state machine forward by dt seconds. No-op for
@@ -239,7 +254,17 @@ func (s *SignalState) AdvanceActuated(dt float64, called, occupied []bool) {
 		s.Elapsed = 0
 		s.passageGap = 0
 		s.IsYellow = false
-		s.PhaseIdx = s.nextActuatedPhase(s.PhaseIdx, called)
+		calls := called
+		if len(s.latched) > 0 {
+			// The major's green ended for these calls; serve them even if
+			// they have since dropped.
+			calls = make([]bool, max(len(called), len(s.latched)))
+			for i := range calls {
+				calls[i] = (i < len(called) && called[i]) || (i < len(s.latched) && s.latched[i])
+			}
+			s.latched = s.latched[:0]
+		}
+		s.PhaseIdx = s.nextActuatedPhase(s.PhaseIdx, calls)
 		return
 	}
 
@@ -249,6 +274,7 @@ func (s *SignalState) AdvanceActuated(dt float64, called, occupied []bool) {
 			return
 		}
 		if anyCalledMinor(called, s.Config.MajorPhase) {
+			s.latched = append(s.latched[:0], called...)
 			s.toYellow()
 			return
 		}
@@ -282,6 +308,7 @@ func (s *SignalState) resumeNormal() {
 	s.Elapsed = 0
 	s.IsYellow = false
 	s.passageGap = 0
+	s.latched = s.latched[:0]
 }
 
 // toYellow ends the current green and starts its trailing yellow.

@@ -107,5 +107,5 @@ func TestSpawn_BlockedByApproachingUpstreamVehicle(t *testing.T) {
 // checks. For tests and benchmarks that seed many vehicles without stepping
 // and care about sampling, not spawn physics.
 func noOccupancy() *spawnOccupancy {
-	return &spawnOccupancy{rear: map[edgeLane]int{}, front: map[network.EdgeID]int{}}
+	return &spawnOccupancy{rear: map[edgeLane]int{}, onEdge: map[network.EdgeID][]int{}}
 }

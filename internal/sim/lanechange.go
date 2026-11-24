@@ -1,6 +1,10 @@
 package sim
 
-import "github.com/lab1702/traffic-sim/internal/network"
+import (
+	"container/heap"
+
+	"github.com/lab1702/traffic-sim/internal/network"
+)
 
 const (
 	laneChangeCheckGap = 50.0 // m: only consider LC if leader within this
@@ -66,7 +70,19 @@ const turnBiasRange = 300.0 // meters before the intersection
 //     When turn bias is active, this still runs only if the ego lane is
 //     already compatible, AND candidate lanes that would become
 //     incompatible are rejected.
+//
+// This form vets a change against the target lane on the current edge only
+// (laneGapSafe); World.Step uses tryLaneChangeWith and World.laneChangeSafe,
+// which also see vehicles across the nodes at either end of the edge.
 func tryLaneChange(v *Vehicle, vi int, laneVehicles map[uint8][]int, vs []Vehicle, net *network.Network, closedLane int8) {
+	tryLaneChangeWith(v, vi, laneVehicles, vs, net, closedLane, func(nl uint8) bool {
+		return laneGapSafe(v, vi, laneVehicles[nl], vs, &net.Edges[v.Edge])
+	})
+}
+
+// tryLaneChangeWith is tryLaneChange with the safety check supplied: safe(nl)
+// reports whether v may move into lane nl now.
+func tryLaneChangeWith(v *Vehicle, vi int, laneVehicles map[uint8][]int, vs []Vehicle, net *network.Network, closedLane int8, safe func(nl uint8) bool) {
 	if v.LaneChangeCooldown > 0 {
 		return
 	}
@@ -85,7 +101,7 @@ func tryLaneChange(v *Vehicle, vi int, laneVehicles map[uint8][]int, vs []Vehicl
 			if nl < 0 || nl >= int(numLanes) || nl == int(closedLane) { // last clause defensive: nl != closedLane here
 				continue
 			}
-			if !laneGapSafe(v, vi, laneVehicles[uint8(nl)], vs, edge) {
+			if !safe(uint8(nl)) {
 				continue
 			}
 			changeLane(v, dl)
@@ -104,7 +120,7 @@ func tryLaneChange(v *Vehicle, vi int, laneVehicles map[uint8][]int, vs []Vehicl
 		}
 		nl := int(v.Lane) + int(dl)
 		if nl >= 0 && nl < int(numLanes) && nl != int(closedLane) &&
-			laneGapSafe(v, vi, laneVehicles[uint8(nl)], vs, edge) {
+			safe(uint8(nl)) {
 			changeLane(v, dl)
 		}
 		return // on a ring, the weave policy owns lane choice this tick
@@ -138,7 +154,7 @@ func tryLaneChange(v *Vehicle, vi int, laneVehicles map[uint8][]int, vs []Vehicl
 		if nl == int(closedLane) {
 			return
 		}
-		if !laneGapSafe(v, vi, laneVehicles[uint8(nl)], vs, edge) {
+		if !safe(uint8(nl)) {
 			return
 		}
 		changeLane(v, dl)
@@ -189,7 +205,7 @@ func tryLaneChange(v *Vehicle, vi int, laneVehicles map[uint8][]int, vs []Vehicl
 		if turnContext && fit&(1<<uint(nl)) == 0 {
 			continue
 		}
-		if !laneGapSafe(v, vi, laneVehicles[uint8(nl)], vs, edge) {
+		if !safe(uint8(nl)) {
 			continue
 		}
 		changeLane(v, dl)
@@ -439,4 +455,164 @@ func moveLaneBucket(lanes map[uint8][]int, vi int, from, to uint8, vs []Vehicle)
 	copy(dst[k+1:], dst[k:])
 	dst[k] = vi
 	lanes[to] = dst
+}
+
+// laneChangeSafe reports whether vehicle vi may move into lane nl of its
+// current edge now. It applies laneGapSafe's tests (the fixed minimum gaps,
+// and nobody forced to brake harder than SafeDecel) to the nearest vehicle
+// ahead and behind in that lane, but finds them across nodes
+// (laneNeighborsAcross): netbuild splits roads into 4-20 m edges, so a check
+// confined to the current edge missed a car a few metres away across either
+// end, and the change cut in front of it or onto it.
+func (w *World) laneChangeSafe(vi int, nl uint8, byEdgeLane map[network.EdgeID]map[uint8][]int) bool {
+	v := &w.Vehicles[vi]
+	ahead, behind := w.laneNeighborsAcross(vi, nl, byEdgeLane)
+	p := DefaultIDM()
+	if ahead.ok {
+		gap := ahead.s - v.S - VehicleLength
+		if gap < safetyGapFront || !safeToFollow(p, v.V, w.Net.Edges[v.Edge].SpeedLimit, gap, ahead.v) {
+			return false
+		}
+	}
+	if behind.ok {
+		gap := v.S - behind.s - VehicleLength
+		if gap < safetyGapRear || !safeToFollow(p, behind.v, behind.limit, gap, v.V) {
+			return false
+		}
+	}
+	return true
+}
+
+// laneNeighbor is a vehicle found by laneNeighborsAcross. s is its front
+// bumper in the ego's current-edge coordinates (negative upstream of the
+// edge), v its speed and limit the speed limit where it is.
+type laneNeighbor struct {
+	s, v, limit float64
+	vi          int
+	ok          bool
+}
+
+// laneNeighborsAcross returns the nearest vehicles ahead of and behind
+// vehicle vi in lane nl of its current edge, as they are now (vehicles
+// earlier in index order have already moved this tick):
+//
+//   - ahead: along vi's route within its lookahead horizon, in the lane
+//     postTurnLane carries nl into on each edge;
+//   - behind: on the edge, or upstream of it, among vehicles whose own route
+//     enters the edge in lane nl, searched through in-edges in order of
+//     distance out to the horizon of a car at the edge's limit.
+//
+// A vehicle exactly level with the ego counts as ahead, as in laneNeighbors.
+// byEdgeLane holds start-of-tick buckets, so each vehicle is placed where it
+// is now: one that crossed a node this tick is found from its old bucket.
+// Ties go to the lower vehicle index, so map order never reaches the result.
+func (w *World) laneNeighborsAcross(vi int, nl uint8, byEdgeLane map[network.EdgeID]map[uint8][]int) (ahead, behind laneNeighbor) {
+	v := &w.Vehicles[vi]
+	offer := func(ui int, s float64) {
+		u := &w.Vehicles[ui]
+		n := laneNeighbor{s: s, v: u.V, limit: w.Net.Edges[u.Edge].SpeedLimit, vi: ui, ok: true}
+		if s >= v.S {
+			if !ahead.ok || s < ahead.s || (s == ahead.s && ui < ahead.vi) {
+				ahead = n
+			}
+		} else if !behind.ok || s > behind.s || (s == behind.s && ui < behind.vi) {
+			behind = n
+		}
+	}
+
+	// Ahead (and behind on the edge itself): walk the route.
+	type step struct {
+		e    network.EdgeID
+		lane uint8
+		off  float64 // from the start of the ego's edge to the start of e
+	}
+	walk := []step{{v.Edge, nl, 0}}
+	h := lookaheadHorizon(v.V)
+	for j, off := v.RouteIdx+1, w.Net.Edges[v.Edge].Length; j < len(v.Route) && off-v.S < h; j++ {
+		last := walk[len(walk)-1]
+		e := v.Route[j]
+		walk = append(walk, step{e, w.laneAfter(last.lane, last.e, e), off})
+		off += w.Net.Edges[e].Length
+	}
+	for k := range walk {
+		for _, idxs := range byEdgeLane[walk[k].e] {
+			for _, ui := range idxs {
+				u := &w.Vehicles[ui]
+				if ui == vi || u.Despawned {
+					continue
+				}
+				for k2 := k; k2 < len(walk); k2++ {
+					if walk[k2].e == u.Edge {
+						if u.Lane == walk[k2].lane {
+							offer(ui, walk[k2].off+u.S)
+						}
+						break
+					}
+				}
+			}
+		}
+	}
+
+	// Behind, upstream of the edge.
+	edge := &w.Net.Edges[v.Edge]
+	hb := lookaheadHorizon(edge.SpeedLimit * speedFactorMax)
+	best := map[network.NodeID]float64{edge.From: 0} // distance back to the edge's start
+	settled := map[network.NodeID]bool{}
+	q := &nodeQueue{{node: edge.From}}
+	budget := maxSpawnUpstreamEdges
+	for q.Len() > 0 {
+		it := heap.Pop(q).(nodeDist)
+		if settled[it.node] {
+			continue
+		}
+		// A vehicle beyond this node is at least it.dist back; once that is
+		// farther than the follower found, none can be nearer. (The edge's own
+		// start node is always searched: a vehicle that crossed it this tick
+		// is on the edge now.)
+		if it.dist > 0 && behind.ok && -it.dist < behind.s {
+			break
+		}
+		settled[it.node] = true
+		for _, ie := range w.inEdges[it.node] {
+			if budget--; budget < 0 {
+				return ahead, behind // the nearest are already found
+			}
+			for _, idxs := range byEdgeLane[ie] {
+				for _, ui := range idxs {
+					if u := &w.Vehicles[ui]; ui != vi && !u.Despawned {
+						if s, ok := w.entryOnto(u, v.Edge, nl, hb); ok {
+							offer(ui, s)
+						}
+					}
+				}
+			}
+			from := w.Net.Edges[ie].From
+			nd := it.dist + w.Net.Edges[ie].Length
+			if old, seen := best[from]; nd < hb && !settled[from] && (!seen || nd < old) {
+				best[from] = nd
+				heap.Push(q, nodeDist{node: from, dist: nd})
+			}
+		}
+	}
+	return ahead, behind
+}
+
+// entryOnto reports where u's front bumper is relative to the start of edge e
+// (negative before it) when its route, from where u is now, takes it onto e
+// within h metres and in `lane` (carried along with postTurnLane). A u
+// already on e counts at its S in its lane.
+func (w *World) entryOnto(u *Vehicle, e network.EdgeID, lane uint8, h float64) (float64, bool) {
+	if u.Edge == e {
+		return u.S, u.Lane == lane
+	}
+	d := w.Net.Edges[u.Edge].Length - u.S
+	l := u.Lane
+	for k := u.RouteIdx + 1; k < len(u.Route) && d < h; k++ {
+		l = w.laneAfter(l, u.Route[k-1], u.Route[k])
+		if u.Route[k] == e {
+			return -d, l == lane
+		}
+		d += w.Net.Edges[u.Route[k]].Length
+	}
+	return 0, false
 }

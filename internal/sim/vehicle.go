@@ -86,6 +86,11 @@ type Vehicle struct {
 	// rerouteCooldownSec so a vehicle doesn't recompute on every short edge.
 	LastRerouteSec float64
 
+	// rerouteGen is the World.incidentGen this vehicle's route was last
+	// planned with (spawn or reroute attempt). maybeReroute skips the
+	// cooldown for a closure ahead only while it differs.
+	rerouteGen uint64
+
 	// YellowCall is the stop-or-go decision this vehicle made for the yellow
 	// light at the end of its current edge (yellowGo / yellowStop), or
 	// yellowUndecided. Cleared on green and when the vehicle crosses that
@@ -98,6 +103,13 @@ type Vehicle struct {
 	// held by a line does not reach beyond it. (int32, beside YellowCall,
 	// to sit in padding: Vehicle is copied every tick.)
 	heldBy int32
+
+	// queueRank and queueLine carry the stuck guard's queue state to the next
+	// tick (World.Step): rank 1 is a vehicle held at its line, rank k one k-1
+	// vehicles behind such a vehicle in a queue for the same line, and 0 none
+	// of these. queueLine is the edge whose end is that line.
+	queueRank uint16
+	queueLine network.EdgeID
 
 	// linesAhead holds the same per-line state (dwell, wait, yellow call)
 	// for stop lines beyond the current edge, sorted by route index. The

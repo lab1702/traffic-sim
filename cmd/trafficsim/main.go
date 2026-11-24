@@ -527,7 +527,9 @@ func runLive(parentCtx context.Context, w *sim.World, duration time.Duration, co
 // applyTurnRestrictions expands each high-level Ban category into concrete
 // (from, to) edge pairs at the named intersection, classifying each
 // incoming/outgoing pair by network.ClassifyTurn. The resulting
-// TurnRestrictions are appended to the intersection's BannedTurns.
+// TurnRestrictions are appended to the intersection's BannedTurns, and the
+// banned movements are taken out of the approach lanes' AllowedTurns
+// (netbuild.PruneBannedTurns), which netbuild assigned before these bans.
 //
 // Unknown intersection IDs and unknown ban categories are logged and skipped.
 func applyTurnRestrictions(net *network.Network, restrictions []config.TurnRestrictionOverride) {
@@ -554,6 +556,7 @@ func applyTurnRestrictions(net *network.Network, restrictions []config.TurnRestr
 				}
 			}
 		}
+		netbuild.PruneBannedTurns(net, x)
 	}
 }
 

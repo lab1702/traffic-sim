@@ -20,34 +20,37 @@ const (
 
 // ArrivalHeading returns the direction (radians, math convention) of a
 // vehicle's motion as it arrives at the downstream node of `eid` — the
-// direction of the final segment of the edge polyline.
+// direction of the last segment of the edge polyline that has any length.
+// Zero-length segments (two OSM nodes at one position, or a node listed twice)
+// are skipped: atan2(0, 0) is 0, due east, whichever way the road runs, which
+// misclassified every turn at the junction.
 func ArrivalHeading(net *Network, eid EdgeID) float64 {
 	if int(eid) >= len(net.Edges) {
 		return 0
 	}
 	g := net.Edges[eid].Geometry
-	if len(g) < 2 {
-		return 0
+	for i := len(g) - 1; i > 0; i-- {
+		if dx, dy := g[i].X-g[i-1].X, g[i].Y-g[i-1].Y; dx != 0 || dy != 0 {
+			return math.Atan2(dy, dx)
+		}
 	}
-	dx := g[len(g)-1].X - g[len(g)-2].X
-	dy := g[len(g)-1].Y - g[len(g)-2].Y
-	return math.Atan2(dy, dx)
+	return 0
 }
 
 // DepartureHeading returns the direction a vehicle moves as it leaves
 // the upstream node of `eid` — the direction of the first segment of
-// the edge polyline.
+// the edge polyline that has any length (see ArrivalHeading).
 func DepartureHeading(net *Network, eid EdgeID) float64 {
 	if int(eid) >= len(net.Edges) {
 		return 0
 	}
 	g := net.Edges[eid].Geometry
-	if len(g) < 2 {
-		return 0
+	for i := 1; i < len(g); i++ {
+		if dx, dy := g[i].X-g[i-1].X, g[i].Y-g[i-1].Y; dx != 0 || dy != 0 {
+			return math.Atan2(dy, dx)
+		}
 	}
-	dx := g[1].X - g[0].X
-	dy := g[1].Y - g[0].Y
-	return math.Atan2(dy, dx)
+	return 0
 }
 
 // TurnAngle returns the signed angle change (radians, normalized to
