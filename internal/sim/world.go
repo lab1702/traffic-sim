@@ -748,12 +748,22 @@ func (w *World) Step() {
 // into one lane of the next edge start following each other across lanes.
 const mergeZone = 75.0 // m
 
+// mergeRelief is the share of its remaining distance to the merge point (the
+// edge end) by which a merge leader is placed further ahead than it really is.
+// The two cars are still in separate lanes; they only conflict at the node, so
+// ego need only have dropped in behind by then. Following the leader's true
+// position made a car level with it see a zero gap and brake at MaxBraking up
+// to mergeZone metres out. The relief shrinks to nothing at the node, where
+// the leader is followed at its true position.
+const mergeRelief = 0.5
+
 // mergeLeader returns the nearest vehicle ahead of vehicle vi (in lane ln of
 // edge eid) that sits in a DIFFERENT lane of the same edge but will snap into
 // the same lane of the same next edge — so ego must slot in behind it. Merge
 // order is by S, ties broken by vehicle index, so of two cars exactly level
 // exactly one yields. Only vehicles within mergeZone of the edge end are
-// considered; returns ok=false when there is no such vehicle.
+// considered; returns ok=false when there is no such vehicle. The returned
+// position includes mergeRelief.
 func (w *World) mergeLeader(vi int, ln uint8, eid network.EdgeID, lanes map[uint8][]int) (float64, float64, bool) {
 	if len(lanes) < 2 {
 		return 0, 0, false
@@ -788,7 +798,10 @@ func (w *World) mergeLeader(vi int, ln uint8, eid network.EdgeID, lanes map[uint
 			break // idxs is sorted by S: the first eligible one is the nearest
 		}
 	}
-	return bestS, bestV, found
+	if !found {
+		return 0, 0, false
+	}
+	return bestS + mergeRelief*math.Max(edge.Length-bestS, 0), bestV, true
 }
 
 // sortVehicleIdxByS sorts idxs ascending by Vehicles[i].S (insertion sort;
@@ -925,7 +938,8 @@ func (w *World) buildSpawnOccupancy() *spawnOccupancy {
 
 // spawnEntry picks the lane and speed for a vehicle entering route[0] at S=0
 // with cruising speed `cruise`, or ok=false when the entry is blocked. Lanes
-// are tried from lane 0 (curb) outward. A lane is usable when the first
+// are tried from lane 0 (curb) outward, skipping a lane an incident has
+// closed. A lane is usable when the first
 // vehicle ahead in it along the route (spawnLeader: on route[0], or beyond a
 // short first edge) leaves at least S0 of bumper gap; the entry speed is
 // capped so the newcomer can match that vehicle's speed by braking at the
@@ -941,8 +955,19 @@ func (w *World) spawnEntry(route []network.EdgeID, cruise float64, occ *spawnOcc
 		nLanes = 1 // hand-built fixtures may omit lanes; vehicles use lane 0
 	}
 	h := lookaheadHorizon(cruise)
+	// A lane an incident has closed ends at the obstacle: a newcomer there
+	// must cut across before it or wait there until despawned as stuck. Skip
+	// it. (A closed single-lane road is fully blocked and spawnStopLine holds
+	// the newcomer at the obstacle instead.)
+	closed := -1
+	if c, ok := w.closedLaneFor(eid); ok && nLanes > 1 {
+		closed = int(c)
+	}
 	found := false
 	for ln := 0; ln < nLanes; ln++ {
+		if ln == closed {
+			continue
+		}
 		sp := cruise
 		if gap, lv, has := w.spawnLeader(route, uint8(ln), occ, h); has {
 			if gap < p.S0 {
@@ -1228,13 +1253,17 @@ func (w *World) applyControl(ev ControlEvent) {
 			"intersection_id", id, "mode", uint8(ev.Mode))
 		return
 	}
+	// Re-selecting the current mode changes nothing. In particular, pressing
+	// N on a signal already in normal mode must not restart its cycle: that
+	// would turn a green approach red with no yellow in between.
+	if ev.Mode == st.Mode {
+		return
+	}
 	st.Mode = ev.Mode
-	// Reset phase progression when switching back to normal so the cycle
-	// restarts cleanly. Flash/off modes ignore phase progression entirely.
+	// Restart phase progression when switching back to normal so the cycle
+	// begins cleanly. Flash/off modes ignore phase progression entirely.
 	if st.Mode == ModeNormal {
-		st.PhaseIdx = 0
-		st.Elapsed = 0
-		st.IsYellow = false
+		st.resumeNormal()
 	}
 }
 

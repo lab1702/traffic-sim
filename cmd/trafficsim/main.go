@@ -236,6 +236,11 @@ func runRun(args []string) (err error) {
 	if err != nil {
 		return fmt.Errorf("build: %w", err)
 	}
+	// Fingerprint the network as built from the OSM file, before --signals
+	// adds its turn restrictions to it: tracereplay compares this against
+	// its own build of the same file, which has no --signals input, so
+	// hashing after the config bans flagged every such trace as a mismatch.
+	netHash := network.Hash(net)
 
 	overrides, err := loadOverrides(f.signalsPath, net)
 	if err != nil {
@@ -280,14 +285,15 @@ func runRun(args []string) (err error) {
 			}
 		}()
 		w.EmitTrace = sink.emit
-		// SimStart includes a network fingerprint so tracereplay can warn
-		// if the OSM doesn't match the original run. The signal plans let
+		// SimStart includes a network fingerprint (of the OSM build, see
+		// netHash) so tracereplay can warn if the OSM doesn't match the
+		// original run. The signal plans let
 		// it colour lights from the plans this run actually used. Both go
 		// out before the sim starts, so they can wait for queue space.
 		sink.emitBlocking(0, 0, &trace.SimStart{
 			SeedLo:  f.seed,
 			SeedHi:  f.seed ^ 0x9E3779B97F4A7C15, // matches RandomOD's PCG seed pair
-			NetHash: network.Hash(net),
+			NetHash: netHash,
 		})
 		for _, ev := range signalPlanEvents(w) {
 			sink.emitBlocking(0, 0, ev)
@@ -369,11 +375,16 @@ func loadOverrides(signalsPath string, net *network.Network) (map[network.Inters
 			Phases:         phases,
 			InitialMode:    mode,
 		}
-		// If only `mode:` is set (no phases), inherit the auto-generated
-		// plan for that intersection so phase 0/1 groupings still work
-		// for flash-mode semantics.
+		// If only `mode:` is set (no phases), inherit the whole auto-generated
+		// plan for that intersection: its phase 0/1 groupings for flash-mode
+		// semantics, and its sequencing (semi-actuated, resting on the major
+		// phase) for when the signal runs in normal mode. Copying only the
+		// phases left it fixed-time.
 		if len(phases) == 0 {
-			sc.Phases = sim.DefaultSignalConfig(x.Incoming, net).Phases
+			def := sim.DefaultSignalConfig(x.Incoming, net)
+			def.IntersectionID = sc.IntersectionID
+			def.InitialMode = sc.InitialMode
+			sc = def
 		}
 		overrides[network.IntersectionID(o.IntersectionID)] = sc
 	}

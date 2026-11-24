@@ -533,18 +533,27 @@ func (w *World) redAt(v *Vehicle, j int, e network.EdgeID, x *network.Intersecti
 //
 // Records the stop time for line j (via markStopped) when the vehicle first
 // comes to rest near a stop or all-way-stop line.
+//
+// A junction with no uncontrolled approach (every leg signed, e.g. a bare
+// highway=stop on the junction node or a stop sign mapped on each approach)
+// has no priority road to gap-accept against, so gapBlocked alone would let
+// every approach go at once. There, stop approaches also take turns first come,
+// first served, like an all-way stop (see gapBlocked for yield approaches).
 func (w *World) yieldAt(v *Vehicle, vi, j int, e, next network.EdgeID, hasNext bool,
 	x *network.Intersection, pos int, dist float64, ctrl network.Control,
 ) bool {
 	switch ctrl {
 	case network.ControlYield:
-		return w.gapBlocked(v, vi, j, x, pos)
+		return w.gapBlocked(v, vi, j, x, pos, ctrl)
 	case network.ControlStop:
 		if !w.dwelled(v, j) {
 			w.markStopped(v, j, dist)
 			return true
 		}
-		return w.gapBlocked(v, vi, j, x, pos)
+		if !w.hasFreeApproach(x) && w.allWayStopBlocked(v, vi, j, e, next, hasNext, x, pos) {
+			return true
+		}
+		return w.gapBlocked(v, vi, j, x, pos, ctrl)
 	case network.ControlAllWayStop:
 		if !w.dwelled(v, j) {
 			w.markStopped(v, j, dist)
@@ -576,14 +585,30 @@ func (w *World) markStopped(v *Vehicle, j int, dist float64) {
 	}
 }
 
-// gapBlocked does ETA-based gap acceptance at line j against every approach
-// of x whose effective control is ControlNone (the priority approaches),
-// including vehicles still upstream of a short approach edge. True when the
-// vehicle must wait.
-func (w *World) gapBlocked(v *Vehicle, vi, j int, x *network.Intersection, pos int) bool {
+// gapBlocked does ETA-based gap acceptance at line j against the priority
+// approaches of x, including vehicles still upstream of a short approach edge.
+// ctrl is the effective control of the vehicle's own approach pos. True when
+// the vehicle must wait.
+//
+// The priority approaches are those whose effective control is ControlNone.
+// When x has none (every approach is signed), they are instead the approaches
+// with a less strict control than ctrl (a stop sign gives way to yield-sign
+// traffic) and, among yield approaches, those earlier in x.Incoming, which
+// netbuild sorts by road priority. That keeps a strict order, so two yield
+// approaches never both go nor both wait on each other. Stop approaches order
+// themselves first come, first served instead (yieldAt).
+func (w *World) gapBlocked(v *Vehicle, vi, j int, x *network.Intersection, pos int, ctrl network.Control) bool {
 	wait := v.lineAt(j).wait
+	free := w.hasFreeApproach(x)
 	for k, ie := range x.Incoming {
-		if k == pos || effectiveControl(w, x, k) != network.ControlNone {
+		if k == pos {
+			continue
+		}
+		if ck := effectiveControl(w, x, k); free {
+			if ck != network.ControlNone {
+				continue
+			}
+		} else if !(ck < ctrl || (ck == ctrl && ctrl == network.ControlYield && k < pos)) {
 			continue
 		}
 		arr := w.arrivalsAt(ie)
@@ -599,6 +624,17 @@ func (w *World) gapBlocked(v *Vehicle, vi, j int, x *network.Intersection, pos i
 			if int(arr[i].vi) != vi && !arr[i].short && arr[i].within(g) {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// hasFreeApproach reports whether some approach of x is uncontrolled
+// (effective control ControlNone): a priority road others yield to.
+func (w *World) hasFreeApproach(x *network.Intersection) bool {
+	for k := range x.Incoming {
+		if effectiveControl(w, x, k) == network.ControlNone {
+			return true
 		}
 	}
 	return false

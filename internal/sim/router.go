@@ -23,13 +23,25 @@ type Router struct {
 	// banned[node][from] is the set of forbidden outgoing edges given an
 	// incoming edge. Built once at NewRouter; nil entries are common.
 	banned map[network.NodeID]map[network.EdgeID]map[network.EdgeID]bool
+	// maxSpeed is the fastest free-flow speed any edge cost can imply (m/s):
+	// the network's highest speed limit, floored at minEdgeSpeed. The A*
+	// heuristic divides straight-line distance by it, so the heuristic never
+	// overestimates. A fixed constant let a 130 km/h motorway beat the
+	// heuristic and A* return slower routes.
+	maxSpeed float64
 }
 
 func NewRouter(net *network.Network) *Router {
 	adj := make(map[network.NodeID][]network.EdgeID, len(net.Nodes))
+	// Floored at minEdgeSpeed: Congestion.Cost charges an edge whose limit
+	// is lower at minEdgeSpeed, faster than the limit itself.
+	maxSpeed := minEdgeSpeed
 	for i := range net.Edges {
 		e := &net.Edges[i]
 		adj[e.From] = append(adj[e.From], e.ID)
+		if e.SpeedLimit > maxSpeed {
+			maxSpeed = e.SpeedLimit
+		}
 	}
 	banned := make(map[network.NodeID]map[network.EdgeID]map[network.EdgeID]bool)
 	for i := range net.Intersections {
@@ -48,7 +60,7 @@ func NewRouter(net *network.Network) *Router {
 		}
 		banned[x.NodeID] = nodeMap
 	}
-	return &Router{net: net, adjOut: adj, banned: banned}
+	return &Router{net: net, adjOut: adj, banned: banned, maxSpeed: maxSpeed}
 }
 
 var ErrNoRoute = errors.New("no route between nodes")
@@ -77,9 +89,9 @@ func (r *Router) Route(src, dst network.NodeID) ([]network.EdgeID, error) {
 
 // RouteCost is Route with a caller-supplied per-edge cost function. cost(eid)
 // must return a positive traversal cost (e.g. travel time). The A* heuristic
-// is straight-line distance / max speed, which stays admissible as long as
-// cost never implies a speed above that max — a cost closure built on
-// Congestion.Cost guarantees this via its free-flow ceiling.
+// is straight-line distance / the network's highest speed limit, which stays
+// admissible as long as cost never implies a speed above that limit — a cost
+// closure built on Congestion.Cost guarantees this via its free-flow ceiling.
 func (r *Router) RouteCost(src, dst network.NodeID, cost func(network.EdgeID) float64) ([]network.EdgeID, error) {
 	return r.RouteCostFrom(noEdge, src, dst, cost)
 }
@@ -98,7 +110,7 @@ func (r *Router) RouteCostFrom(arrivedVia network.EdgeID, src, dst network.NodeI
 	heuristic := func(n network.NodeID) float64 {
 		p := r.net.Nodes[n].Pos
 		dx, dy := p.X-dstPos.X, p.Y-dstPos.Y
-		return math.Sqrt(dx*dx+dy*dy) / 31.3 // admissible against max speed
+		return math.Sqrt(dx*dx+dy*dy) / r.maxSpeed // admissible: no edge is faster
 	}
 
 	gScore := make(map[searchState]float64)

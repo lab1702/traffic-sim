@@ -1,6 +1,7 @@
 package netbuild
 
 import (
+	"math"
 	"strconv"
 	"strings"
 
@@ -106,7 +107,21 @@ const noneSpeedLimit = 130.0 / 3.6 // m/s
 //	    -> country-specific implicit zone (km/h)
 //	"DE:zone30" / "DE:zone:30"
 //	    -> 30 km/h (German Tempo-30 zones)
+//
+// Only a finite, positive speed is accepted. strconv.ParseFloat also reads
+// "0", "-30", "NaN" and "inf"; as a speed limit those stall every vehicle on
+// the edge (0), or poison its speed and position with NaN, so they fall back
+// to the highway-type default like any other unusable value.
 func parseMaxspeedValue(raw string) (float64, bool) {
+	v, ok := parseMaxspeedRaw(raw)
+	if !ok || !(v > 0) || math.IsInf(v, 1) {
+		return 0, false
+	}
+	return v, true
+}
+
+// parseMaxspeedRaw is parseMaxspeedValue without the range check.
+func parseMaxspeedRaw(raw string) (float64, bool) {
 	s := strings.TrimSpace(raw)
 	if s == "" {
 		return 0, false

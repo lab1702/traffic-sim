@@ -271,6 +271,19 @@ func (s *SignalState) AdvanceActuated(dt float64, called, occupied []bool) {
 	}
 }
 
+// resumeNormal restarts the normal-mode cycle after a switch from another
+// mode: at the start of the rest (major) phase's green for a semi-actuated
+// plan, so no uncalled minor phase is served first, or of phase 0 otherwise.
+func (s *SignalState) resumeNormal() {
+	s.PhaseIdx = 0
+	if s.Config.Plan == PlanSemiActuated && s.Config.MajorPhase >= 0 && s.Config.MajorPhase < len(s.Config.Phases) {
+		s.PhaseIdx = s.Config.MajorPhase
+	}
+	s.Elapsed = 0
+	s.IsYellow = false
+	s.passageGap = 0
+}
+
 // toYellow ends the current green and starts its trailing yellow.
 func (s *SignalState) toYellow() {
 	s.IsYellow = true
