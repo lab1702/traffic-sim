@@ -200,6 +200,20 @@ func (s *SignalState) Advance(dt float64) {
 	}
 }
 
+// YellowRemaining returns the seconds left in the current yellow interval, or
+// 0 when the signal is not showing yellow. Elapsed counts time into the
+// yellow under both plans (Advance carries the overshoot in, toYellow resets
+// it), so this is YellowDur - Elapsed.
+func (s *SignalState) YellowRemaining() float64 {
+	if !s.IsYellow || s.PhaseIdx >= len(s.Config.Phases) {
+		return 0
+	}
+	if r := s.Config.Phases[s.PhaseIdx].YellowDur - s.Elapsed; r > 0 {
+		return r
+	}
+	return 0
+}
+
 // AdvanceActuated advances a semi-actuated signal by dt seconds. called[i] and
 // occupied[i] report whether phase i has a vehicle within the call / passage
 // zone this tick — pure functions of vehicle positions, so the machine stays
@@ -265,24 +279,29 @@ func (s *SignalState) toYellow() {
 }
 
 // nextActuatedPhase returns the phase to run after the current one ends: the
-// first called minor phase in cyclic order after curr, or MajorPhase when no
-// other minor phase is called (the controller returns to the major street and
-// rests).
+// next called minor phase in cyclic order after curr that comes BEFORE the
+// major phase, or MajorPhase otherwise. One cycle is major → each calling
+// minor in turn → major again; the major street is never skipped.
 //
-// The search runs off in [1, n) — it deliberately stops before n so it never
-// wraps back to curr itself ((curr+n)%n == curr). A phase that just ran its
-// green must yield to a conflicting movement before it may run again, even if
-// it is still the only phase with a standing call: re-serving it immediately
-// would blink yellow and return to the same green, starving the cross street
-// (and defeating the minor phase's max-out, which exists precisely so a busy
-// side street cannot hold the arterial down). When curr is the lone caller the
-// loop falls through to MajorPhase, giving the major street its turn; the call
-// is served again on the next cycle.
+// The scan stops when it reaches MajorPhase. Scanning past it (wrapping round
+// to an earlier minor) would let two busy minors alternate 1, 2, 1, 2 forever
+// and starve the arterial, which is exactly what the minor phase's max-out
+// exists to prevent. From the major itself the scan visits every minor once,
+// since it can only reach MajorPhase again at off == n.
+//
+// The scan also never returns curr itself: a phase that just ran its green
+// must yield to a conflicting movement before it may run again, even if it is
+// still the only phase with a standing call. Re-serving it immediately would
+// blink yellow and return to the same green, starving the cross street. Its
+// call is served again on the next cycle.
 func (s *SignalState) nextActuatedPhase(curr int, called []bool) int {
 	n := len(s.Config.Phases)
 	for off := 1; off < n; off++ {
 		p := (curr + off) % n
-		if p != s.Config.MajorPhase && p < len(called) && called[p] {
+		if p == s.Config.MajorPhase {
+			break // end of this cycle's minor sweep: return to the major
+		}
+		if p < len(called) && called[p] {
 			return p
 		}
 	}

@@ -81,6 +81,15 @@ func (r *Router) Route(src, dst network.NodeID) ([]network.EdgeID, error) {
 // cost never implies a speed above that max — a cost closure built on
 // Congestion.Cost guarantees this via its free-flow ceiling.
 func (r *Router) RouteCost(src, dst network.NodeID, cost func(network.EdgeID) float64) ([]network.EdgeID, error) {
+	return r.RouteCostFrom(noEdge, src, dst, cost)
+}
+
+// RouteCostFrom is RouteCost for a vehicle already moving: arrivedVia is the
+// edge it is on, which ends at src. The search starts in state (src,
+// arrivedVia), so turn bans from arrivedVia and the no-U-turn rule apply at
+// src exactly as they do at every later node. Pass noEdge for a vehicle
+// starting from rest at src (spawn), which may leave by any outgoing edge.
+func (r *Router) RouteCostFrom(arrivedVia network.EdgeID, src, dst network.NodeID, cost func(network.EdgeID) float64) ([]network.EdgeID, error) {
 	if src == dst {
 		return nil, nil
 	}
@@ -96,7 +105,7 @@ func (r *Router) RouteCost(src, dst network.NodeID, cost func(network.EdgeID) fl
 	cameFrom := make(map[searchState]searchState)
 	closed := make(map[searchState]bool)
 
-	start := searchState{Node: src, ArrivedVia: noEdge}
+	start := searchState{Node: src, ArrivedVia: arrivedVia}
 	gScore[start] = 0
 
 	open := &pq{}

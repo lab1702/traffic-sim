@@ -8,8 +8,11 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
+	"math"
 	"os"
 
 	"gopkg.in/yaml.v3"
@@ -55,15 +58,18 @@ type rawFile struct {
 }
 
 // LoadConfig reads, parses, and validates the YAML config file at path.
-// Returns an error if the file does not exist, fails to parse, or fails
-// validation (see validate).
+// Returns an error if the file does not exist, fails to parse (including
+// keys the schema doesn't know, so a typo can't silently load as a zero
+// value), or fails validation (see validate).
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 	var raw rawFile
-	if err := yaml.Unmarshal(data, &raw); err != nil {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&raw); err != nil && !errors.Is(err, io.EOF) { // io.EOF: empty file
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	cfg := &Config{
@@ -77,17 +83,26 @@ func LoadConfig(path string) (*Config, error) {
 }
 
 // validate runs schema-level checks that don't need a Network: phase
-// durations are non-negative, at least one of green/yellow is positive
-// per phase (so SignalState.Advance can make progress), green_edges
-// positions are non-negative, ban categories are recognized.
+// durations are finite and non-negative, at least one of green/yellow is
+// positive per phase (so SignalState.Advance can make progress),
+// green_edges positions are non-negative, ban categories are recognized.
 //
-// Cross-checks against the loaded Network (e.g. intersection_id range,
-// HasSignal, edge positions in range) happen at the apply call site,
-// where the network is available.
+// Cross-checks against the loaded Network (intersection_id range,
+// HasSignal, green_edges positions in range, every approach green in some
+// phase) happen at the apply call site, where the network is available
+// (loadOverrides in cmd/trafficsim).
 func (c *Config) validate() error {
 	var errs []string
 	for i, sig := range c.Signals {
 		for j, p := range sig.Phases {
+			// NaN fails every comparison below, so it has to be caught
+			// explicitly; Inf would pass as a valid duration.
+			if math.IsNaN(p.GreenDur) || math.IsInf(p.GreenDur, 0) {
+				errs = append(errs, fmt.Sprintf("signals[%d].phases[%d].green_dur: must be finite (%v)", i, j, p.GreenDur))
+			}
+			if math.IsNaN(p.YellowDur) || math.IsInf(p.YellowDur, 0) {
+				errs = append(errs, fmt.Sprintf("signals[%d].phases[%d].yellow_dur: must be finite (%v)", i, j, p.YellowDur))
+			}
 			if p.GreenDur < 0 {
 				errs = append(errs, fmt.Sprintf("signals[%d].phases[%d].green_dur: negative (%.3f)", i, j, p.GreenDur))
 			}

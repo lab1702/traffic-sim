@@ -1,9 +1,10 @@
 // Command tracereplay reads a trace file and plays it back in the viewer.
 //
 // It reconstructs vehicle positions by replaying spawn/despawn and
-// signal-phase events at their recorded ticks. Vehicles between events
-// are interpolated linearly along their route at the edge speed limit
-// (no IDM — phase 8 simplification).
+// signal-phase events at their recorded ticks. Between events, vehicles
+// move along their route at each edge's speed limit, advanced every frame
+// on a wall-clock replay clock (no IDM — phase 8 simplification). Signal
+// colors come from the signal plans recorded in the trace.
 //
 // Required: the same OSM file used for the original run.
 package main
@@ -12,6 +13,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 
 	"github.com/hajimehoshi/ebiten/v2"
@@ -56,8 +58,8 @@ func main() {
 		fs.Usage()
 		os.Exit(2)
 	}
-	if *speed <= 0 {
-		fmt.Fprintln(os.Stderr, "tracereplay: -speed must be > 0")
+	if err := checkSpeed(*speed); err != nil {
+		fmt.Fprintln(os.Stderr, "tracereplay:", err)
 		os.Exit(2)
 	}
 
@@ -92,8 +94,17 @@ func main() {
 	}
 }
 
+// checkSpeed rejects playback speeds the replay clock can't use. Written so
+// NaN fails it (every comparison with NaN is false).
+func checkSpeed(speed float64) error {
+	if !(speed > 0) || math.IsInf(speed, 1) {
+		return fmt.Errorf("-speed must be a finite number > 0, got %v", speed)
+	}
+	return nil
+}
+
 type gameAdapter struct{ vp *render.Viewport }
 
-func (g *gameAdapter) Update() error               { return g.vp.Update() }
-func (g *gameAdapter) Draw(s *ebiten.Image)        { g.vp.Draw(s) }
-func (g *gameAdapter) Layout(w, h int) (int, int)  { return g.vp.Layout(w, h) }
+func (g *gameAdapter) Update() error              { return g.vp.Update() }
+func (g *gameAdapter) Draw(s *ebiten.Image)       { g.vp.Draw(s) }
+func (g *gameAdapter) Layout(w, h int) (int, int) { return g.vp.Layout(w, h) }

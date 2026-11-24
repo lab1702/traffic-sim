@@ -95,24 +95,24 @@ func TestIncidentStopDistance_Blocks(t *testing.T) {
 	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
 	v := &Vehicle{Edge: 0, Lane: 0, S: 50}
 
-	if _, ok := w.incidentStopDistance(v); ok {
+	if _, ok := incidentStop(w, v); ok {
 		t.Fatal("no incident should not block")
 	}
 	w.Incidents[0] = FullClose
-	if d, ok := w.incidentStopDistance(v); !ok || math.Abs(d-150) > 1e-9 {
+	if d, ok := incidentStop(w, v); !ok || math.Abs(d-150) > 1e-9 {
 		t.Fatalf("FullClose got (%.2f,%v) want (150,true)", d, ok)
 	}
 	w.Incidents[0] = LaneClose // closes curb lane 0
-	if d, ok := w.incidentStopDistance(v); !ok || math.Abs(d-150) > 1e-9 {
+	if d, ok := incidentStop(w, v); !ok || math.Abs(d-150) > 1e-9 {
 		t.Fatalf("LaneClose lane0 got (%.2f,%v) want (150,true)", d, ok)
 	}
 	v.Lane = 1
-	if _, ok := w.incidentStopDistance(v); ok {
+	if _, ok := incidentStop(w, v); ok {
 		t.Fatal("LaneClose should not block a vehicle in the open lane")
 	}
 	v.Lane = 0
 	w.Incidents[0] = Slowdown
-	if _, ok := w.incidentStopDistance(v); ok {
+	if _, ok := incidentStop(w, v); ok {
 		t.Fatal("Slowdown should not block")
 	}
 }
@@ -315,27 +315,39 @@ func TestWorld_FullClose_BlocksEntryFromUpstream(t *testing.T) {
 	}
 }
 
-func TestWorld_NextEdgeFullClosed(t *testing.T) {
+// TestWorld_ClosureAhead: the GPS reroute trigger sees a road that is fully
+// blocked (a full closure, or a lane closure of a one-lane road) on the next
+// edge; TestLookahead_GPSDivertsAroundClosureBeyondShortEdge covers one
+// further ahead.
+func TestWorld_ClosureAhead(t *testing.T) {
 	net := buildRerouteGraph()
 	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
 	v := &Vehicle{Route: []network.EdgeID{0, 1}, RouteIdx: 0} // next edge is 1
 
-	if w.nextEdgeFullClosed(v) {
+	if w.closureAhead(v) {
 		t.Fatal("no incident: next edge should not be reported closed")
 	}
-	for _, sev := range []Severity{Slowdown, LaneClose} {
-		w.Incidents[1] = sev
-		if w.nextEdgeFullClosed(v) {
-			t.Fatalf("severity %d on next edge must not count as full close", sev)
-		}
+	w.Incidents[1] = Slowdown
+	if w.closureAhead(v) {
+		t.Fatal("Slowdown on next edge must not count as full close")
+	}
+	// Edge 1 has one lane: closing it closes the road.
+	w.Incidents[1] = LaneClose
+	if !w.closureAhead(v) {
+		t.Fatal("LaneClose on a one-lane next edge must count as full close")
+	}
+	// With two lanes, a lane closure leaves the other lane open.
+	net.Edges[1].Lanes = []network.Lane{{Index: 0}, {Index: 1}}
+	if w.closureAhead(v) {
+		t.Fatal("LaneClose on a two-lane next edge must not count as full close")
 	}
 	w.Incidents[1] = FullClose
-	if !w.nextEdgeFullClosed(v) {
+	if !w.closureAhead(v) {
 		t.Fatal("FullClose on the next edge should be detected")
 	}
 	// On the last edge there is no next edge.
 	last := &Vehicle{Route: []network.EdgeID{0, 1}, RouteIdx: 1}
-	if w.nextEdgeFullClosed(last) {
+	if w.closureAhead(last) {
 		t.Fatal("last edge: there is no next edge to be closed")
 	}
 }
@@ -524,5 +536,34 @@ func TestApplyIncident_MirrorsToReverseTwin(t *testing.T) {
 	}
 	if events != 1 {
 		t.Fatalf("one-way set should emit 1 event, got %d", events)
+	}
+}
+
+// TestWorld_SingleLaneLaneClose_BlocksEntryAndRouting: closing the only lane
+// of a one-lane road behaves like a full closure. Cars stop at its entrance
+// rather than driving in and getting despawned as stuck at the obstacle, and
+// routing prices it like a full closure.
+func TestWorld_SingleLaneLaneClose_BlocksEntryAndRouting(t *testing.T) {
+	net := buildRerouteGraph() // all edges one lane
+	w := NewWorld(net, NewRandomOD(net, 0, 0), nil)
+	w.Incidents[1] = LaneClose
+
+	if c := w.edgeCost(1); c != incidentFullCloseCost {
+		t.Fatalf("one-lane LaneClose cost = %v, want full-close cost %v", c, incidentFullCloseCost)
+	}
+	v := &Vehicle{Route: []network.EdgeID{0, 1}, Edge: 0, S: 60}
+	d, blocked := incidentStop(w, v)
+	if !blocked || d != 40 {
+		t.Fatalf("entry to a one-lane LaneClose edge: got (%.1f, %v), want (40, true)", d, blocked)
+	}
+
+	// Drive a car toward it: it must stop on edge 0, never entering edge 1.
+	w.Vehicles = []Vehicle{{ID: 1, Route: []network.EdgeID{0, 1}, Edge: 0, S: 0, V: 10}}
+	w.nextID = 2
+	for i := 0; i < 600; i++ {
+		w.Step()
+		if len(w.Vehicles) == 0 || w.Vehicles[0].Edge != 0 {
+			t.Fatalf("tick %d: car entered (or was removed before) the closed one-lane edge", w.Tick)
+		}
 	}
 }

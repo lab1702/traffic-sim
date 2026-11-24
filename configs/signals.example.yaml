@@ -10,9 +10,12 @@
 # build log or load the file in the viewer and click on intersections
 # (the HUD shows the selected ID).
 #
-# Schema validation rejects: negative durations, both green_dur and
-# yellow_dur being zero on the same phase (would not progress), unknown
-# mode strings, unknown ban categories.
+# Schema validation rejects: unknown keys (typos), negative or non-finite
+# durations, both green_dur and yellow_dur being zero on the same phase
+# (would not progress), unknown mode strings, unknown ban categories.
+# For an override that applies, trafficsim also rejects green_edges
+# positions past the intersection's approaches and phase plans that leave
+# an approach without any green (its vehicles would wait forever).
 # ============================================================================
 
 signals:

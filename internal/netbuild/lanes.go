@@ -40,7 +40,9 @@ func parseTurnLaneSpec(spec string) []network.TurnCategory {
 }
 
 // parseTurnLanesString parses a full OSM turn:lanes value (pipe-delimited
-// per-lane specs). Returns one entry per lane. Returns nil for empty input.
+// per-lane specs). Returns one entry per lane in OSM order — leftmost lane
+// first (assignAllowedTurnsForEdge maps that onto lane 0 = rightmost).
+// Returns nil for empty input.
 func parseTurnLanesString(s string) [][]network.TurnCategory {
 	if s == "" {
 		return nil
@@ -70,8 +72,12 @@ var turnTokenMap = map[string]network.TurnCategory{
 // assignAllowedTurnsForEdge computes the AllowedTurns lists for each lane
 // of `incoming` at intersection `x`.
 //
-// - osmSpec: pre-parsed turn:lanes tokens (nil if no OSM data). When the
-//   token count matches the lane count, this overrides geometric inference.
+//   - osmSpec: pre-parsed turn:lanes tokens (nil if no OSM data), in OSM
+//     order — leftmost lane first, relative to the edge's direction of travel
+//     (this holds for turn:lanes:forward and turn:lanes:backward alike). When
+//     the token count matches the lane count, this overrides geometric
+//     inference. Lane 0 is the rightmost (curb) lane, so the spec is applied
+//     reversed: osmSpec[len-1] describes lane 0.
 //
 // Returns one []EdgeID per lane (same order as incoming.Lanes).
 func assignAllowedTurnsForEdge(
@@ -133,7 +139,11 @@ func assignAllowedTurnsForEdge(
 	// Decide per-lane categories: OSM if usable, else geometric.
 	var perLane [][]network.TurnCategory
 	if len(osmSpec) == numLanes {
-		perLane = osmSpec
+		// OSM lists lanes left→right; our lane 0 is the rightmost.
+		perLane = make([][]network.TurnCategory, numLanes)
+		for i := range perLane {
+			perLane[i] = osmSpec[numLanes-1-i]
+		}
 	} else {
 		var presentList []network.TurnCategory
 		for c := range categoriesPresent {

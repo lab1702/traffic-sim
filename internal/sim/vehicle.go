@@ -33,9 +33,9 @@ type Vehicle struct {
 	StuckTime float64
 
 	// StoppedSinceSec is the sim-time at which this vehicle came to a
-	// complete stop at its current approach's stop line. Zero means
-	// "not currently stopped at a stop line." Reset to zero when the
-	// vehicle transitions to a new edge.
+	// complete stop at the stop line at the end of its current edge. Zero
+	// means "not stopped at a stop line." Reset when the vehicle crosses
+	// that line. Per-line state: see linesAhead.
 	StoppedSinceSec float64
 
 	// SpeedFactor is a per-driver multiplier on the edge speed limit,
@@ -54,12 +54,13 @@ type Vehicle struct {
 
 	// WaitTime accumulates sim-seconds during which the vehicle is
 	// effectively stopped (V < stuckSpeedThresh) AND yielding via
-	// gap-acceptance (mustYield or mustYieldLT). Monotonic within an
-	// approach edge — the ONLY reset point is the edge transition in
-	// stepIDM. This is intentional: once impatience accepts the gap,
-	// WaitTime stays high so effectiveGap stays low, committing the
-	// vehicle to crossing. Resetting on movement would cause a
-	// flip-flop oscillation at the line. Does NOT apply to red lights.
+	// gap-acceptance at the line at the end of its current edge, while on
+	// that edge or at the line itself. Monotonic until the vehicle crosses
+	// that line (stepIDM) — intentionally: once impatience accepts the gap,
+	// WaitTime stays high so criticalGap stays low, committing the vehicle
+	// to crossing. Resetting on movement would cause a flip-flop
+	// oscillation at the line. Does NOT apply to red lights. Per-line
+	// state: see linesAhead.
 	WaitTime float64
 
 	// LastLCDir records the direction of the most recent lane change in
@@ -84,6 +85,28 @@ type Vehicle struct {
 	// attempt (or spawn). Gates re-routing to at most once per
 	// rerouteCooldownSec so a vehicle doesn't recompute on every short edge.
 	LastRerouteSec float64
+
+	// YellowCall is the stop-or-go decision this vehicle made for the yellow
+	// light at the end of its current edge (yellowGo / yellowStop), or
+	// yellowUndecided. Cleared on green and when the vehicle crosses that
+	// line. See World.redAt. Per-line state: see linesAhead.
+	YellowCall int8
+
+	// heldBy is 1 + the route index of the line that held the vehicle (a
+	// stopped virtual leader) last tick, or 0 when none did. The next tick's
+	// arrivals and detector scan read it, before anyone moves: a vehicle
+	// held by a line does not reach beyond it. (int32, beside YellowCall,
+	// to sit in padding: Vehicle is copied every tick.)
+	heldBy int32
+
+	// linesAhead holds the same per-line state (dwell, wait, yellow call)
+	// for stop lines beyond the current edge, sorted by route index. The
+	// lookahead lets a vehicle stop, dwell or decide on a yellow for a line
+	// beyond a short edge while still on the edge before it, and two lines
+	// can be closer together than a stopping gap, so every line keeps its
+	// own state. When the vehicle reaches the edge a memo's line ends, the
+	// memo moves into the three fields above (see lineAt / setLineAt).
+	linesAhead []lineMemo
 
 	Despawned bool
 }
@@ -135,10 +158,12 @@ func stepIDM(v *Vehicle, v0 float64, leaderS float64, leaderV float64, hasLeader
 		v.Edge = v.Route[v.RouteIdx]
 		edge = &net.Edges[v.Edge]
 
-		// Clear any mandatory-stop arrival timestamp and accumulated
-		// impatience now that we've left the prior approach.
-		v.StoppedSinceSec = 0
-		v.WaitTime = 0
+		// We've crossed the line at the end of the previous edge: clear its
+		// mandatory-stop timestamp, impatience and yellow decision, and take
+		// up any state already gathered for the line ahead (a car that
+		// stopped for it short of this node mustn't stop again).
+		v.StoppedSinceSec, v.WaitTime, v.YellowCall = 0, 0, yellowUndecided
+		v.promoteLine()
 
 		// Lane carry-over: pick the new lane based on the just-completed
 		// turn. This is both the normal post-turn carry-over AND the snap
@@ -204,4 +229,132 @@ func postTurnLane(prevLane uint8, cat network.TurnCategory, nLanes uint8) uint8 
 	default: // TurnUTurn or unclassified
 		return 0
 	}
+}
+
+// lineState is a vehicle's memory of one stop line: when it stopped there
+// (StoppedSinceSec), how long it has waited to cross (WaitTime) and its
+// yellow decision (YellowCall).
+type lineState struct {
+	stoppedSince, wait float64
+	call               int8
+}
+
+func (s lineState) empty() bool {
+	return s.stoppedSince == 0 && s.wait == 0 && s.call == yellowUndecided
+}
+
+// lineMemo is the lineState of the line at the end of Route[idx], a line
+// beyond the current edge. edge records Route[idx] so a reroute that changes
+// the route there drops the memo.
+type lineMemo struct {
+	idx  int
+	edge network.EdgeID
+	lineState
+}
+
+// lineAt returns the vehicle's state for the line at the end of route index
+// j: the StoppedSinceSec/WaitTime/YellowCall fields for its current edge, a
+// memo for a line ahead, or empty state.
+func (v *Vehicle) lineAt(j int) lineState {
+	if j == v.RouteIdx {
+		return lineState{v.StoppedSinceSec, v.WaitTime, v.YellowCall}
+	}
+	for i := range v.linesAhead {
+		if m := &v.linesAhead[i]; m.idx == j {
+			if j < len(v.Route) && v.Route[j] == m.edge {
+				return m.lineState
+			}
+			break
+		}
+	}
+	return lineState{}
+}
+
+// setLineAt stores the state for the line at the end of route index j.
+// Lines behind the vehicle are ignored; empty state for a line ahead drops
+// its memo.
+func (v *Vehicle) setLineAt(j int, s lineState) {
+	if j == v.RouteIdx {
+		v.StoppedSinceSec, v.WaitTime, v.YellowCall = s.stoppedSince, s.wait, s.call
+		return
+	}
+	if j < v.RouteIdx || j >= len(v.Route) {
+		return
+	}
+	k := 0
+	for k < len(v.linesAhead) && v.linesAhead[k].idx < j {
+		k++
+	}
+	if k < len(v.linesAhead) && v.linesAhead[k].idx == j {
+		if s.empty() {
+			v.linesAhead = append(v.linesAhead[:k], v.linesAhead[k+1:]...)
+		} else {
+			v.linesAhead[k] = lineMemo{idx: j, edge: v.Route[j], lineState: s}
+		}
+		return
+	}
+	if s.empty() {
+		return
+	}
+	v.linesAhead = append(v.linesAhead, lineMemo{})
+	copy(v.linesAhead[k+1:], v.linesAhead[k:])
+	v.linesAhead[k] = lineMemo{idx: j, edge: v.Route[j], lineState: s}
+}
+
+// clusterStop returns the vehicle's all-way-stop FIFO time for the line at
+// the end of route index j: the earliest StoppedSinceSec among that line and
+// the lines before it the vehicle has stopped at but not crossed, or 0. A
+// stop at an earlier line survives only while the vehicle is still short of
+// it, which happens only when line j lies within a stopping gap beyond it,
+// so those lines form one junction and the vehicle's turn is its arrival at
+// the first of them.
+func (v *Vehicle) clusterStop(j int) float64 {
+	t := 0.0
+	take := func(s float64) {
+		if s != 0 && (t == 0 || s < t) {
+			t = s
+		}
+	}
+	if j >= v.RouteIdx {
+		take(v.StoppedSinceSec)
+	}
+	for i := range v.linesAhead {
+		m := &v.linesAhead[i]
+		if m.idx > j {
+			break
+		}
+		if m.idx < len(v.Route) && v.Route[m.idx] == m.edge {
+			take(m.stoppedSince)
+		}
+	}
+	return t
+}
+
+// promoteLine runs after an edge transition: it drops memos for lines now
+// behind the vehicle and moves the memo for the new current edge's line, if
+// any, into the StoppedSinceSec/WaitTime/YellowCall fields.
+func (v *Vehicle) promoteLine() {
+	n := 0
+	for n < len(v.linesAhead) && v.linesAhead[n].idx < v.RouteIdx {
+		n++
+	}
+	if n < len(v.linesAhead) && v.linesAhead[n].idx == v.RouteIdx {
+		if m := v.linesAhead[n]; m.edge == v.Edge {
+			v.StoppedSinceSec, v.WaitTime, v.YellowCall = m.stoppedSince, m.wait, m.call
+		}
+		n++
+	}
+	v.linesAhead = v.linesAhead[n:]
+}
+
+// dropStaleLines discards memos whose line is no longer on the route at the
+// same index, after a reroute replaced the route's tail.
+func (v *Vehicle) dropStaleLines() {
+	kept := v.linesAhead[:0]
+	for _, m := range v.linesAhead {
+		if m.idx < len(v.Route) && v.Route[m.idx] == m.edge {
+			kept = append(kept, m)
+		}
+	}
+	v.linesAhead = kept
 }
