@@ -117,6 +117,11 @@ type Viewport struct {
 	// decide whether to offset vehicles to the right of the centerline.
 	edgeHasReverse []bool
 
+	// reverseEdge maps a directed edge to its two-way twin
+	// (network.ReverseEdges), the pair the sim puts one incident on, so the
+	// HUD counts such a road once.
+	reverseEdge map[network.EdgeID]network.EdgeID
+
 	// edgeDrawOrder lists edge indices in the order they should be
 	// painted: low-priority classes (service, residential) first, then
 	// arterials on top so they remain visible where they cross local
@@ -172,6 +177,7 @@ func NewViewport(net *network.Network, buf *snapshot.Buffer, w, h int) *Viewport
 	return &Viewport{
 		Net: net, Buf: buf, Width: w, Height: h,
 		edgeHasReverse: computeReverseEdgeMap(net),
+		reverseEdge:    network.ReverseEdges(net),
 		edgeDrawOrder:  computeEdgeDrawOrder(net),
 		camX:           cx, camY: cy, zoom: z,
 	}
@@ -209,6 +215,27 @@ func computeReverseEdgeMap(net *network.Network) []bool {
 		}
 	}
 	return out
+}
+
+// incidentRoadCount counts the roads with an active incident. The sim sets an
+// incident on both directed edges of a two-way road (applyIncident) and the
+// snapshot lists each, so a twin whose partner is also listed counts once;
+// counting snapshot entries showed 2 for one closed street.
+func incidentRoadCount(incs []snapshot.IncidentView, rev map[network.EdgeID]network.EdgeID) int {
+	on := make(map[uint32]bool, len(incs))
+	for _, inc := range incs {
+		if inc.Severity != snapshot.SevNone {
+			on[inc.EdgeID] = true
+		}
+	}
+	n := 0
+	for eid := range on {
+		if twin, ok := rev[network.EdgeID(eid)]; ok && uint32(twin) < eid && on[uint32(twin)] {
+			continue // counted with its lower-ID twin
+		}
+		n++
+	}
+	return n
 }
 
 // World->screen transformation. Y is flipped (world y up, screen y down).
@@ -568,7 +595,7 @@ func (v *Viewport) Draw(screen *ebiten.Image) {
 	viewWidthM := float64(v.Width) / v.zoom
 	viewHeightM := float64(v.Height) / v.zoom
 	stats := computeSpeedStats(snap.Vehicles)
-	DrawHUD(screen, snap.SimTime, len(snap.Vehicles), len(snap.Incidents), viewWidthM, viewHeightM, stats)
+	DrawHUD(screen, snap.SimTime, len(snap.Vehicles), incidentRoadCount(snap.Incidents, v.reverseEdge), viewWidthM, viewHeightM, stats)
 	DrawIncidentLegend(screen, v.Height)
 	if v.hasSelection {
 		// HUD lines start at y=8; selection panel starts just below them.

@@ -29,7 +29,8 @@ import (
 //     direction= — only when neither stop=all nor stop=minor is present
 //     (those qualifiers already say which approaches the sign governs).
 //  4. highway=stop / highway=give_way on an interior node of the approach
-//     (the stop-line position); never weakens an AllWayStop.
+//     (the stop-line position), for the direction it faces (direction=, or
+//     else the nearer junction); never weakens an AllWayStop.
 //
 // edgeSpan[i] holds the positions of edge i's From and To nodes in its OSM
 // way's node list (see Build).
@@ -63,6 +64,16 @@ func resolveControls(
 
 	// Edge-only network so the fallback can measure turn angles.
 	geomNet := &network.Network{Edges: edges}
+
+	// isJunction marks the nodes whose approaches get right-of-way controls
+	// (the ones the loop below does not skip as way-joins). An interior sign
+	// between two of them belongs to one; see interiorSignFor.
+	isJunction := make(map[network.NodeID]bool, len(xs))
+	for i := range xs {
+		if x := &xs[i]; x.HasSignal || distinctNeighbors(x, edges) >= 3 {
+			isJunction[x.NodeID] = true
+		}
+	}
 
 	for i := range xs {
 		x := &xs[i]
@@ -103,7 +114,7 @@ func resolveControls(
 		if !applyStopAllOrMinor(x, nodeTags, classOfEdge) {
 			applyNodeLevelSign(x, nodeTags, edgeSpan)
 		}
-		applyInteriorNodeSign(x, wayByID, osmWayOfEdge, edgeSpan, feat.Nodes)
+		applyInteriorNodeSign(x, wayByID, osmWayOfEdge, edgeSpan, feat.Nodes, edges, isJunction)
 	}
 }
 
@@ -421,19 +432,22 @@ func approachDirectionOnWay(eid network.EdgeID, edgeSpan [][2]int) string {
 //
 // Runs last in the resolution chain so interior tags win over
 // intersection-node tags when both apply to the same approach. Skips
-// approaches already promoted to ControlAllWayStop.
+// approaches already promoted to ControlAllWayStop. isJunction marks the
+// nodes that get controls (see resolveControls).
 func applyInteriorNodeSign(
 	x *network.Intersection,
 	wayByID map[osm.WayID]*osm.Way,
 	osmWayOfEdge []osm.WayID,
 	edgeSpan [][2]int,
 	nodeByID map[osm.NodeID]*osm.Node,
+	edges []network.Edge,
+	isJunction map[network.NodeID]bool,
 ) {
 	for j, eid := range x.Incoming {
 		if x.IncomingControl[j] == network.ControlAllWayStop {
 			continue
 		}
-		sign := interiorSignFor(eid, wayByID, osmWayOfEdge, edgeSpan, nodeByID)
+		sign := interiorSignFor(eid, wayByID, osmWayOfEdge, edgeSpan, nodeByID, edges, isJunction)
 		if sign != network.ControlNone {
 			x.IncomingControl[j] = sign
 		}
@@ -442,19 +456,33 @@ func applyInteriorNodeSign(
 
 // interiorSignFor walks the underlying OSM way's node sequence between
 // (exclusive) the approach edge's From node and the intersection (its To
-// node), looking for the closest sign-tagged interior shaping node. Returns
-// ControlStop for highway=stop, ControlYield for highway=give_way, or
-// ControlNone if no sign-tagged interior node exists. The walk starts at the
-// intersection and steps toward the From node so the FIRST tag encountered
-// is the one closest to X (the stop-line position). The two positions come
-// from edgeSpan: searching the way for them walked the wrong part of a
-// closed way for the segment that closes the ring.
+// node), looking for the closest sign-tagged interior shaping node that
+// faces this approach. Returns ControlStop for highway=stop, ControlYield
+// for highway=give_way, or ControlNone if there is none. The walk starts at
+// the intersection and steps toward the From node so the FIRST tag
+// encountered is the one closest to X (the stop-line position). The two
+// positions come from edgeSpan: searching the way for them walked the wrong
+// part of a closed way for the segment that closes the ring.
+//
+// The segment is also the other direction's approach to the From node, so a
+// sign is for this approach only when it faces it:
+//   - direction=forward / direction=backward on the sign node: the approach's
+//     direction on the way (approachDirectionOnWay) must match;
+//   - no direction tag: the sign belongs to the nearer junction, so it is
+//     skipped when the From node is a junction too (isJunction) and the sign
+//     lies nearer to it. A sign half way between counts for both.
+//
+// Taking every sign for both directions stopped the far junction's approach
+// as well: a stop sign mapped just before one junction stopped the main road
+// at the other end of the block.
 func interiorSignFor(
 	eid network.EdgeID,
 	wayByID map[osm.WayID]*osm.Way,
 	osmWayOfEdge []osm.WayID,
 	edgeSpan [][2]int,
 	nodeByID map[osm.NodeID]*osm.Node,
+	edges []network.Edge,
+	isJunction map[network.NodeID]bool,
 ) network.Control {
 	if int(eid) >= len(osmWayOfEdge) || int(eid) >= len(edgeSpan) {
 		return network.ControlNone
@@ -471,22 +499,69 @@ func interiorSignFor(
 	if fromIdx > xIdx {
 		step = 1
 	}
-	for i := xIdx + step; i != fromIdx; i += step {
-		n := way.Nodes[i]
-		node, ok := nodeByID[n.ID]
-		if !ok || node == nil {
-			continue
-		}
-		for _, t := range node.Tags {
-			if t.Key == "highway" && t.Value == "stop" {
-				return network.ControlStop
-			}
-			if t.Key == "highway" && t.Value == "give_way" {
-				return network.ControlYield
+	dir := approachDirectionOnWay(eid, edgeSpan)
+	// along[k] is the distance along the approach from its From node to the
+	// k-th way node after it. Built only when the From node is a junction a
+	// direction-less sign could belong to instead, and the edge geometry has
+	// one point per way node (it always does when Build made it).
+	var along []float64
+	if int(eid) < len(edges) && isJunction[edges[eid].From] {
+		if g := edges[eid].Geometry; len(g) == absInt(xIdx-fromIdx)+1 {
+			along = make([]float64, len(g))
+			for k := 1; k < len(g); k++ {
+				along[k] = along[k-1] + math.Hypot(g[k].X-g[k-1].X, g[k].Y-g[k-1].Y)
 			}
 		}
 	}
+	for i := xIdx + step; i != fromIdx; i += step {
+		node, ok := nodeByID[way.Nodes[i].ID]
+		if !ok || node == nil {
+			continue
+		}
+		sign, signDir := nodeSign(node.Tags)
+		if sign == network.ControlNone {
+			continue
+		}
+		if signDir != "" {
+			if signDir != dir {
+				continue // faces the other direction
+			}
+			return sign
+		}
+		if along != nil {
+			k := absInt(i - fromIdx) // geometry index of way position i
+			if toFrom, toX := along[k], along[len(along)-1]-along[k]; toFrom < toX {
+				continue // nearer the junction at the From end: its sign
+			}
+		}
+		return sign
+	}
 	return network.ControlNone
+}
+
+func absInt(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
+// nodeSign returns the control a sign node carries (ControlStop for
+// highway=stop, ControlYield for highway=give_way, else ControlNone) and its
+// direction= tag when that is "forward" or "backward" (else "").
+func nodeSign(tags osm.Tags) (network.Control, string) {
+	sign, dir := network.ControlNone, ""
+	for _, t := range tags {
+		switch {
+		case t.Key == "highway" && t.Value == "stop" && sign == network.ControlNone:
+			sign = network.ControlStop
+		case t.Key == "highway" && t.Value == "give_way" && sign == network.ControlNone:
+			sign = network.ControlYield
+		case t.Key == "direction" && (t.Value == "forward" || t.Value == "backward"):
+			dir = t.Value
+		}
+	}
+	return sign, dir
 }
 
 // applyStopAllOrMinor overrides class-fallback with explicit OSM tags

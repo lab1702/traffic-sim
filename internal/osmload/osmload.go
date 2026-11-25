@@ -16,7 +16,8 @@ import (
 	"github.com/paulmach/osm/osmxml"
 )
 
-// Features is what netbuild consumes. Only highway-tagged ways are kept;
+// Features is what netbuild consumes. Only drivable highway ways open to
+// motor cars are kept (isHighway);
 // nodes are kept if referenced by a kept way OR tagged with traffic_signals.
 // Restrictions holds OSM `type=restriction` relations (turn restrictions);
 // netbuild resolves them into Intersection.BannedTurns entries.
@@ -98,13 +99,47 @@ func collect(s scanner) (*Features, error) {
 	return feat, nil
 }
 
+// isHighway reports whether a way is a road cars may drive: a drivable
+// highway= class (drivableHighway), not mapped as an area (area=yes: the
+// outline of a square or yard, which would build as a loop road), and open
+// to motor cars (motorAccess).
 func isHighway(w *osm.Way) bool {
+	drivable := false
 	for _, t := range w.Tags {
 		if t.Key == "highway" && drivableHighway(t.Value) {
-			return true
+			drivable = true
 		}
 	}
-	return false
+	return drivable && !hasTag(w.Tags, "area", "yes") && motorAccess(w.Tags)
+}
+
+// motorAccessKeys lists the OSM access keys that govern motor cars, most
+// specific first: the first one a way carries decides.
+var motorAccessKeys = []string{"motorcar", "motor_vehicle", "vehicle", "access"}
+
+// noMotorAccess holds the access values that shut a road to ordinary cars.
+// private, destination and the like still let cars in, so they are kept.
+var noMotorAccess = map[string]bool{
+	"no":                    true,
+	"agricultural":          true,
+	"forestry":              true,
+	"agricultural;forestry": true,
+	"forestry;agricultural": true,
+}
+
+// motorAccess reports whether motor cars may use a way, by its most specific
+// access key (motorAccessKeys): access=no with motor_vehicle=yes is open,
+// motor_vehicle=no on a pedestrianised street or a bus gate's access=no is
+// closed. Conditional access (*:conditional) is ignored.
+func motorAccess(tags osm.Tags) bool {
+	for _, key := range motorAccessKeys {
+		for _, t := range tags {
+			if t.Key == key {
+				return !noMotorAccess[t.Value]
+			}
+		}
+	}
+	return true
 }
 
 // drivableHighway returns true for highway= values that carry motor traffic.

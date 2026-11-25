@@ -283,7 +283,7 @@ func Build(feat *osmload.Features) (*network.Network, Report, error) {
 	// 6c. Populate Lane.AllowedTurns per the turn-aware-lane-choice design.
 	// Done after restrictions so BannedTurns is authoritative.
 	tmpNet := &network.Network{Nodes: nodes, Edges: edges, Intersections: intersections}
-	populateAllowedTurns(tmpNet, feat, osmWayOfEdge, edgeIsForward)
+	populateAllowedTurns(tmpNet, feat, osmWayOfEdge, edgeIsForward, edgeSpan)
 
 	// 7. Build spatial grid.
 	bounds := computeBounds(nodes)
@@ -380,7 +380,11 @@ func onewayDirection(w *osm.Way) onewayDir {
 // the OSM convention:
 //
 //   - `lanes:forward` / `lanes:backward` are direction-specific overrides.
-//   - `lanes` is total across both directions (halved for two-way).
+//   - `lanes` is total across both directions (halved for two-way). When a
+//     two-way way also tags one direction, the other direction has the rest
+//     of the total, less any centre lanes both directions share
+//     (`lanes:both_ways`): lanes=4 + lanes:forward=3 is three lanes forward
+//     and one backward, not half of four.
 //
 // For one-way ways the irrelevant-direction count is the same as the
 // relevant one (callers ignore it). Falls back to `fallback` for either
@@ -389,7 +393,7 @@ func parseLanesPerDirection(w *osm.Way, fallback uint8) (uint8, uint8) {
 	dir := onewayDirection(w)
 	var fwdSpecific, bwdSpecific uint8
 	var hasFwd, hasBwd bool
-	var totalLanes int
+	var totalLanes, bothWays int
 	var hasTotal bool
 	for _, t := range w.Tags {
 		switch t.Key {
@@ -407,6 +411,10 @@ func parseLanesPerDirection(w *osm.Way, fallback uint8) (uint8, uint8) {
 			if n, err := strconv.Atoi(t.Value); err == nil && n > 0 && n < 16 {
 				bwdSpecific = uint8(n)
 				hasBwd = true
+			}
+		case "lanes:both_ways":
+			if n, err := strconv.Atoi(t.Value); err == nil && n > 0 && n < 16 {
+				bothWays = n
 			}
 		}
 	}
@@ -427,6 +435,21 @@ func parseLanesPerDirection(w *osm.Way, fallback uint8) (uint8, uint8) {
 	}
 	if hasBwd {
 		bwd = bwdSpecific
+	}
+	if dir == onewayTwoWay && hasTotal && hasFwd != hasBwd {
+		tagged := fwdSpecific
+		if hasBwd {
+			tagged = bwdSpecific
+		}
+		rest := totalLanes - bothWays - int(tagged)
+		if rest < 1 {
+			rest = 1 // inconsistent tags: keep the road two-way
+		}
+		if hasFwd {
+			bwd = uint8(rest)
+		} else {
+			fwd = uint8(rest)
+		}
 	}
 	return fwd, bwd
 }

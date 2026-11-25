@@ -218,12 +218,27 @@ func turnLanesTagForDirection(tags osm.Tags, forward bool) string {
 //
 // `edgeIsForward[i]` reports whether edge i was constructed as the forward
 // direction of its source OSM way. Two-way ways produce one forward and
-// one reverse edge.
+// one reverse edge. `edgeSpan[i]` holds the positions of edge i's From and To
+// nodes in its way (see Build).
+//
+// A way's turn:lanes describe the lane arrows at the junction where the way
+// ends (mappers split the way there), so the tag is read only for the edge
+// that ends the way in its direction of travel. Junctions the way passes
+// through on the way there get geometric inference: applying the end
+// junction's arrows at a driveway part way along locked its right lane onto
+// the driveway.
+//
+// Roundabout ring edges are left without AllowedTurns ("any lane, any
+// movement") unless their way's turn:lanes describe them: the sim's ring lane
+// policy (roundaboutTargetLane) treats AllowedTurns on a ring as the mapper's
+// lane plan, and geometric inference made one up at every exit, defeating
+// its inner-lane rule.
 func populateAllowedTurns(
 	net *network.Network,
 	feat *osmload.Features,
 	osmWayOfEdge []osm.WayID,
 	edgeIsForward []bool,
+	edgeSpan [][2]int,
 ) {
 	wayByID := make(map[osm.WayID]*osm.Way, len(feat.Ways))
 	for _, w := range feat.Ways {
@@ -240,15 +255,18 @@ func populateAllowedTurns(
 				continue
 			}
 			var spec [][]network.TurnCategory
-			if int(inc) < len(osmWayOfEdge) && int(inc) < len(edgeIsForward) {
+			if int(inc) < len(osmWayOfEdge) && int(inc) < len(edgeIsForward) && int(inc) < len(edgeSpan) {
 				wayID := osmWayOfEdge[inc]
-				if w, ok := wayByID[wayID]; ok && w != nil {
+				if w, ok := wayByID[wayID]; ok && w != nil && endsWay(edgeSpan[inc], len(w.Nodes)) {
 					forward := edgeIsForward[inc]
 					tag := turnLanesTagForDirection(w.Tags, forward)
 					if tag != "" {
 						spec = parseTurnLanesString(tag)
 					}
 				}
+			}
+			if incEdge.Roundabout && len(spec) != len(incEdge.Lanes) {
+				continue // no usable lane plan from the mapper; see above
 			}
 			allowed := assignAllowedTurnsForEdge(net, inc, x, spec)
 			for li := range incEdge.Lanes {
@@ -258,6 +276,17 @@ func populateAllowedTurns(
 			}
 		}
 	}
+}
+
+// endsWay reports whether an edge with way positions span (From, To) ends
+// where its way ends in its direction of travel: the way's last node for an
+// edge running along the way, its first node for one running against it
+// (the reverse edge of a two-way way, or a oneway=-1 way's only edge).
+func endsWay(span [2]int, wayNodes int) bool {
+	if span[0] < span[1] {
+		return span[1] == wayNodes-1
+	}
+	return span[1] == 0
 }
 
 // PruneBannedTurns brings the AllowedTurns of x's incoming lanes in line with

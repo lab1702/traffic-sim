@@ -154,7 +154,8 @@ closed both ways.
 - **Lane closed** — the curb lane is blocked; vehicles merge out of it.
 - **Fully closed** — every lane is blocked. GPS-equipped vehicles reroute around
   it (diverting promptly, even mid-approach); vehicles with no alternative — and
-  vehicles without GPS — queue at the entrance until it reopens.
+  vehicles without GPS — queue at the entrance until it reopens or the
+  stuck-vehicle timeout (60 s stopped) removes them.
 
 Incidents stay until you clear them (cycle back to `none`). The active count is
 shown in the HUD, with a color legend (bottom-left) for the overlay colors.

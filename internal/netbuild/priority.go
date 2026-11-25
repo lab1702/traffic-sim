@@ -28,7 +28,11 @@ func highwayPriority(hw string) int {
 		return 4
 	case "motorway_link", "trunk_link", "primary_link", "secondary_link", "tertiary_link":
 		return 5
-	case "unclassified":
+	case "unclassified", "road":
+		// highway=road is OSM's "unknown classification" placeholder, kept as
+		// drivable by osmload and built like unclassified (defaults, classOf).
+		// Ranking it as an unknown value made it give way even to service
+		// roads.
 		return 6
 	case "residential":
 		return 7

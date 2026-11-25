@@ -230,6 +230,11 @@ func TestAssignAllowedTurnsForEdge_OSMOrderIsLeftToRight(t *testing.T) {
 // turn:lanes:backward. Each direction's spec is listed left-to-right relative
 // to ITS OWN direction of travel, and lane 0 is the rightmost lane of each
 // edge, so both directions are reversed when copied into Lanes.
+//
+// The primary is split at the junction, as mappers tag turn lanes: a way's
+// turn:lanes apply where it ends in each direction of travel, so the
+// eastbound arrows go on the west way's forward direction and the westbound
+// ones on the east way's backward direction.
 func TestBuild_TurnLanesForwardBackward_LeftToRight(t *testing.T) {
 	feat := &osmload.Features{Nodes: map[osm.NodeID]*osm.Node{
 		1: mkNode(1, 40.0000, -74.0010), // W
@@ -238,15 +243,19 @@ func TestBuild_TurnLanesForwardBackward_LeftToRight(t *testing.T) {
 		4: mkNode(4, 39.9990, -74.0005), // S
 		5: mkNode(5, 40.0000, -74.0005), // junction
 	}}
-	ew := mkWay(10, "primary", false, 1, 5, 3) // forward = eastbound
-	ew.Tags = append(ew.Tags,
+	west := mkWay(10, "primary", false, 1, 5) // forward = eastbound, ends at 5
+	west.Tags = append(west.Tags,
 		osm.Tag{Key: "lanes", Value: "4"},
 		// Eastbound: left lane turns left (N); right lane goes through or right (S).
 		osm.Tag{Key: "turn:lanes:forward", Value: "left|through;right"},
+	)
+	east := mkWay(11, "primary", false, 5, 3) // backward = westbound, ends at 5
+	east.Tags = append(east.Tags,
+		osm.Tag{Key: "lanes", Value: "4"},
 		// Westbound: left lane turns left (S) or goes through; right lane turns right (N).
 		osm.Tag{Key: "turn:lanes:backward", Value: "left;through|right"},
 	)
-	feat.Ways = []*osm.Way{ew, mkWay(20, "primary", false, 2, 5, 4)}
+	feat.Ways = []*osm.Way{west, east, mkWay(20, "primary", false, 2, 5, 4)}
 
 	net, _, err := Build(feat)
 	if err != nil {

@@ -374,7 +374,8 @@ func laneNeighbors(idxs []int, vs []Vehicle, vi int, egoEdge network.EdgeID, ego
 // back to normal lane-change logic). Policy:
 //   - tags first: if the current ring edge's lanes constrain turns via
 //     AllowedTurns, target the nearest lane that feeds the vehicle's next
-//     route edge;
+//     route edge (netbuild sets AllowedTurns on ring edges only from
+//     turn:lanes, never by geometric inference);
 //   - otherwise heuristic by exit distance: within roundaboutWeaveLookahead
 //     segments of the exit -> outer lane 0; farther -> inner lane.
 func roundaboutTargetLane(v *Vehicle, net *network.Network) (uint8, bool) {

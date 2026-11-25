@@ -16,13 +16,16 @@ import (
 // Supported restriction values (single via=node only):
 //
 //	no_left_turn, no_right_turn, no_straight_on, no_u_turn,
-//	no_entry, no_exit                          -- bans the (from, to) pair
+//	no_entry, no_exit                          -- bans each (from, to) pair
+//	                                              (no_entry may list several
+//	                                              from ways, no_exit several to)
 //	only_left_turn, only_right_turn,
 //	only_straight_on, only_u_turn              -- bans every other outgoing edge
 //
 // Skipped silently:
 //   - relations with via=way (multi-via restrictions)
 //   - relations missing one of from/via/to roles
+//   - only_* relations with more than one from or to way (malformed)
 //   - relations whose from/to ways don't appear in the post-prune graph
 //   - conditional restrictions (we honor the plain `restriction` tag only)
 func applyOSMRestrictions(
@@ -98,24 +101,23 @@ func applyOne(
 		return false
 	}
 
-	// 2. Extract members. Reject via=way (multi-via).
-	var fromWay, toWay osm.WayID
+	// 2. Extract members. Reject via=way (multi-via). no_entry may list
+	// several from ways and no_exit several to ways, so keep them all.
+	var fromWays, toWays []osm.WayID
 	var viaNode osm.NodeID
-	haveFrom, haveTo, haveVia := false, false, false
+	haveVia := false
 	for _, m := range r.Members {
 		switch m.Role {
 		case "from":
 			if m.Type != osm.TypeWay {
 				return false
 			}
-			fromWay = osm.WayID(m.Ref)
-			haveFrom = true
+			fromWays = append(fromWays, osm.WayID(m.Ref))
 		case "to":
 			if m.Type != osm.TypeWay {
 				return false
 			}
-			toWay = osm.WayID(m.Ref)
-			haveTo = true
+			toWays = append(toWays, osm.WayID(m.Ref))
 		case "via":
 			if m.Type != osm.TypeNode {
 				return false // skip via=way for now
@@ -124,8 +126,17 @@ func applyOne(
 			haveVia = true
 		}
 	}
-	if !haveFrom || !haveTo || !haveVia {
+	if len(fromWays) == 0 || len(toWays) == 0 || !haveVia {
 		return false
+	}
+	only := strings.HasPrefix(rv, "only_")
+	if !only && !strings.HasPrefix(rv, "no_") {
+		slog.Debug("unknown restriction value; skipping",
+			"relation_id", int64(r.ID), "value", rv)
+		return false
+	}
+	if only && (len(fromWays) > 1 || len(toWays) > 1) {
+		return false // an only_* names one movement; several from/to is malformed
 	}
 
 	// 3. Translate via node to internal NodeID.
@@ -138,29 +149,23 @@ func applyOne(
 		return false // via node isn't an intersection in our graph
 	}
 
-	// 4. Find the from edge: belongs to fromWay AND ends at viaNet.
+	// 4. Find each from edge: belongs to a from way AND ends at viaNet.
 	//    For through-ways (way passes through via), multiple candidates match;
 	//    prefer the one in the way's forward direction.
-	fromEdge, ok := pickEdgeAt(wayToEdges[fromWay], edges, edgeSpan, viaNet, true /*ends-at*/,
-		wayByID[fromWay], viaNode, osmNodeOf)
-	if !ok {
-		return false
+	//    5. Find each to edge: belongs to a to way AND starts at viaNet.
+	pick := func(way osm.WayID, endsAt bool) (network.EdgeID, bool) {
+		return pickEdgeAt(wayToEdges[way], edges, edgeSpan, viaNet, endsAt,
+			wayByID[way], viaNode, osmNodeOf)
 	}
-	// 5. Find the to edge: belongs to toWay AND starts at viaNet.
-	toEdge, ok := pickEdgeAt(wayToEdges[toWay], edges, edgeSpan, viaNet, false /*starts-at*/,
-		wayByID[toWay], viaNode, osmNodeOf)
-	if !ok {
-		return false
-	}
-
-	switch {
-	case strings.HasPrefix(rv, "no_"):
-		// Single ban.
-		x.BannedTurns = append(x.BannedTurns, network.TurnRestriction{
-			From: fromEdge, To: toEdge,
-		})
-		return true
-	case strings.HasPrefix(rv, "only_"):
+	if only {
+		fromEdge, ok := pick(fromWays[0], true /*ends-at*/)
+		if !ok {
+			return false
+		}
+		toEdge, ok := pick(toWays[0], false /*starts-at*/)
+		if !ok {
+			return false
+		}
 		// Ban every outgoing edge that isn't `toEdge`.
 		added := 0
 		for _, o := range x.Outgoing {
@@ -180,11 +185,29 @@ func applyOne(
 			return false
 		}
 		return added > 0
-	default:
-		slog.Debug("unknown restriction value; skipping",
-			"relation_id", int64(r.ID), "value", rv)
-		return false
 	}
+
+	// no_*: ban every (from, to) pair the relation names. Taking only the
+	// last from or to member left all but one movement of a no_entry or
+	// no_exit unbanned, while the relation still counted as applied.
+	applied := false
+	for _, fw := range fromWays {
+		fromEdge, ok := pick(fw, true /*ends-at*/)
+		if !ok {
+			continue
+		}
+		for _, tw := range toWays {
+			toEdge, ok := pick(tw, false /*starts-at*/)
+			if !ok {
+				continue
+			}
+			x.BannedTurns = append(x.BannedTurns, network.TurnRestriction{
+				From: fromEdge, To: toEdge,
+			})
+			applied = true
+		}
+	}
+	return applied
 }
 
 // pickEdgeAt returns the edge in `candidates` whose To (if endsAt is true)
